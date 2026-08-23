@@ -680,6 +680,7 @@ GET ${addr}/api/status?token=${token}
 - Main window closed => HTTP 503.
 - Token invalid/expired => HTTP 401.
 - Timeout at least 120 seconds.
+- If the task creates/saves/renames/moves/exports/modifies a file, the final reply must include the absolute filePath.
 `
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {

@@ -486,7 +486,7 @@
       <div v-if="backgroundRunning" class="bg-task-bar">
         <span class="bg-task-spinner"></span>
         <span class="bg-task-text">
-          正在处理{{ backgroundRunning === 'feishu' ? '飞书' : backgroundRunning === 'wechat' ? '微信' : '定时任务' }}消息...
+          正在处理{{ backgroundSourceLabel }}消息...
         </span>
         <span class="bg-task-hint">（发送消息将中断后台任务）</span>
       </div>
@@ -830,6 +830,10 @@ const activePlan = computed(() => {
 })
 // 后台任务运行状态：'feishu'|'wechat'|'task'|null（不影响主界面发送按钮，但会显示提示）
 const backgroundRunning = ref(null)
+const backgroundSourceLabel = computed(() => {
+  const map = { feishu: '飞书', wechat: '微信', task: '定时任务', agent: '外部 Agent' }
+  return map[backgroundRunning.value] || '外部 Agent'
+})
 // 信任模式：开启后所有危险操作跳过弹窗确认，直接执行
 const trustMode = ref(isTrustMode())
 const toggleTrustMode = () => {
@@ -2196,6 +2200,7 @@ const SYSTEM_PROMPT = `You are an AI assistant for a mind-map editor (.smm files
 - merge_mindmap_files reads the source .smm in the background and does NOT require opening the source file first. rename_mindmap_file renames the current file in place; do not use save_mindmap for renaming. To list a folder, use list_directory (not keyword enumeration).
 - MCP: use list_mcp_servers → list_mcp_tools(serverId) → mcp_call_tool(serverId, toolName, arguments) for external capabilities configured in Settings.
 - Skills: use list_skills/get_skill to load saved workflows; create_skill when a successful workflow or a known pitfall should be reused later. Only create/update a skill after the workflow has actually succeeded.
+- If any tool generates, saves, renames, moves, exports, or otherwise modifies a file, ALWAYS include the returned absolute filePath in your final reply.
 - Simple request → act directly. Verify results; on failure retry (≤2) or split steps. Report briefly.
 
 ## MESSAGES
@@ -2589,7 +2594,7 @@ const sendMessage = async (overrideText = null) => {
     const bgSource = backgroundRunning.value
     aiService.abort()
     backgroundRunning.value = null
-    ElMessage.info(`已中止${bgSource === 'feishu' ? '飞书' : bgSource === 'wechat' ? '微信' : '定时任务'}消息处理，优先响应你的操作`)
+    ElMessage.info(`已中止${backgroundSourceLabel.value}消息处理，优先响应你的操作`)
   }
 
   // AI 续写提问等待中：输入内容作为提问的回答，不发送给 AI（内部哨兵值不拦截）
@@ -4918,7 +4923,7 @@ const processExternalMessage = async (text, source = 'task', extLogger = null) =
   }
   // 已经有后台任务在运行：拒绝新的后台任务（单实例限制）
   if (backgroundRunning.value) {
-    return `AI 正在处理${backgroundRunning.value === 'feishu' ? '飞书' : backgroundRunning.value === 'wechat' ? '微信' : '定时任务'}消息，请稍后再试`
+    return `AI 正在处理${backgroundSourceLabel.value}消息，请稍后再试`
   }
 
   // 写入该端自己的会话（共享store，SettingsView中内嵌面板也会显示）

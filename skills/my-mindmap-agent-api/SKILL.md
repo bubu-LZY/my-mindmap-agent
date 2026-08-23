@@ -162,6 +162,7 @@ console.log(await response.json())
 - Do not retry immediately on `401`; ask the user for a new Token.
 - On `503`, tell the user to open the local main program and enable 本地 HTTP 服务.
 - The response `reply` is the final answer from my-mindmap agent.
+- If the task creates, saves, renames, moves, exports, or modifies a file, the local agent must include the absolute `filePath` in `reply`. Extract and report that path to the user.
 - Do not call this API to control the local mouse/keyboard; use it only for agent-level tasks.
 
 ## What to tell the user

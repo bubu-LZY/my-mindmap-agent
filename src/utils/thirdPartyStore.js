@@ -6,7 +6,8 @@ export const MAX_CHANNEL_HISTORY = 60
 export const thirdPartyChannels = reactive({
   wechat: { label: '微信端', messages: [], unread: 0 },
   feishu: { label: '飞书端', messages: [], unread: 0 },
-  task: { label: '定时端', messages: [], unread: 0 }
+  task: { label: '定时端', messages: [], unread: 0 },
+  agent: { label: '外部 Agent', messages: [], unread: 0 }
 })
 
 export const getThirdPartyChannel = (source) => thirdPartyChannels[source] || thirdPartyChannels.task
