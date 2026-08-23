@@ -1201,15 +1201,31 @@ const initMindMap = () => {
   if (svgEl) {
     // window 级平移：拖动中鼠标移出画布也不中断
     let canvasPanning = null // { lastX, lastY }
+    let canvasPanMoveHandler = null
+    let canvasPanUpHandler = null
+    const stopCanvasPan = () => {
+      canvasPanning = null
+      canvasPanActive = false
+      rightMouseDownPos = null
+      if (canvasPanMoveHandler) {
+        window.removeEventListener('mousemove', canvasPanMoveHandler, true)
+        canvasPanMoveHandler = null
+      }
+      if (canvasPanUpHandler) {
+        window.removeEventListener('mouseup', canvasPanUpHandler, true)
+        canvasPanUpHandler = null
+      }
+      if (previewVisible.value) schedulePreviewHide(400)
+    }
     const startCanvasPan = (x, y) => {
-      if (canvasPanning) return
+      if (canvasPanning) stopCanvasPan()
       canvasPanning = { lastX: x, lastY: y }
       canvasPanActive = true
       clearPreviewHideTimer() // 画布平移期间预览保持显示
-      const onPanMove = (ev) => {
+      canvasPanMoveHandler = (ev) => {
         if (!canvasPanning) return
         // 防御：mousemove 时已无任何按键按下（mouseup 被吞或窗口外释放），立即结束平移
-        if (ev.buttons === 0 && ev.which === 0) { onPanUp(); return }
+        if (ev.buttons === 0 && ev.which === 0) { stopCanvasPan(); return }
         const dx = ev.clientX - canvasPanning.lastX
         const dy = ev.clientY - canvasPanning.lastY
         canvasPanning.lastX = ev.clientX
@@ -1218,21 +1234,14 @@ const initMindMap = () => {
           try { mindMap.view.translateXY(dx, dy) } catch (err) {}
         }
       }
-      const onPanUp = () => {
-        canvasPanning = null
-        canvasPanActive = false
-        rightMouseDownPos = null
-        window.removeEventListener('mousemove', onPanMove, true)
-        window.removeEventListener('mouseup', onPanUp, true)
-        // 平移结束：若鼠标不在预览相关区域，按统一规则延时隐藏
-        if (previewVisible.value) schedulePreviewHide(400)
-      }
+      canvasPanUpHandler = () => stopCanvasPan()
       // capture 阶段监听：库在非根节点的 mouseup 上会 stopPropagation（非中键一律吞掉），
       // 冒泡阶段的 window 监听收不到 mouseup，导致平移状态卡死、画布持续跟随鼠标；
       // capture 在目标元素处理器之前触发，不受 stopPropagation 影响
-      window.addEventListener('mousemove', onPanMove, true)
-      window.addEventListener('mouseup', onPanUp, true)
+      window.addEventListener('mousemove', canvasPanMoveHandler, true)
+      window.addEventListener('mouseup', canvasPanUpHandler, true)
     }
+    window.addEventListener('blur', stopCanvasPan)
 
     // capture 阶段监听：必须先于库的节点 mousedown 处理器执行，
     // 否则多选在快照前就被库清空，右键菜单退化为单节点

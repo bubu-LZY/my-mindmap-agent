@@ -154,6 +154,18 @@ const isMainWindowAvailable = (win) => {
   return !!(win && !win.isDestroyed() && win.isVisible() && !win.isMinimized())
 }
 
+const openMainWindowForRemote = (win) => {
+  if (!win || win.isDestroyed()) return false
+  try {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
 const sendStateToAll = (state) => {
   const payload = JSON.stringify({ type: 'state', state })
   for (const ws of clients) {
@@ -438,6 +450,9 @@ const handleUpgrade = (req, socket, head) => {
         try {
           ws.send(JSON.stringify({ type: 'quality', quality: message.quality }))
         } catch (e) {}
+      } else if (message && message.type === 'reconnect') {
+        openMainWindowForRemote(getMainWindow())
+        requestImmediateFrame()
       }
     })
 
@@ -632,6 +647,7 @@ const REMOTE_PAGE = `<!DOCTYPE html>
   var statusEl = document.getElementById('status');
   var closedOverlay = document.getElementById('closedOverlay');
   var qualitySelect = document.getElementById('qualitySelect');
+  var pendingReconnect = false;
 
   var setStatus = function (text) { statusEl.textContent = text; };
 
@@ -662,7 +678,13 @@ const REMOTE_PAGE = `<!DOCTYPE html>
     if (ws) { try { ws.close(); } catch (e) {} }
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + encodeURIComponent(token));
-    ws.onopen = function () { setStatus('已连接'); };
+    ws.onopen = function () {
+      setStatus('已连接');
+      if (pendingReconnect) {
+        pendingReconnect = false;
+        ws.send(JSON.stringify({ type: 'reconnect' }));
+      }
+    };
     ws.onmessage = function (e) {
       try {
         var msg = JSON.parse(e.data);
@@ -722,7 +744,12 @@ const REMOTE_PAGE = `<!DOCTYPE html>
   document.getElementById('reconnectBtn').addEventListener('click', function () {
     closedOverlay.style.display = 'none';
     setStatus('正在重连...');
-    connect();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'reconnect' }));
+    } else {
+      pendingReconnect = true;
+      connect();
+    }
   });
 
   var pointForEvent = function (e) {
