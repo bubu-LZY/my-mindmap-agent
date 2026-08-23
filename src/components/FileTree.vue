@@ -697,6 +697,15 @@ const showRecentFolder = (filePath) => {
 
 const copyFile = async (data) => {
   if (!data || data.isDir) return
+  try {
+    await ElMessageBox.confirm(
+      `确定创建副本「${data.name}」吗？`,
+      '创建副本',
+      { confirmButtonText: '创建', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
   const sep = data.path.includes('\\') ? '\\' : '/'
   const dir = data.path.substring(0, data.path.lastIndexOf(sep))
   const rawName = data.name || data.path.split(/[\\/]/).pop() || '未命名'
@@ -732,7 +741,7 @@ const onNodeDragStart = (e, data) => {
   }
   e.dataTransfer.setData('application/x-mindmap-file', data.path || '')
   e.dataTransfer.setData('text/plain', data.path || '')
-  e.dataTransfer.effectAllowed = 'copy'
+  e.dataTransfer.effectAllowed = 'copyMove'
 }
 
 const onNodeDragOver = (e, data) => {
@@ -1352,7 +1361,7 @@ watch(() => props.currentFilePath, (newPath) => {
 .node-actions {
   display: none;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
   flex-shrink: 0;
 }
 
@@ -1364,8 +1373,8 @@ watch(() => props.currentFilePath, (newPath) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border-radius: 4px;
   cursor: pointer;
   font-size: 12px;

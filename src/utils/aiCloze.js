@@ -40,9 +40,11 @@ const extractNodesFromList = (nodeList) => {
         (typeof node.getData === 'function' ? node.getData('text') : node.text) || ''
       )
       if (!text.trim()) return null
+      const level = levelMap[node.uid] !== undefined ? levelMap[node.uid] : 1
+      if (isHeadingLike(text, level)) return null
       return {
         uid: node.uid,
-        level: levelMap[node.uid] !== undefined ? levelMap[node.uid] : 1,
+        level,
         text: text.trim()
       }
     })
@@ -64,6 +66,7 @@ const buildSmartSystemPrompt = () => {
 4. 挖空的文本必须与节点原文完全匹配，包括标点符号
 5. 跳过文本过短（少于 2 个字）的节点
 6. 同一个关键词在同一个节点中只出现一次
+7. 章节名、目录名、概括性大标题（如“第一章”“第一节”“导论”“目录”“知识框架”）不挖空
 
 ## 保留可推测性规则（最重要）
 1. "标签：值"格式，只挖空"值"部分，保留"标签"作为提示
@@ -101,6 +104,7 @@ const buildAggressiveSystemPrompt = () => {
 4. 挖空的文本必须与节点原文完全匹配
 5. 跳过文本过短（少于 2 个字）的节点
 6. 同一个关键词在同一个节点中只出现一次
+7. 章节名、目录名、概括性大标题（如“第一章”“第一节”“导论”“目录”“知识框架”）不挖空
 
 ## 激进策略
 1. 只要是一个独立的意义单元就可以挖空
@@ -322,6 +326,13 @@ const CLOZE_STOP_WORDS = new Set([
   'is', 'are', 'was', 'were', 'be', 'by', 'as', 'at', 'from'
 ])
 
+const isHeadingLike = (text, level) => {
+  const value = (text || '').trim()
+  if (!value) return true
+  if (level !== undefined && level <= 1) return true
+  return /^(第[一二三四五六七八九十百\d]+[章节部分篇]|第[一二三四五六七八九十\d]+节|导论|绪论|前言|后记|附录|目录|知识框架|本章重难点|一、|二、|三、|四、|五、|六、|七、|八、|九、|十、|[（(][一二三四五六七八九十\d]+[）)])/.test(value)
+}
+
 const pickFallbackCloze = (text) => {
   const value = (text || '').trim()
   if (value.length < 2) return null
@@ -397,6 +408,7 @@ const buildFallbackClozeList = (nodes) => {
     if (!node || !node.uid) return
     const text = extractPlainText(node.text || '').trim()
     if (text.length < 2) return
+    if (isHeadingLike(text, node.level)) return
     const cloze = pickFallbackCloze(text)
     if (cloze && cloze !== text) {
       list.push({ uid: node.uid, clozes: [cloze] })
@@ -718,7 +730,7 @@ export const smartClozeFullMap = async (mode = 'smart', onProgress) => {
     const text = extractPlainText(
       (typeof node.getData === 'function' ? node.getData('text') : node.text) || ''
     )
-    if (level >= 2 && text.trim()) {
+    if (level >= 2 && text.trim() && !isHeadingLike(text, level)) {
       nodes.push({ uid: node.uid, level, text: text.trim() })
     }
     if (node.children) {

@@ -384,13 +384,8 @@
           <div class="http-server-expire">
             Token 有效期至：{{ formatHttpTokenExpiry(httpServerStatus.tokenExpiresAt) }}
           </div>
-          <div class="http-server-quality-row">
-            <span class="http-server-token-label">画面质量</span>
-            <el-select v-model="httpServerQuality" size="small" style="width: 120px" @change="onHttpServerQualityChange">
-              <el-option label="流畅优先" value="low" />
-              <el-option label="均衡" value="medium" />
-              <el-option label="清晰优先" value="high" />
-            </el-select>
+          <div class="http-server-skill-row">
+            <el-button size="small" @click="copyHttpSkill">复制 Agent 调用 Skill（含 Token）</el-button>
           </div>
         </div>
       </div>
@@ -402,6 +397,16 @@
       <p class="vision-desc">可添加多个 MCP 服务，保存后 AI 可通过 mcp_call_tool 调用。当前优先支持 HTTP/SSE 服务；stdio 服务仅保存配置。</p>
       <div class="profile-bar">
         <el-button size="small" @click="showMcpForm = !showMcpForm">{{ showMcpForm ? '收起新增' : '新增 MCP' }}</el-button>
+        <el-button size="small" @click="showMcpImport = !showMcpImport">{{ showMcpImport ? '收起 JSON 导入' : '粘贴 JSON 配置' }}</el-button>
+      </div>
+      <div v-if="showMcpImport" class="mcp-import-area">
+        <el-input
+          v-model="mcpImportText"
+          type="textarea"
+          :rows="7"
+          placeholder='{"mcpServers":{"drawio":{"command":"npx","args":["-y","@drawio/mcp"]}}}'
+        />
+        <el-button type="primary" size="small" :disabled="!mcpImportText.trim()" @click="importMcpJson">导入 JSON</el-button>
       </div>
       <el-form v-if="showMcpForm" label-position="top" class="settings-form">
         <el-form-item label="名称"><el-input v-model="newMcp.name" placeholder="如：文件服务" /></el-form-item>
@@ -470,6 +475,14 @@
       <p>my-mindmap agent v1.0.0</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
+      <p>
+        项目地址：
+        <a href="https://github.com/bubu-LZY/my-mindmap-agent" target="_blank" rel="noopener noreferrer">https://github.com/bubu-LZY/my-mindmap-agent</a>
+      </p>
+      <p>
+        项目介绍页：
+        <a href="https://bubu-lzy.github.io/my-mindmap-agent/" target="_blank" rel="noopener noreferrer">https://bubu-lzy.github.io/my-mindmap-agent/</a>
+      </p>
     </div>
       </div><!-- .settings-content -->
     </div><!-- .settings-layout -->
@@ -622,6 +635,64 @@ const copyText = async (text) => {
       document.body.removeChild(ta)
     }
     ElMessage.success('已复制')
+  } catch (e) {
+    ElMessage.error('复制失败')
+  }
+}
+
+const copyHttpSkill = async () => {
+  const status = httpServerStatus.value
+  if (!status || !status.running || !status.token) {
+    ElMessage.warning('请先开启本地 HTTP 服务')
+    return
+  }
+  const addr = (status.addresses && status.addresses[0]) || `http://127.0.0.1:${status.port}`
+  const token = status.token
+  const skill = `---
+name: my-mindmap-agent-api
+description: Call the local my-mindmap agent over HTTP to execute mind-map and AI tasks from another agent.
+---
+
+# my-mindmap-agent API
+
+Base URL: ${addr}
+Token: ${token}
+
+## Call
+
+POST ${addr}/api/agent/chat
+
+Headers:
+Content-Type: application/json
+Authorization: Bearer ${token}
+
+Body:
+{"message":"你的指令","source":"other-agent"}
+
+Example:
+curl -X POST "${addr}/api/agent/chat" -H "Content-Type: application/json" -H "Authorization: Bearer ${token}" -d '{"message":"生成一张关于时间管理的思维导图","source":"other-agent"}'
+
+## Status check
+GET ${addr}/api/status?token=${token}
+
+## Rules
+- Main app must be running and HTTP service enabled.
+- Main window closed => HTTP 503.
+- Token invalid/expired => HTTP 401.
+- Timeout at least 120 seconds.
+`
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(skill)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = skill
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    ElMessage.success('已将此技能和token复制到剪切板中，请注意使用安全')
   } catch (e) {
     ElMessage.error('复制失败')
   }
@@ -1294,6 +1365,8 @@ const saveVisionConfig = () => saveConfig('vision')
 // ========== MCP 管理 ==========
 const mcpServers = ref([])
 const showMcpForm = ref(false)
+const showMcpImport = ref(false)
+const mcpImportText = ref('')
 const newMcp = ref({ name: '', transport: 'http', url: '', command: '', args: [], headers: {}, enabled: true })
 
 const loadMcp = async () => {
@@ -1310,6 +1383,57 @@ const addMcp = async () => {
     await loadMcp()
     ElMessage.success('MCP 服务已添加')
   } catch (e) { ElMessage.error('新增 MCP 失败: ' + e.message) }
+}
+
+const importMcpJson = async () => {
+  if (!window.electronAPI?.mcp?.list || !window.electronAPI?.mcp?.create || !window.electronAPI?.mcp?.update) return
+  let parsed
+  try {
+    parsed = JSON.parse(mcpImportText.value)
+  } catch (e) {
+    ElMessage.error('JSON 解析失败：' + e.message)
+    return
+  }
+  const source = parsed && typeof parsed === 'object'
+    ? (parsed.mcpServers || parsed.servers || parsed)
+    : null
+  if (!source || typeof source !== 'object') {
+    ElMessage.error('JSON 中未找到 mcpServers 或 servers')
+    return
+  }
+  const existing = await window.electronAPI.mcp.list()
+  let created = 0
+  let updated = 0
+  try {
+    for (const [name, raw] of Object.entries(source)) {
+      if (!raw || typeof raw !== 'object') continue
+      const cfg = {
+        name,
+        transport: raw.url ? 'http' : 'stdio',
+        url: raw.url || '',
+        command: raw.command || '',
+        args: Array.isArray(raw.args) ? raw.args.map(String) : [],
+        env: raw.env && typeof raw.env === 'object' ? raw.env : {},
+        headers: raw.headers && typeof raw.headers === 'object' ? raw.headers : {},
+        enabled: raw.disabled !== true
+      }
+      const found = existing.find(s => s.name === name)
+      if (found) {
+        await window.electronAPI.mcp.update(found.id, cfg)
+        updated++
+      } else {
+        await window.electronAPI.mcp.create(cfg)
+        created++
+      }
+    }
+  } catch (e) {
+    ElMessage.error('导入失败：' + e.message)
+    return
+  }
+  mcpImportText.value = ''
+  showMcpImport.value = false
+  await loadMcp()
+  ElMessage.success(`已导入 MCP 配置：新增 ${created} 个，更新 ${updated} 个`)
 }
 
 const saveMcp = async (server) => {
@@ -1736,6 +1860,13 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.http-server-skill-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
 .section-desc {
   font-size: 13px;
   color: #86868b;
@@ -2034,6 +2165,13 @@ onBeforeUnmount(() => {
   gap: 6px;
   padding: 6px 0;
   border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.mcp-import-area {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
 }
 
 .mcp-skill-row .mini,

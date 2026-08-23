@@ -22,6 +22,7 @@ let streamTimer = null
 let capturing = false
 let frameRequested = false
 let preRemoteWindowState = null
+const pendingAgentRequests = new Map()
 
 const readConfig = () => store.get(STORE_KEY, {}) || {}
 const writeConfig = (config) => store.set(STORE_KEY, config)
@@ -149,10 +150,23 @@ const restoreWindowStateAfterRemote = (win) => {
   } catch (e) {}
 }
 
+const isMainWindowAvailable = (win) => {
+  return !!(win && !win.isDestroyed() && win.isVisible() && !win.isMinimized())
+}
+
+const sendStateToAll = (state) => {
+  const payload = JSON.stringify({ type: 'state', state })
+  for (const ws of clients) {
+    if (ws.readyState === 1) {
+      try { ws.send(payload) } catch (e) {}
+    }
+  }
+}
+
 const captureFrame = async () => {
   const win = getMainWindow()
   if (!win || win.isDestroyed()) return null
-  if (clients.size && ensureMainWindowForRemote(win)) return null
+  if (!isMainWindowAvailable(win)) return null
   try {
     const image = await win.webContents.capturePage()
     if (!image || image.isEmpty()) return null
@@ -180,6 +194,11 @@ const broadcastFrame = async () => {
     return
   }
   if (capturing) return
+  const win = getMainWindow()
+  if (!isMainWindowAvailable(win)) {
+    sendStateToAll('closed')
+    return
+  }
   capturing = true
   const frame = await captureFrame()
   capturing = false
@@ -187,7 +206,10 @@ const broadcastFrame = async () => {
     frameRequested = false
     setImmediate(broadcastFrame)
   }
-  if (!frame) return
+  if (!frame) {
+    sendStateToAll('closed')
+    return
+  }
   const payload = JSON.stringify({ type: 'frame', ...frame })
   for (const ws of clients) {
     if (ws.readyState === 1) {
@@ -313,6 +335,50 @@ const handleRequest = async (req, res) => {
     return
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/agent/chat') {
+    try {
+      const body = await readBody(req)
+      const config = readConfig()
+      const authToken = String(body.token || req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim()
+      if (!config.enabled || Date.now() >= config.tokenExpiresAt || !tokenMatches(authToken)) {
+        sendJson(res, 401, { ok: false, error: 'Token 无效或已过期' })
+        return
+      }
+      const message = String(body.message || '').trim()
+      if (!message) {
+        sendJson(res, 400, { ok: false, error: 'message 不能为空' })
+        return
+      }
+      const win = getMainWindow()
+      if (!isMainWindowAvailable(win)) {
+        sendJson(res, 503, { ok: false, error: '主页面已关闭' })
+        return
+      }
+      const id = crypto.randomUUID()
+      const promise = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingAgentRequests.delete(id)
+          reject(new Error('Agent 请求超时'))
+        }, 120000)
+        pendingAgentRequests.set(id, { resolve, reject, timer })
+      })
+      win.webContents.send('agent-api:request', {
+        id,
+        message,
+        source: String(body.source || 'agent')
+      })
+      try {
+        const result = await promise
+        sendJson(res, 200, { ok: true, reply: result })
+      } catch (e) {
+        sendJson(res, 504, { ok: false, error: e.message || 'Agent 请求失败' })
+      }
+    } catch (e) {
+      sendJson(res, 400, { ok: false, error: e.message })
+    }
+    return
+  }
+
   sendJson(res, 404, { ok: false, error: 'Not Found' })
 }
 
@@ -332,10 +398,14 @@ const handleUpgrade = (req, socket, head) => {
 
   wss.handleUpgrade(req, socket, head, (ws) => {
     const win = getMainWindow()
-    if (!clients.size) saveWindowStateForRemote(win)
     clients.add(ws)
-    if (win && !win.isDestroyed()) ensureMainWindowForRemote(win)
-    ws.send(JSON.stringify({ type: 'ready', port, tokenExpiresAt: config.tokenExpiresAt }))
+    ws.send(JSON.stringify({
+      type: 'ready',
+      port,
+      tokenExpiresAt: config.tokenExpiresAt,
+      quality: config.quality || 'medium',
+      state: isMainWindowAvailable(win) ? 'online' : 'closed'
+    }))
     startStream()
 
     ws.on('message', async (raw) => {
@@ -361,6 +431,13 @@ const handleUpgrade = (req, socket, head) => {
         if (inserted) {
           requestImmediateFrame()
         }
+      } else if (message && message.type === 'quality' && QUALITY_JPEG[message.quality]) {
+        const cfg = readConfig()
+        cfg.quality = message.quality
+        writeConfig(cfg)
+        try {
+          ws.send(JSON.stringify({ type: 'quality', quality: message.quality }))
+        } catch (e) {}
       }
     })
 
@@ -467,6 +544,14 @@ const init = (getWindow) => {
     writeConfig(config)
     return getStatus()
   })
+  ipcMain.on('agent-api:response', (event, payload) => {
+    const item = payload && payload.id ? pendingAgentRequests.get(payload.id) : null
+    if (!item) return
+    pendingAgentRequests.delete(payload.id)
+    clearTimeout(item.timer)
+    if (payload.error) item.reject(new Error(payload.error))
+    else item.resolve(String(payload.reply || ''))
+  })
 }
 
 const initAutoStart = async () => {
@@ -498,6 +583,11 @@ const REMOTE_PAGE = `<!DOCTYPE html>
   #screen { max-width: 100vw; max-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: none; }
   #imeInput { position: fixed; left: 10px; bottom: 10px; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; background: transparent; color: transparent; caret-color: transparent; outline: none; resize: none; z-index: 30; }
   #status { position: fixed; top: 12px; left: 12px; z-index: 10; padding: 7px 10px; background: rgba(0,0,0,.55); border-radius: 8px; font-size: 12px; color: #d6d6de; pointer-events: none; }
+  #qualityBar { position: fixed; top: 12px; right: 12px; z-index: 11; padding: 6px 8px; background: rgba(0,0,0,.55); border-radius: 8px; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #d6d6de; }
+  #qualityBar select { background: #242429; color: #fff; border: 1px solid #3a3a42; border-radius: 6px; font-size: 12px; padding: 3px 6px; }
+  #closedOverlay { position: fixed; inset: 0; z-index: 15; display: none; align-items: center; justify-content: center; background: rgba(17,17,17,.86); }
+  #closedOverlay .card { text-align: center; }
+  #closedOverlay button { margin-top: 14px; padding: 10px 18px; border: none; border-radius: 10px; background: #0a84ff; color: #fff; font-size: 14px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -512,6 +602,21 @@ const REMOTE_PAGE = `<!DOCTYPE html>
   <div id="stage" style="display:none;">
     <img id="screen" draggable="false" alt="主程序画面" />
     <textarea id="imeInput" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+    <div id="qualityBar">
+      <span>画质</span>
+      <select id="qualitySelect">
+        <option value="low">流畅</option>
+        <option value="medium" selected>均衡</option>
+        <option value="high">清晰</option>
+      </select>
+    </div>
+  </div>
+  <div id="closedOverlay">
+    <div class="card">
+      <h1>主页面已关闭</h1>
+      <p>请在电脑端打开主程序后重连，或点击下方按钮重试。</p>
+      <button id="reconnectBtn">一键重连</button>
+    </div>
   </div>
   <div id="status">未连接</div>
 <script>
@@ -525,6 +630,8 @@ const REMOTE_PAGE = `<!DOCTYPE html>
   var login = document.getElementById('login');
   var stage = document.getElementById('stage');
   var statusEl = document.getElementById('status');
+  var closedOverlay = document.getElementById('closedOverlay');
+  var qualitySelect = document.getElementById('qualitySelect');
 
   var setStatus = function (text) { statusEl.textContent = text; };
 
@@ -563,6 +670,7 @@ const REMOTE_PAGE = `<!DOCTYPE html>
           frameWidth = msg.width;
           frameHeight = msg.height;
           img.src = 'data:image/jpeg;base64,' + msg.data;
+          closedOverlay.style.display = 'none';
         } else if (msg.type === 'inputError') {
           setStatus('操作注入失败：' + (msg.error || '未知错误'));
         } else if (msg.type === 'editableFocus') {
@@ -578,6 +686,14 @@ const REMOTE_PAGE = `<!DOCTYPE html>
             imeInput.value = '';
             imeInput.blur();
           }
+        } else if (msg.type === 'state') {
+          if (msg.state === 'closed') {
+            closedOverlay.style.display = 'flex';
+          } else {
+            closedOverlay.style.display = 'none';
+          }
+        } else if (msg.type === 'ready' || msg.type === 'quality') {
+          if (msg.quality) qualitySelect.value = msg.quality;
         }
       } catch (err) {}
     };
@@ -596,6 +712,18 @@ const REMOTE_PAGE = `<!DOCTYPE html>
     if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: 'text', text: text }));
   };
+
+  qualitySelect.addEventListener('change', function () {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'quality', quality: qualitySelect.value }));
+    }
+  });
+
+  document.getElementById('reconnectBtn').addEventListener('click', function () {
+    closedOverlay.style.display = 'none';
+    setStatus('正在重连...');
+    connect();
+  });
 
   var pointForEvent = function (e) {
     var rect = img.getBoundingClientRect();

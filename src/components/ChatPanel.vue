@@ -314,13 +314,6 @@
         </svg>
         <span>新建对话</span>
       </button>
-      <button class="toolbar-btn" :disabled="distillingSkill" @click="generateSkillFromConversation" title="分析当前对话，尝试沉淀为可复用 Skill">
-        <svg viewBox="0 0 20 20" fill="none" width="14" height="14">
-          <path d="M5 3h8l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.3"/>
-          <path d="M8 10h5M8 13h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-        </svg>
-        <span>沉淀 Skill</span>
-      </button>
     </div>
 
     <!-- 历史记录面板 -->
@@ -649,6 +642,19 @@
             <path d="M7.5 5h6M7.5 8h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
           </svg>
           <span class="kb-mode-text">知识库</span>
+        </button>
+        <button
+          class="kb-mode-btn"
+          :class="{ active: distillingSkill }"
+          :disabled="distillingSkill"
+          title="分析当前对话，尝试沉淀为可复用 Skill"
+          @click="generateSkillFromConversation"
+        >
+          <svg viewBox="0 0 20 20" fill="none" width="15" height="15">
+            <path d="M5 3h8l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M8 10h5M8 13h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <span class="kb-mode-text">Skill</span>
         </button>
 
         <!-- 图片+发送按钮 -->
@@ -1997,6 +2003,9 @@ const persistConversation = () => {
 const newConversation = () => {
   // 进行中的生成先中止并丢弃回调，避免消息/日志落进新会话
   abortActiveGeneration()
+  aiStatus.value = 'idle'
+  emit('tool-call-status', 'idle')
+  backgroundRunning.value = null
   // 保存当前对话
   if (messages.value.length > 0) {
     persistConversation()
@@ -5171,7 +5180,7 @@ const onFileDrop = (e) => {
   fileDragActive.value = false
 
   // 先检查是否从左侧文件树拖入（自定义 MIME 类型）
-  const treePath = e.dataTransfer?.getData('application/x-mindmap-file')
+  const treePath = e.dataTransfer?.getData('application/x-mindmap-file') || e.dataTransfer?.getData('text/plain')
   if (treePath) {
     const name = treePath.split(/[\\/]/).pop() || '未命名'
     if (attachedFiles.value.some(x => x.path === treePath)) {
@@ -5190,18 +5199,23 @@ const onFileDrop = (e) => {
 
   // Electron 渲染进程的 File 对象带 path 属性（完整绝对路径），换电脑也是真实路径
   const dropped = Array.from(e.dataTransfer?.files || [])
-  const valid = dropped.filter(f => f.path)
+  const valid = dropped.map(f => {
+    const path = f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : '')
+    return path ? { file: f, path } : null
+  }).filter(Boolean)
   if (!valid.length) {
     ElMessage.warning('未识别到文件路径，请拖入本地文件')
     return
   }
   let added = 0
-  for (const f of valid) {
-    const name = f.name || String(f.path).split(/[\\/]/).pop()
-    if (attachedFiles.value.some(x => x.path === f.path)) continue // 同一文件不重复添加
+  for (const item of valid) {
+    const f = item.file
+    const path = item.path
+    const name = f.name || String(path).split(/[\\/]/).pop()
+    if (attachedFiles.value.some(x => x.path === path)) continue // 同一文件不重复添加
     attachedFiles.value.push({
       id: `file_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      path: f.path,
+      path,
       fileName: name.replace(/\.[^.]+$/, ''),
       ext: (name.match(/\.[^.]+$/) || [''])[0].toLowerCase()
     })
@@ -5385,7 +5399,7 @@ defineExpose({
 }
 
 .chat-title {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
@@ -5492,7 +5506,7 @@ defineExpose({
 
 .message-content {
   max-width: 88%;
-  font-size: 10.5px;
+  font-size: 10px;
   line-height: 1.6;
   word-break: break-word;
   padding-right: 32px;
@@ -5992,7 +6006,7 @@ defineExpose({
 
 /* ========== Markdown Content ========== */
 .assistant-content :deep(.md-content) {
-  font-size: 10.5px;
+  font-size: 10px;
   line-height: 1.6;
 }
 
@@ -6163,8 +6177,8 @@ defineExpose({
 /* ========== Toolbar (记忆/历史/新建) ========== */
 .chat-toolbar {
   display: flex;
-  gap: 6px;
-  padding: 8px 16px;
+  gap: 4px;
+  padding: 8px 10px;
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
 }
@@ -6172,10 +6186,10 @@ defineExpose({
 .toolbar-btn {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   height: 30px;
-  padding: 0 12px;
-  font-size: 12px;
+  padding: 0 8px;
+  font-size: 11px;
   font-family: var(--font-family);
   color: var(--text-primary);
   background-color: rgba(0, 0, 0, 0.05);
@@ -7191,7 +7205,7 @@ defineExpose({
   min-height: 36px;
   max-height: 120px;
   padding: 8px 12px;
-  font-size: 14px;
+  font-size: 12.5px;
   font-family: var(--font-family);
   color: var(--text-primary);
   background-color: var(--input-bg);

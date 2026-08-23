@@ -260,7 +260,7 @@
 
       <!-- AI 悬浮球：AI 侧边栏收起时显示 -->
       <button
-        v-if="!aiPanelExpanded"
+        v-if="!aiPanelExpanded && !floatingChatVisible"
         class="ai-float-ball"
         :class="{ active: floatingChatVisible }"
         @click="toggleFloatingChat"
@@ -276,6 +276,12 @@
 
       <!-- ===== 右侧 AI 面板 ===== -->
       <aside class="ai-panel" :class="{ collapsed: !aiPanelExpanded, 'floating-chat': !aiPanelExpanded && floatingChatVisible }">
+        <button
+          v-if="!aiPanelExpanded && floatingChatVisible"
+          class="floating-chat-close"
+          title="关闭悬浮对话"
+          @click="floatingChatVisible = false"
+        >×</button>
         <ChatPanel
           ref="chatPanelRef"
           :mindMap="activeMindMap"
@@ -488,7 +494,7 @@ const toggleTaskSchedulerPanel = () => {
 // 侧边栏当前宽度（像素）：复习模式加宽以容纳复习计划完整布局
 const sidebarWidthPx = computed(() => {
   if (!sidebarExpanded.value) return '0px'
-  return viewMode.value === 'review' ? '400px' : '240px'
+  return viewMode.value === 'review' ? '400px' : '300px'
 })
 
 // 定时任务面板左侧偏移（跟随侧边栏展开/折叠）
@@ -2224,6 +2230,18 @@ onMounted(() => {
     })
   }
 
+  // 外部 Agent HTTP API：复用 ChatPanel 后台处理，不写入用户对话，也不打断前台
+  if (window.electronAPI?.agentApi?.onRequest) {
+    window.electronAPI.agentApi.onRequest(async ({ id, message, source }) => {
+      try {
+        const reply = await chatPanelRef.value?.processExternalMessage(message, source || 'agent')
+        window.electronAPI.agentApi.sendResponse(id, reply || '(AI 未返回内容)')
+      } catch (err) {
+        window.electronAPI.agentApi.sendResponse(id, null, err?.message || 'AI 处理失败')
+      }
+    })
+  }
+
   // 飞书机器人消息处理：走飞书端独立通道（不弹出 AI 面板、不污染用户对话），使用 AI 工具链执行
   if (window.electronAPI?.feishuBot?.onProcessMessage) {
     window.electronAPI.feishuBot.onProcessMessage(async (data) => {
@@ -2456,8 +2474,8 @@ onBeforeUnmount(() => {
   right: 22px;
   bottom: 88px;
   z-index: 700;
-  width: 52px;
-  height: 52px;
+  width: 40px;
+  height: 40px;
   border: none;
   border-radius: 50%;
   display: flex;
@@ -2473,6 +2491,22 @@ onBeforeUnmount(() => {
 .ai-float-ball.active {
   background: var(--apple-blue, #007aff);
   color: #fff;
+}
+
+.floating-chat-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 670;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.12);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .navbar-actions {
@@ -2698,7 +2732,7 @@ onBeforeUnmount(() => {
   width: var(--ai-panel-width);
   flex-shrink: 0;
   overflow: hidden;
-  transition: width 0.25s ease;
+  transition: width 0.15s ease;
 }
 
 .ai-panel.collapsed {
@@ -2710,8 +2744,8 @@ onBeforeUnmount(() => {
   right: 16px;
   bottom: 80px;
   z-index: 650;
-  width: min(300px, calc(100vw - 24px));
-  height: min(440px, calc(100vh - 96px));
+  width: min(280px, calc(100vw - 24px));
+  height: min(420px, calc(100vh - 96px));
   border-radius: 18px;
   box-shadow: 0 14px 46px rgba(0, 0, 0, 0.24);
   overflow: hidden;

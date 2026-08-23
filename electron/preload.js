@@ -101,6 +101,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setQuality: (quality) => ipcRenderer.invoke('http-server:setQuality', quality)
   },
 
+  agentApi: {
+    onRequest: (callback) => {
+      const handler = (_event, payload) => callback(payload)
+      ipcRenderer.on('agent-api:request', handler)
+      return () => ipcRenderer.removeListener('agent-api:request', handler)
+    },
+    sendResponse: (id, reply, error) => {
+      ipcRenderer.send('agent-api:response', { id, reply, error })
+    }
+  },
+
   // MCP 多服务管理
   mcp: {
     list: () => ipcRenderer.invoke('mcp:list'),
