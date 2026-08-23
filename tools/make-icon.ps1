@@ -1,6 +1,6 @@
 Add-Type -AssemblyName System.Drawing
 
-$outDir = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\electron\icons"
+$outDir = Join-Path $PSScriptRoot "..\electron\icons"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $master = 1024

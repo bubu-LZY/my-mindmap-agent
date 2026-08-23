@@ -94,6 +94,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
     set: (enable) => ipcRenderer.invoke('auto-launch:set', enable)
   },
 
+  // 本地 HTTP 远程服务
+  httpServer: {
+    getStatus: () => ipcRenderer.invoke('http-server:getStatus'),
+    setEnabled: (enabled) => ipcRenderer.invoke('http-server:setEnabled', !!enabled),
+    setQuality: (quality) => ipcRenderer.invoke('http-server:setQuality', quality)
+  },
+
+  // MCP 多服务管理
+  mcp: {
+    list: () => ipcRenderer.invoke('mcp:list'),
+    create: (server) => ipcRenderer.invoke('mcp:create', server),
+    update: (id, patch) => ipcRenderer.invoke('mcp:update', id, patch),
+    remove: (id) => ipcRenderer.invoke('mcp:delete', id),
+    listTools: (id) => ipcRenderer.invoke('mcp:listTools', id),
+    callTool: (id, toolName, args) => ipcRenderer.invoke('mcp:callTool', id, toolName, args)
+  },
+
+  // Skills 多技能管理
+  skills: {
+    list: () => ipcRenderer.invoke('skills:list'),
+    create: (skill) => ipcRenderer.invoke('skills:create', skill),
+    update: (id, patch) => ipcRenderer.invoke('skills:update', id, patch),
+    remove: (id) => ipcRenderer.invoke('skills:delete', id)
+  },
+
   // OCR 识别
   ocrImage: (imagePath) => ipcRenderer.invoke('ocr-image', imagePath),
   ocrBase64: (base64Data, lang) => ipcRenderer.invoke('ocr-base64', base64Data, lang),

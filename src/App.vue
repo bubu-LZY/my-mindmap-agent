@@ -258,14 +258,31 @@
         </svg>
       </button>
 
+      <!-- AI 悬浮球：AI 侧边栏收起时显示 -->
+      <button
+        v-if="!aiPanelExpanded"
+        class="ai-float-ball"
+        :class="{ active: floatingChatVisible }"
+        @click="toggleFloatingChat"
+        title="打开 AI 悬浮对话"
+      >
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+          <path d="M12 4a8 8 0 0 0-8 8c0 1.4.4 2.7 1 3.8L4 20l4.4-1.1c1.1.5 2.3.8 3.6.8a8 8 0 1 0 0-16z" fill="currentColor"/>
+          <circle cx="9" cy="12" r="1.1" fill="#0a84ff"/>
+          <circle cx="12" cy="12" r="1.1" fill="#0a84ff"/>
+          <circle cx="15" cy="12" r="1.1" fill="#0a84ff"/>
+        </svg>
+      </button>
+
       <!-- ===== 右侧 AI 面板 ===== -->
-      <aside class="ai-panel" :class="{ collapsed: !aiPanelExpanded }">
+      <aside class="ai-panel" :class="{ collapsed: !aiPanelExpanded, 'floating-chat': !aiPanelExpanded && floatingChatVisible }">
         <ChatPanel
           ref="chatPanelRef"
           :mindMap="activeMindMap"
           :activeNode="activeNode"
           :currentFilePath="currentFilePath"
           :currentFileName="currentFileName"
+          :compact="!aiPanelExpanded"
           :webSearch="webSearchEnabled"
           @tool-call-status="onToolCallStatus"
           @toggle-log-panel="onToggleLogPanel"
@@ -382,6 +399,7 @@ import { addFeishuLog } from './utils/feishuLogStore'
 import { addPanelLog } from './utils/panelLogStore'
 import { feishuService } from './services/feishuService'
 import { wechatService } from './services/wechatService'
+import { useMindMapStore } from './stores/mindMapStore'
 import {
   applyTextStyleToNodes,
   fontColorShortcuts,
@@ -500,14 +518,17 @@ const sidebarLeftOffset = computed(() => {
 
 // AI 面板折叠状态（默认展开，与左侧边栏一致，可通过右侧按钮收起）
 const aiPanelExpanded = ref(true)
+const floatingChatVisible = ref(false)
 const toggleAiPanel = () => {
   aiPanelExpanded.value = !aiPanelExpanded.value
+  if (aiPanelExpanded.value) floatingChatVisible.value = false
   nextTick(() => {
     if (editorRef.value && (viewMode.value === 'mindmap' || viewMode.value === 'review')) {
       editorRef.value.resize()
     }
   })
 }
+const toggleFloatingChat = () => { floatingChatVisible.value = !floatingChatVisible.value }
 
 // AI面板按钮的 right 偏移（考虑日志面板宽度）
 const aiPanelRightOffset = computed(() => {
@@ -588,8 +609,20 @@ const switchView = (mode) => {
 // 思维导图/大纲各自的独立全屏状态跟踪（用于右下角快速切换按钮同步全屏与样式）
 const mmFullscreen = ref(false)
 const outlineFullscreen = ref(false)
-const onMindMapFullscreenChange = (v) => { mmFullscreen.value = v }
-const onOutlineFullscreenChange = (v) => { outlineFullscreen.value = v }
+const onMindMapFullscreenChange = (v) => {
+  mmFullscreen.value = v
+  if (v) {
+    aiPanelExpanded.value = false
+    floatingChatVisible.value = false
+  }
+}
+const onOutlineFullscreenChange = (v) => {
+  outlineFullscreen.value = v
+  if (v) {
+    aiPanelExpanded.value = false
+    floatingChatVisible.value = false
+  }
+}
 
 // 右下角快速切换：大纲 ↔ 思维导图；左右侧栏保持收起不变，全屏状态下切换会把全屏同步带到目标视图
 const quickSwitchView = () => {
@@ -679,8 +712,25 @@ const onExternalFileCreated = () => {
   })
 }
 
-// AI 撤销后删除了本轮生成的文件，刷新目录树让这些文件消失
-const onFileDeleted = () => {
+// AI 撤销后删除了本轮生成的文件，刷新目录树让这些文件消失。
+// 左侧目录树删除当前文件时，filePath 为被删除文件；关闭对应 Tab 并解绑 AI 任务。
+const onFileDeleted = (filePath = '') => {
+  if (filePath) {
+    const fid = normalizeFileId(filePath)
+    const store = useMindMapStore()
+    try {
+      if (store.activeTaskFileId === fid) store.setActiveTaskFileId('')
+      store.unregisterInstance(fid)
+    } catch (e) {}
+    const idx = tabs.value.findIndex(t => t.fileId === fid)
+    if (idx >= 0) {
+      closeTab(tabs.value[idx].fileId)
+    } else if (normalizeFileId(currentFilePath.value) === fid) {
+      currentFilePath.value = ''
+      hasFile.value = false
+      activeFileId.value = ''
+    }
+  }
   nextTick(() => {
     if (fileTreeRef.value && fileTreeRef.value.refreshTree) {
       fileTreeRef.value.refreshTree()
@@ -2401,6 +2451,30 @@ onBeforeUnmount(() => {
   transform: translateX(-3px) translateY(-50%);
 }
 
+.ai-float-ball {
+  position: fixed;
+  right: 22px;
+  bottom: 88px;
+  z-index: 700;
+  width: 52px;
+  height: 52px;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--apple-blue, #007aff);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+}
+
+.ai-float-ball.active {
+  background: var(--apple-blue, #007aff);
+  color: #fff;
+}
+
 .navbar-actions {
   display: flex;
   align-items: center;
@@ -2629,6 +2703,18 @@ onBeforeUnmount(() => {
 
 .ai-panel.collapsed {
   width: 0;
+}
+
+.ai-panel.floating-chat {
+  position: fixed;
+  right: 16px;
+  bottom: 80px;
+  z-index: 650;
+  width: min(300px, calc(100vw - 24px));
+  height: min(440px, calc(100vh - 96px));
+  border-radius: 18px;
+  box-shadow: 0 14px 46px rgba(0, 0, 0, 0.24);
+  overflow: hidden;
 }
 
 /* Log Panel (right of AI panel) */

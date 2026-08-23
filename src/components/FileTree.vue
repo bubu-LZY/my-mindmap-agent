@@ -185,7 +185,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['open-file', 'file-saved', 'file-renamed', 'file-moved', 'before-move'])
+const emit = defineEmits(['open-file', 'file-saved', 'file-renamed', 'file-moved', 'before-move', 'file-deleted'])
 
 const fileTreeRef = ref(null)
 const inlineEditInputRef = ref(null)
@@ -1011,11 +1011,14 @@ const removeNode = (data) => {
       }
       // 如果删除的是当前打开的文件，或当前文件位于被删除目录内，通知父组件关闭
       // （否则后续保存会在已删除的目录下重建文件）
+      const norm = p => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '')
       const cur = props.currentFilePath
       if (cur) {
-        const insideDeletedDir = data.isDir && (cur === data.path || cur.startsWith(data.path + '/') || cur.startsWith(data.path + '\\'))
-        if (cur === data.path || insideDeletedDir) {
-          emit('open-file', { filePath: '', fileName: '', data: null })
+        const curN = norm(cur)
+        const targetN = norm(data.path)
+        const insideDeletedDir = data.isDir && (curN === targetN || curN.startsWith(targetN + '/'))
+        if (curN === targetN || insideDeletedDir) {
+          emit('file-deleted', curN === targetN ? cur : cur)
         }
       }
     } catch (error) {

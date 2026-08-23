@@ -359,6 +359,92 @@
           </div>
         </div>
       </div>
+      <div class="safety-block">
+        <div class="auto-launch-row">
+          <div class="auto-launch-info">
+            <div class="safety-block-title">本地 HTTP 服务</div>
+            <p class="safety-block-desc">开启后可通过浏览器或平板访问并操作当前主程序界面；访问需要输入 Token 鉴权，Token 有效期 60 天。</p>
+          </div>
+          <el-switch
+            v-model="httpServerEnabled"
+            :loading="httpServerLoading"
+            @change="onHttpServerChange"
+          />
+        </div>
+        <div v-if="httpServerStatus && httpServerStatus.running" class="http-server-info">
+          <div v-for="addr in httpServerStatus.addresses" :key="addr" class="http-server-address">
+            <span class="http-server-address-text">{{ addr }}</span>
+            <el-button size="small" @click="copyText(addr)">复制地址</el-button>
+          </div>
+          <div class="http-server-token-row">
+            <span class="http-server-token-label">Token</span>
+            <code class="http-server-token">{{ httpServerStatus.token }}</code>
+            <el-button size="small" @click="copyText(httpServerStatus.token)">复制 Token</el-button>
+          </div>
+          <div class="http-server-expire">
+            Token 有效期至：{{ formatHttpTokenExpiry(httpServerStatus.tokenExpiresAt) }}
+          </div>
+          <div class="http-server-quality-row">
+            <span class="http-server-token-label">画面质量</span>
+            <el-select v-model="httpServerQuality" size="small" style="width: 120px" @change="onHttpServerQualityChange">
+              <el-option label="流畅优先" value="low" />
+              <el-option label="均衡" value="medium" />
+              <el-option label="清晰优先" value="high" />
+            </el-select>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MCP 服务管理 -->
+    <div id="sec-mcp" class="settings-section">
+      <h3>MCP 服务</h3>
+      <p class="vision-desc">可添加多个 MCP 服务，保存后 AI 可通过 mcp_call_tool 调用。当前优先支持 HTTP/SSE 服务；stdio 服务仅保存配置。</p>
+      <div class="profile-bar">
+        <el-button size="small" @click="showMcpForm = !showMcpForm">{{ showMcpForm ? '收起新增' : '新增 MCP' }}</el-button>
+      </div>
+      <el-form v-if="showMcpForm" label-position="top" class="settings-form">
+        <el-form-item label="名称"><el-input v-model="newMcp.name" placeholder="如：文件服务" /></el-form-item>
+        <el-form-item label="传输方式">
+          <el-select v-model="newMcp.transport"><el-option label="HTTP/SSE" value="http" /><el-option label="stdio（暂仅保存）" value="stdio" /></el-select>
+        </el-form-item>
+        <el-form-item v-if="newMcp.transport === 'http'" label="URL"><el-input v-model="newMcp.url" placeholder="http://127.0.0.1:3000/mcp" /></el-form-item>
+        <el-form-item v-else label="命令"><el-input v-model="newMcp.command" placeholder="npx" /></el-form-item>
+        <el-button type="primary" size="small" @click="addMcp">保存新增</el-button>
+      </el-form>
+      <div v-for="s in mcpServers" :key="s.id" class="mcp-skill-row">
+        <el-input v-model="s.name" class="mini" />
+        <el-input v-if="s.transport === 'http'" v-model="s.url" class="mini" />
+        <el-input v-else v-model="s.command" class="mini" />
+        <el-switch v-model="s.enabled" size="small" />
+        <el-button size="small" @click="saveMcp(s)">保存</el-button>
+        <el-button size="small" @click="testMcp(s)">测试</el-button>
+        <el-button size="small" type="danger" @click="removeMcp(s.id)">删除</el-button>
+      </div>
+    </div>
+
+    <!-- Skills 管理 -->
+    <div id="sec-skills" class="settings-section">
+      <h3>Skills</h3>
+      <p class="vision-desc">可维护多个技能。AI 可读取并执行技能指令；也可由 AI 根据对话沉淀为新技能。</p>
+      <div class="profile-bar">
+        <el-button size="small" @click="showSkillForm = !showSkillForm">{{ showSkillForm ? '收起新增' : '新增 Skill' }}</el-button>
+      </div>
+      <el-form v-if="showSkillForm" label-position="top" class="settings-form">
+        <el-form-item label="名称"><el-input v-model="newSkill.name" /></el-form-item>
+        <el-form-item label="描述"><el-input v-model="newSkill.description" /></el-form-item>
+        <el-form-item label="指令"><el-input v-model="newSkill.instructions" type="textarea" :rows="4" /></el-form-item>
+        <el-button type="primary" size="small" @click="addSkill">保存新增</el-button>
+      </el-form>
+      <div v-for="s in skills" :key="s.id" class="skill-row">
+        <el-input v-model="s.name" class="mini" />
+        <el-input v-model="s.description" class="mini" />
+        <el-input v-model="s.instructions" type="textarea" :rows="2" class="grow" />
+        <el-switch v-model="s.enabled" size="small" />
+        <el-switch v-model="s.autoInvoke" size="small" title="自动调用" />
+        <el-button size="small" @click="saveSkill(s)">保存</el-button>
+        <el-button size="small" type="danger" @click="removeSkill(s.id)">删除</el-button>
+      </div>
     </div>
 
     <!-- 三方集成：FeishuPanel 直接内嵌 -->
@@ -452,6 +538,10 @@ const clearAllMemory = () => {
 // ========== 开机自启动 ==========
 const autoLaunch = ref(false)
 const autoLaunchLoading = ref(false)
+const httpServerEnabled = ref(false)
+const httpServerLoading = ref(false)
+const httpServerStatus = ref(null)
+const httpServerQuality = ref('medium')
 const saveDir = ref('')
 
 const loadAutoLaunch = async () => {
@@ -472,6 +562,74 @@ const loadSaveDir = async () => {
   } catch {
     // 浏览器模式忽略
   }
+}
+
+const loadHttpServer = async () => {
+  if (!(window.electronAPI?.httpServer?.getStatus)) return
+  try {
+    const status = await window.electronAPI.httpServer.getStatus()
+    httpServerStatus.value = status
+    httpServerEnabled.value = !!status.enabled
+    httpServerQuality.value = status.quality || 'medium'
+  } catch (e) {
+    console.warn('读取 HTTP 服务状态失败:', e)
+  }
+}
+
+const onHttpServerQualityChange = async (quality) => {
+  if (!(window.electronAPI?.httpServer?.setQuality)) return
+  try {
+    const status = await window.electronAPI.httpServer.setQuality(quality)
+    httpServerStatus.value = status
+    httpServerQuality.value = status.quality || 'medium'
+    ElMessage.success('远程画面质量已更新')
+  } catch (e) {
+    httpServerQuality.value = httpServerStatus.value?.quality || 'medium'
+    ElMessage.error('画面质量设置失败: ' + e.message)
+  }
+}
+
+const onHttpServerChange = async (enabled) => {
+  if (!(window.electronAPI?.httpServer?.setEnabled)) {
+    httpServerEnabled.value = !enabled
+    return
+  }
+  httpServerLoading.value = true
+  try {
+    const status = await window.electronAPI.httpServer.setEnabled(enabled)
+    httpServerStatus.value = status
+    httpServerEnabled.value = !!status.enabled
+    ElMessage.success(enabled ? '本地 HTTP 服务已开启' : '本地 HTTP 服务已关闭')
+  } catch (e) {
+    httpServerEnabled.value = !enabled
+    ElMessage.error(`HTTP 服务设置失败: ${e.message || '未知错误'}`)
+  } finally {
+    httpServerLoading.value = false
+  }
+}
+
+const copyText = async (text) => {
+  if (!text) return
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(String(text))
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = String(text)
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    ElMessage.success('已复制')
+  } catch (e) {
+    ElMessage.error('复制失败')
+  }
+}
+
+const formatHttpTokenExpiry = (ts) => {
+  if (!ts) return '未知'
+  return new Date(ts).toLocaleString()
 }
 
 const selectSaveDir = async () => {
@@ -1133,6 +1291,76 @@ const saveTemperature = async () => {
 
 const saveVisionConfig = () => saveConfig('vision')
 
+// ========== MCP 管理 ==========
+const mcpServers = ref([])
+const showMcpForm = ref(false)
+const newMcp = ref({ name: '', transport: 'http', url: '', command: '', args: [], headers: {}, enabled: true })
+
+const loadMcp = async () => {
+  if (!window.electronAPI?.mcp?.list) return
+  try { mcpServers.value = await window.electronAPI.mcp.list() } catch (e) {}
+}
+
+const addMcp = async () => {
+  if (!window.electronAPI?.mcp?.create) return
+  try {
+    await window.electronAPI.mcp.create(newMcp.value)
+    newMcp.value = { name: '', transport: 'http', url: '', command: '', args: [], headers: {}, enabled: true }
+    showMcpForm.value = false
+    await loadMcp()
+    ElMessage.success('MCP 服务已添加')
+  } catch (e) { ElMessage.error('新增 MCP 失败: ' + e.message) }
+}
+
+const saveMcp = async (server) => {
+  if (!window.electronAPI?.mcp?.update) return
+  try { await window.electronAPI.mcp.update(server.id, server); ElMessage.success('MCP 服务已保存') } catch (e) { ElMessage.error('保存失败: ' + e.message) }
+}
+
+const removeMcp = async (id) => {
+  if (!window.electronAPI?.mcp?.remove) return
+  try { await window.electronAPI.mcp.remove(id); await loadMcp(); ElMessage.success('MCP 服务已删除') } catch (e) { ElMessage.error('删除失败: ' + e.message) }
+}
+
+const testMcp = async (server) => {
+  if (!window.electronAPI?.mcp?.listTools) return
+  try {
+    const tools = await window.electronAPI.mcp.listTools(server.id)
+    ElMessage.success(`连接成功，发现 ${tools.length} 个工具`)
+  } catch (e) { ElMessage.error('连接失败: ' + e.message) }
+}
+
+// ========== Skills 管理 ==========
+const skills = ref([])
+const showSkillForm = ref(false)
+const newSkill = ref({ name: '', description: '', instructions: '', enabled: true, autoInvoke: false, source: 'manual' })
+
+const loadSkills = async () => {
+  if (!window.electronAPI?.skills?.list) return
+  try { skills.value = await window.electronAPI.skills.list() } catch (e) {}
+}
+
+const addSkill = async () => {
+  if (!window.electronAPI?.skills?.create) return
+  try {
+    await window.electronAPI.skills.create(newSkill.value)
+    newSkill.value = { name: '', description: '', instructions: '', enabled: true, autoInvoke: false, source: 'manual' }
+    showSkillForm.value = false
+    await loadSkills()
+    ElMessage.success('Skill 已添加')
+  } catch (e) { ElMessage.error('新增 Skill 失败: ' + e.message) }
+}
+
+const saveSkill = async (skill) => {
+  if (!window.electronAPI?.skills?.update) return
+  try { await window.electronAPI.skills.update(skill.id, skill); ElMessage.success('Skill 已保存') } catch (e) { ElMessage.error('保存失败: ' + e.message) }
+}
+
+const removeSkill = async (id) => {
+  if (!window.electronAPI?.skills?.remove) return
+  try { await window.electronAPI.skills.remove(id); await loadSkills(); ElMessage.success('Skill 已删除') } catch (e) { ElMessage.error('删除失败: ' + e.message) }
+}
+
 // ========== 侧边目录导航 ==========
 const tocSections = [
   { id: 'sec-ai-config', label: 'AI 模型配置' },
@@ -1140,6 +1368,8 @@ const tocSections = [
   { id: 'sec-vision', label: '多模态识别' },
   { id: 'sec-safety', label: 'AI 安全与记忆' },
   { id: 'sec-system', label: '系统' },
+  { id: 'sec-mcp', label: 'MCP 服务' },
+  { id: 'sec-skills', label: 'Skills' },
   { id: 'sec-integrations', label: '三方集成' },
   { id: 'sec-messages', label: '消息中心' },
   { id: 'sec-about', label: '关于' }
@@ -1178,6 +1408,9 @@ onMounted(() => {
   loadMemoryFacts()
   loadAutoLaunch()
   loadSaveDir()
+  loadHttpServer()
+  loadMcp()
+  loadSkills()
   setupTocObserver()
 })
 
@@ -1442,6 +1675,65 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   overflow: hidden;
   white-space: nowrap;
+}
+
+.http-server-info {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.http-server-address {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.http-server-address-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--apple-blue, #007aff);
+}
+
+.http-server-token-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.http-server-token-label {
+  font-size: 13px;
+  color: #666;
+  flex-shrink: 0;
+}
+
+.http-server-token {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: #333;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.http-server-expire {
+  font-size: 12px;
+  color: #999;
+}
+
+.http-server-quality-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .section-desc {
@@ -1733,6 +2025,26 @@ onBeforeUnmount(() => {
   color: #86868b;
   line-height: 1.8;
   margin: 0;
+}
+
+.mcp-skill-row,
+.skill-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.mcp-skill-row .mini,
+.skill-row .mini {
+  width: 150px;
+  flex: 0 0 auto;
+}
+
+.skill-row .grow {
+  flex: 1 1 auto;
+  min-width: 180px;
 }
 
 /* ---------- 滚动条 ---------- */

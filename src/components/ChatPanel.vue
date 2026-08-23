@@ -9,7 +9,7 @@
           <span class="status-text">{{ statusText }}</span>
         </div>
       </div>
-      <div class="header-right">
+      <div v-if="!compact" class="header-right">
         <button class="header-icon-btn" @click="$emit('open-settings')" title="AI 设置（含三方集成、消息中心入口）">
           <el-icon :size="16"><Setting /></el-icon>
         </button>
@@ -102,26 +102,6 @@
 
         <!-- AI 消息 -->
         <div v-else class="message-content assistant-content">
-          <!-- 任务计划清单（Plan-and-Execute，复杂任务先列步骤、逐步打勾） -->
-          <div v-if="msg.plan && msg.plan.steps && msg.plan.steps.length > 0" class="plan-card">
-            <div class="plan-header">
-              <svg viewBox="0 0 16 16" fill="none" width="13" height="13">
-                <path d="M2 3.5A1.5 1.5 0 013.5 2h7A1.5 1.5 0 0112 3.5V5l2-1v8l-2-1v1.5A1.5 1.5 0 0110.5 14h-7A1.5 1.5 0 012 12.5v-9z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>
-                <path d="M5 6.5h3M5 9.5h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-              </svg>
-              <span class="plan-title">任务清单（Todo）</span>
-              <span class="plan-progress">{{ msg.plan.done.length }}/{{ msg.plan.steps.length }}</span>
-            </div>
-            <div
-              v-for="(step, i) in msg.plan.steps"
-              :key="i"
-              class="plan-step"
-              :class="{ done: msg.plan.done.includes(i + 1) }"
-            >
-              <span class="plan-step-check">{{ msg.plan.done.includes(i + 1) ? '✓' : i + 1 }}</span>
-              <span class="plan-step-text">{{ step }}</span>
-            </div>
-          </div>
           <!-- Markdown 渲染内容 -->
           <div v-if="msg.content" class="md-content" :class="{ 'show-raw': msg.showRaw }">
             <div v-if="msg.showRaw" class="md-raw-text">{{ stripThinkBlocks(msg.content) }}</div>
@@ -139,6 +119,17 @@
             >
               {{ msg.showRaw ? '显示渲染' : '显示原文' }}
             </button>
+          </div>
+          <!-- 危险确认快捷回复：AI 请求用户回复“确认/取消”时直接渲染按钮 -->
+          <div v-if="confirmOptionsFor(msg).length" class="confirm-quick-replies">
+            <span class="confirm-quick-label">请选择：</span>
+            <button
+              v-for="opt in confirmOptionsFor(msg)"
+              :key="opt"
+              class="confirm-quick-btn"
+              :class="{ primary: opt !== '取消' }"
+              @click="quickReplyDanger(msg, opt)"
+            >{{ opt }}</button>
           </div>
           <!-- 导出的图片直接显示在消息中（已自动保存到默认保存目录） -->
           <div v-if="msg.image" class="msg-image-wrap">
@@ -273,16 +264,44 @@
       </div>
     </div>
 
+    <!-- Todo 原子胶囊：悬浮在记忆/历史/新建对话工具栏上方 -->
+    <div
+      v-if="activePlan && activePlan.steps && activePlan.steps.length > 0"
+      class="plan-float"
+      @mouseenter="planHover = true"
+      @mouseleave="planHover = false"
+      @click="planHover = !planHover"
+    >
+      <div class="plan-float-capsule">
+        <span class="plan-float-icon">☑</span>
+        <span class="plan-float-text">Todo</span>
+        <span class="plan-float-progress">{{ activePlan.done.length }}/{{ activePlan.steps.length }}</span>
+      </div>
+      <Transition name="plan-pop">
+        <div v-if="planHover" class="plan-float-panel">
+          <div
+            v-for="(step, i) in activePlan.steps"
+            :key="i"
+            class="plan-float-step"
+            :class="{ done: activePlan.done.includes(i + 1) }"
+          >
+            <span class="plan-float-check">{{ activePlan.done.includes(i + 1) ? '✓' : '' }}</span>
+            <span class="plan-float-step-text">{{ step }}</span>
+          </div>
+        </div>
+      </Transition>
+    </div>
+
     <!-- 工具栏：记忆设置 / 历史记录 / 新建对话 -->
     <div class="chat-toolbar">
-      <button class="toolbar-btn" @click="showMemoryDialog = true" title="设置永久记忆，AI将严格遵守">
+      <button v-if="!compact" class="toolbar-btn" @click="showMemoryDialog = true" title="设置永久记忆，AI将严格遵守">
         <svg viewBox="0 0 20 20" fill="none" width="14" height="14">
           <path d="M10 2L3 5v5c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V5l-7-3z" stroke="currentColor" stroke-width="1.5" fill="none"/>
           <path d="M7 10l2 2 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         <span>记忆设置</span>
       </button>
-      <button class="toolbar-btn" @click="toggleHistoryPanel" title="查看历史对话记录">
+      <button v-if="!compact" class="toolbar-btn" @click="toggleHistoryPanel" title="查看历史对话记录">
         <svg viewBox="0 0 20 20" fill="none" width="14" height="14">
           <circle cx="10" cy="10" r="7.5" stroke="currentColor" stroke-width="1.5" fill="none"/>
           <path d="M10 5v5l3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -294,6 +313,13 @@
           <path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
         <span>新建对话</span>
+      </button>
+      <button class="toolbar-btn" :disabled="distillingSkill" @click="generateSkillFromConversation" title="分析当前对话，尝试沉淀为可复用 Skill">
+        <svg viewBox="0 0 20 20" fill="none" width="14" height="14">
+          <path d="M5 3h8l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.3"/>
+          <path d="M8 10h5M8 13h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+        <span>沉淀 Skill</span>
       </button>
     </div>
 
@@ -440,6 +466,15 @@
       @dragleave="onFileDragLeave"
       @drop="onFileDrop"
     >
+      <!-- 排队消息：AI 运行期间发送的消息在这里展示，可编辑/删除 -->
+      <div v-if="messageQueue.length" class="queued-messages">
+        <div v-for="(q, i) in messageQueue" :key="i" class="queued-message">
+          <span class="queued-index">#{{ i + 1 }}</span>
+          <span class="queued-text">{{ q.text }}</span>
+          <button class="queued-btn" @click="editQueuedMessage(i)">编辑</button>
+          <button class="queued-btn danger" @click="removeQueuedMessage(i)">删除</button>
+        </div>
+      </div>
       <!-- AI 续写/新增子节点提问：快捷回复按钮 -->
       <div v-if="pendingContinue" class="quick-reply-bar">
         <span class="quick-reply-label">
@@ -497,6 +532,33 @@
           <span class="ref-chip-kind">{{ r.kindLabel }}</span>
           <button class="ref-chip-close" title="移除引用" @click="removeAttachedRef(i)">×</button>
         </span>
+      </div>
+      <!-- Skills 原子胶囊 -->
+      <div v-if="attachedSkills.length" class="attached-refs">
+        <span
+          v-for="(s, i) in attachedSkills"
+          :key="s.id"
+          class="ref-chip skill-chip"
+          :title="s.description || s.name"
+        >
+          <svg class="ref-chip-icon" viewBox="0 0 16 16" width="11" height="11">
+            <path fill="currentColor" d="M5 3h8l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm5.5 1v3.5H14z"/>
+          </svg>
+          <span class="ref-chip-file">Skill</span>
+          <span class="ref-chip-sep">›</span>
+          <span class="ref-chip-text">{{ s.name }}</span>
+          <button class="ref-chip-close" title="移除 Skill" @click="removeAttachedSkill(i)">×</button>
+        </span>
+      </div>
+      <!-- @ 技能选择弹层 -->
+      <div v-if="skillPickerVisible" class="skill-picker">
+        <div class="skill-picker-title">选择 Skill</div>
+        <button
+          v-for="s in filteredSkills"
+          :key="s.id"
+          class="skill-picker-item"
+          @click="selectSkill(s)"
+        >{{ s.name }}<span v-if="s.description" class="skill-picker-desc">{{ s.description }}</span></button>
       </div>
       <textarea
         ref="textareaRef"
@@ -686,7 +748,7 @@ import { Setting } from '@element-plus/icons-vue'
 import { treeToText, treeToSkeletonText, countNodes } from '../utils/treeUtils'
 import { createUid } from 'simple-mind-map/src/utils'
 import { aiService, buildBaseURL, resetWebSearchTask } from '../services/aiService'
-import { handleToolCall, aiTools, getCoreTools, DANGEROUS_TOOLS, TOOL_METADATA } from '../services/toolHandler'
+import { handleToolCall, aiTools, getCoreTools, DANGEROUS_TOOLS, TOOL_METADATA, buildToolCatalogText } from '../services/toolHandler'
 import { useMindMapStore } from '../stores/mindMapStore'
 import { stripDynamicContext } from '../composables/useChatSend'
 import { isTrustMode, setTrustMode } from '../utils/trustMode'
@@ -735,6 +797,10 @@ const props = defineProps({
   currentFileName: {
     type: String,
     default: ''
+  },
+  compact: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -746,6 +812,16 @@ const imageInputRef = ref(null)
 const messages = ref([])
 const inputText = ref('')
 const aiStatus = ref('idle')
+const planHover = ref(false)
+const activePlan = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m && m.role === 'assistant' && m.plan && Array.isArray(m.plan.steps) && m.plan.steps.length > 0) {
+      return m.plan
+    }
+  }
+  return null
+})
 // 后台任务运行状态：'feishu'|'wechat'|'task'|null（不影响主界面发送按钮，但会显示提示）
 const backgroundRunning = ref(null)
 // 信任模式：开启后所有危险操作跳过弹窗确认，直接执行
@@ -768,7 +844,7 @@ const releaseAILock = (token) => {
 const isAIBusy = () => aiLockToken !== 0
 
 // 是否可发送：有文字、有引用胶囊或有拖入文件胶囊
-const canSend = computed(() => inputText.value.trim() !== '' || attachedRefs.value.length > 0 || attachedFiles.value.length > 0)
+const canSend = computed(() => inputText.value.trim() !== '' || attachedRefs.value.length > 0 || attachedFiles.value.length > 0 || attachedSkills.value.length > 0)
 
 // 对话管理
 const currentConversation = ref(null)
@@ -1260,6 +1336,25 @@ const quickPicksFor = (msg) => {
   return msg.quickPicks
 }
 
+const confirmOptionsFor = (msg) => {
+  if (!msg || msg.role !== 'assistant' || !msg.content) return []
+  if (aiStatus.value === 'thinking' || aiStatus.value === 'calling') return []
+  const last = messages.value[messages.value.length - 1]
+  if (last !== msg) return []
+  const text = msg.content
+  const options = []
+  if (/(确认删除|确认清空|确认执行|仍然执行|确认)/.test(text)) options.push('确认删除')
+  if (/(取消|暂不)/.test(text)) options.push('取消')
+  if (options.length && options.includes('确认删除') && options.includes('取消')) return options
+  return []
+}
+
+const quickReplyDanger = (msg, value) => {
+  if (!msg || !value) return
+  inputText.value = value
+  sendMessage(value)
+}
+
 // 单选：点击立即发送该选项
 const onQuickPickClick = (msg, oi) => {
   const picks = quickPicksFor(msg)
@@ -1477,6 +1572,19 @@ const scheduleIdleReset = (delay = 500) => {
   }, delay)
 }
 
+const waitForFileSwitch = (filePath, timeoutMs = 2500) => new Promise((resolve) => {
+  if (!filePath) { resolve(); return }
+  const target = String(filePath).replace(/[\\/]+/g, '/').replace(/\/+$/, '')
+  const start = Date.now()
+  const timer = setInterval(() => {
+    const cur = String(props.currentFilePath || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '')
+    if (cur === target || Date.now() - start >= timeoutMs) {
+      clearInterval(timer)
+      resolve()
+    }
+  }, 60)
+})
+
 // 中止进行中的生成并令其回调全部过期（切换/新建/清空/删除会话前调用）
 const abortActiveGeneration = () => {
   if (aiStatus.value === 'thinking' || aiStatus.value === 'calling' || backgroundRunning.value) {
@@ -1499,9 +1607,31 @@ const jumpQueue = () => {
     inputText.value = next.text
     attachedRefs.value = next.refs
     attachedFiles.value = next.files
+    attachedSkills.value = next.skills || []
     if (textareaRef.value) textareaRef.value.style.height = 'auto'
     sendMessage(next.text)
   }, 350)
+}
+
+const editQueuedMessage = (index) => {
+  const item = messageQueue.value[index]
+  if (!item) return
+  messageQueue.value.splice(index, 1)
+  inputText.value = item.text || ''
+  attachedRefs.value = item.refs || []
+  attachedFiles.value = item.files || []
+  attachedSkills.value = item.skills || []
+  nextTick(() => {
+    if (textareaRef.value) {
+      textareaRef.value.focus()
+      const len = textareaRef.value.value.length
+      textareaRef.value.setSelectionRange(len, len)
+    }
+  })
+}
+
+const removeQueuedMessage = (index) => {
+  messageQueue.value.splice(index, 1)
 }
 
 const stopGeneration = () => {
@@ -1511,6 +1641,7 @@ const stopGeneration = () => {
   dismissDangerDialog()
   stopRequested.value = true
   aiService.abort()
+  runSeq++
 
   // 取消等待用户回答的 AI 续写提问
   if (pendingContinue.value) {
@@ -1548,7 +1679,10 @@ const autoResize = () => {
 
 const onShiftEnter = () => {}
 
-watch(inputText, () => autoResize())
+watch(inputText, () => {
+  autoResize()
+  detectSkillMention()
+})
 // 滚动跟随：监听"消息数量 + 每条内容长度"组成的轻量签名，而非 deep 全量遍历。
 // 长对话时流式 chunk 每flush一次都要深度遍历全部消息（含工具调用数组），是卡顿主因之一
 watch(
@@ -1775,6 +1909,9 @@ const retrieveKnowledgeForQuestion = async (question) => {
  * 点击外部关闭模型下拉
  */
 const onGlobalClick = (e) => {
+  if (skillPickerVisible.value && !e.target?.closest?.('.skill-picker') && e.target !== textareaRef.value) {
+    skillPickerVisible.value = false
+  }
   if (modelDropdownVisible.value) {
     const target = e.target
     if (target && !target.closest('.model-switcher')) {
@@ -1979,6 +2116,53 @@ const saveMemorySettings = () => {
   ElMessage.success('记忆已保存')
 }
 
+const distillingSkill = ref(false)
+
+const generateSkillFromConversation = async () => {
+  if (messages.value.length === 0) {
+    ElMessage.warning('当前对话还没有内容')
+    return
+  }
+  if (!window.electronAPI?.skills?.create) {
+    ElMessage.warning('当前环境不支持 Skill 创建')
+    return
+  }
+  distillingSkill.value = true
+  try {
+    const transcript = messages.value.map(m => {
+      const role = m.role === 'user' ? '用户' : 'AI'
+      const text = stripDynamicContext(m.content || '')
+      const tools = (m.toolCalls || []).map(tc => `[工具 ${tc.displayName || tc.name} → ${tc.status}]`).join(' ')
+      return `${role}：${text}${tools ? `\n${tools}` : ''}`
+    }).join('\n\n')
+    const prompt = `请分析以下对话，判断能否沉淀为一个可复用的 Skill。\n\n要求：\n1. feasible=true 表示当前系统能力可以支持该 Skill；如果必须依赖外部未配置服务、或需要系统不存在的底层能力，则 feasible=false。\n2. 只沉淀已经验证成功的流程，失败过程不要固化为 Skill。\n3. name 短小明确，instructions 是给未来 AI 执行的逐步指令。\n\n只输出 JSON：\n{"feasible":true,"reason":"为什么可行/不可行","name":"技能名","description":"解决什么问题","instructions":"步骤1；步骤2"} \n\n当前可用工具摘要：\n${buildToolCatalogText(55)}\n\n对话内容：\n${transcript.slice(0, 18000)}`
+    const choice = await aiService.chat(prompt, '你是一个技能沉淀器，只输出严格 JSON。', null, { responseFormat: 'json' })
+    const content = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
+    const start = content.indexOf('{')
+    const end = content.lastIndexOf('}')
+    if (start === -1 || end === -1) throw new Error('AI 未返回有效 JSON')
+    const parsed = JSON.parse(content.slice(start, end + 1))
+    if (!parsed.feasible) {
+      ElMessage.info(`暂不沉淀：${parsed.reason || '当前能力不支持'}`)
+      return
+    }
+    if (!parsed.name || !parsed.instructions) throw new Error('Skill 缺少名称或指令')
+    const skill = await window.electronAPI.skills.create({
+      name: parsed.name,
+      description: parsed.description || '',
+      instructions: parsed.instructions,
+      autoInvoke: true,
+      source: 'ai'
+    })
+    ElMessage.success(`已沉淀 Skill「${skill.name}」`)
+  } catch (e) {
+    console.error('沉淀 Skill 失败:', e)
+    ElMessage.error(`沉淀 Skill 失败：${e.message || e}`)
+  } finally {
+    distillingSkill.value = false
+  }
+}
+
 /* ============================================================
  * 发送消息
  * ============================================================ */
@@ -1992,6 +2176,17 @@ const SYSTEM_PROMPT = `You are an AI assistant for a mind-map editor (.smm files
 - Clarify ambiguity first; resolve targets by explicit uid/path > current selection > history (reuse, don't re-query).
 - Multi-step task: FIRST emit a <plan> checklist, then execute strictly in that order and emit <step-done>N after each step. Never skip or reorder steps.
 - Batch in ONE call (batch_node_actions / update_node_text / add_child_nodes / find_replace_text). Never loop select_node + edit.
+- Whole-map/terminal-node tasks: get the leaf node set ONCE with select_node(mode="leaves") or batch_node_actions targets.mode="leaves"; NEVER search_nodes one node at a time.
+- After parallel_ai_workers completes, immediately apply/merge its returned content with add_child_nodes or update_node_text. Do not re-search the same nodes, do not repeat add_child_nodes with the same subtree, and do not call search_web unless the user explicitly asked for new external information.
+- Review/recitation tasks ALWAYS use the review tools: get_today_review_status, get_review_schedule, complete_review_task, add_to_review. Never search nodes/files for "复习/到期/今天" to answer review questions.
+- To clear cloze for a depth range, use clear_cloze targets={mode:"level_range",minDepth:1,maxDepth:2} (root=0). Do not enumerate nodes one by one.
+- For指定的内容机械挖空（不是AI选词），use mechanical_cloze(text=... or regex=...) directly; do not use ai_cloze when the user has explicitly told you what to blank.
+- For背诵改写 ALWAYS use ai_recite_rewrite. For生成自测题/出题/追加题目 ALWAYS use ai_quiz (new file) or ai_quiz_append (append to nodes); never hand-craft questions with add_child_nodes/update_node_text.
+- Node operations have dedicated tools: delete_node, insert_parent_node, batch_move_nodes, merge_nodes, outer_frame. Do not simulate them with expand_node/update_node_text/search_nodes.
+- find_local_file returns absolute paths. If the user asks to open/打开 a found file, open it directly and always include the returned path in your reply.
+- merge_mindmap_files reads the source .smm in the background and does NOT require opening the source file first. rename_mindmap_file renames the current file in place; do not use save_mindmap for renaming. To list a folder, use list_directory (not keyword enumeration).
+- MCP: use list_mcp_servers → list_mcp_tools(serverId) → mcp_call_tool(serverId, toolName, arguments) for external capabilities configured in Settings.
+- Skills: use list_skills/get_skill to load saved workflows; create_skill when a successful workflow or a known pitfall should be reused later. Only create/update a skill after the workflow has actually succeeded.
 - Simple request → act directly. Verify results; on failure retry (≤2) or split steps. Report briefly.
 
 ## MESSAGES
@@ -2001,6 +2196,18 @@ const SYSTEM_PROMPT = `You are an AI assistant for a mind-map editor (.smm files
 
 ## MEMORY
 - memory(action=save) only for stable long-term user preferences ("remember…", "always…").`
+
+const buildSystemPromptWithSkills = async (basePrompt) => {
+  try {
+    const skills = await window.electronAPI?.skills?.list?.() || []
+    const active = skills.filter(s => s.enabled && s.autoInvoke)
+    if (!active.length) return basePrompt
+    const lines = active.map((s, i) => `${i + 1}. ${s.name}（id=${s.id}）：${s.description || '无描述'}`).join('\n')
+    return `${basePrompt}\n\n## ACTIVE SKILLS\nThese saved skills are relevant when their description matches the user request. When applicable, call invoke_skill(skillId) and follow the returned instructions strictly.\n${lines}`
+  } catch {
+    return basePrompt
+  }
+}
 
 const MANUAL_COMPRESS_RE = /^(压缩对话|压缩上下文|总结对话|整理对话|压缩一下|\/compress|\/summary)$/
 
@@ -2034,6 +2241,17 @@ const toolCallLine = (tc) => {
     ? (tc.errorBrief ? `：${tc.errorBrief}` : '')
     : (tc.status === 'done' && tc.resultBrief ? `：${tc.resultBrief}` : '')
   return `[工具] ${tc.displayName || tc.name}(${tc.summary || ''}) → ${status}${brief}`
+}
+
+// 已实施的失败工具结果不应污染后续上下文：真正执行成功过/有实质回复的消息保留；
+// 仅是一句“目标解析失败/JSON 异常/请重试”且无任何成功工具的临时失败消息，从发送给模型的上下文中剔除。
+const shouldKeepContextMessage = (m) => {
+  if (!m || m.role !== 'assistant') return true
+  const tcs = m.toolCalls || []
+  if (tcs.some(tc => tc.status === 'done')) return true
+  const content = String(m.content || '').trim()
+  if (!content || content.length > 300) return true
+  return !/(目标节点解析失败|未找到对应 uid|格式异常|无法解析|没有可.*目标|没有目标节点|请重试|AI 出题失败|整理导图失败|工具.*失败)/.test(content)
 }
 
 // 消息数组 → 待总结的历史文本（用户消息 / AI 回复 + 工具调用记录）
@@ -2297,7 +2515,7 @@ const manualCompress = async () => {
   // 手动压缩：剥离动态注入块（同发送逻辑），保留最近3轮原文，其余全部压缩
   // 手动压缩是用户明确要求，即使只有2-3轮也强制保留最近1轮压缩其余，解决"发不出去却提示太短"的问题
   const history = messages.value
-    .filter(m => m.role === 'user' || (m.role === 'assistant' && (m.content || (m.toolCalls && m.toolCalls.length))))
+    .filter(m => (m.role === 'user' || (m.role === 'assistant' && (m.content || (m.toolCalls && m.toolCalls.length)))) && shouldKeepContextMessage(m))
     .map(m => ({ role: m.role, content: m.role === 'user' ? stripDynamicContext(m.content) : m.content, toolCalls: m.toolCalls }))
   const covered = Math.min(summaryCoveredCount.value, history.length)
   let uncovered = history.slice(covered)
@@ -2336,6 +2554,7 @@ const sendMessage = async (overrideText = null) => {
   const text = rawText.trim()
   const refs = attachedRefs.value.slice()
   const files = attachedFiles.value.slice()
+  const skills = attachedSkills.value.slice()
   // 手动压缩指令：输入"压缩对话"等直接触发压缩，不发消息给 AI
   if (MANUAL_COMPRESS_RE.test(text) && refs.length === 0 && files.length === 0) {
     inputText.value = ''
@@ -2343,13 +2562,14 @@ const sendMessage = async (overrideText = null) => {
     await manualCompress()
     return
   }
-  if (!text && refs.length === 0 && files.length === 0) return
+  if (!text && refs.length === 0 && files.length === 0 && skills.length === 0) return
   // thinking（AI 输出中）与 calling（工具执行中）：加入发送队列，回复完成后自动逐条发送
   if (aiStatus.value === 'thinking' || aiStatus.value === 'calling') {
-    messageQueue.value.push({ text, refs, files })
+    messageQueue.value.push({ text, refs, files, skills })
     inputText.value = ''
     attachedRefs.value = []
     attachedFiles.value = []
+    attachedSkills.value = []
     if (textareaRef.value) textareaRef.value.style.height = 'auto'
     ElMessage.info(`已加入发送队列（第 ${messageQueue.value.length} 条），当前回复完成后自动发送`)
     return
@@ -2404,9 +2624,13 @@ const sendMessage = async (overrideText = null) => {
     fileContextParts.push(`【拖入文件｜路径：${f.path}】`)
   }
   const filesContext = fileContextParts.join('\n')
+  const skillsContext = skills.length
+    ? `【已选用 Skill】\n${skills.map(s => `@${s.name}（id=${s.id}）\n${s.instructions || ''}`).join('\n\n')}`
+    : ''
   const contextParts = []
   if (filesContext) contextParts.push(filesContext)
   if (refsContext) contextParts.push(refsContext)
+  if (skillsContext) contextParts.push(skillsContext)
   const fullContent = contextParts.length ? `${contextParts.join('\n')}\n${text}` : text
   // 引用/文件均以原子胶囊展示（消息列表），content 仅保留用户文字；完整上下文仍通过 fullContent 发送给 AI
   const displayContent = text
@@ -2427,6 +2651,9 @@ const sendMessage = async (overrideText = null) => {
       kindLabel: r.kindLabel,
       title: r.title
     }))
+  }
+  if (skills.length) {
+    userMsg.skills = skills.map(s => ({ id: s.id, name: s.name, description: s.description }))
   }
 
   // 带图消息处理：多模态启用且配置完整 → 原图直发多模态配置档；否则后台本地 OCR，识别结果随消息一起发给大模型（不写入输入框）
@@ -2486,6 +2713,7 @@ const sendMessage = async (overrideText = null) => {
   inputText.value = ''
   attachedRefs.value = []
   attachedFiles.value = []
+  attachedSkills.value = []
 
   if (textareaRef.value) {
     textareaRef.value.style.height = 'auto'
@@ -2513,7 +2741,7 @@ const sendMessage = async (overrideText = null) => {
 
     // 系统提示词（精简英文铁律；工具发现与参数 schema 由 activate_tools 按需返回）
     // 每次一字不差 → 最大化前缀缓存命中
-    let systemPrompt = SYSTEM_PROMPT
+    let systemPrompt = await buildSystemPromptWithSkills(SYSTEM_PROMPT)
 
     // 动态上下文（日期/当前文件/导图信息/记忆）拼到最后一问末尾而非 system 头部
     let dynamicContext = `\n\n## Current time\nToday is ${(() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') })()}. Use this date for time references.\n\n## Current file\n${fileInfo}`
@@ -2606,7 +2834,7 @@ const sendMessage = async (overrideText = null) => {
     // 历史 user 消息剥离动态注入块（时间/文件/导图内容/记忆）——这些每轮都不同且重复累积是 token 爆炸主因；
     // 最后一条会被 finalUserText 覆盖为最新动态内容，不受剥离影响
     const historyMsgs = messages.value
-      .filter(m => m.role === 'user' || (m.role === 'assistant' && (m.content || (m.toolCalls && m.toolCalls.length))))
+      .filter(m => (m.role === 'user' || (m.role === 'assistant' && (m.content || (m.toolCalls && m.toolCalls.length)))) && shouldKeepContextMessage(m))
       .map(m => ({ role: m.role, content: m.role === 'user' ? stripDynamicContext(m.content) : m.content, toolCalls: m.toolCalls }))
     // 最后一条用户消息替换为展开后的完整上下文（消息列表仅显示摘要；含 OCR 结果与动态上下文）
     for (let i = historyMsgs.length - 1; i >= 0; i--) {
@@ -2749,6 +2977,9 @@ const sendMessage = async (overrideText = null) => {
           aiStatus.value = 'calling'
           emit('tool-call-status', 'calling')
 
+          const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
+          const userCtx = lastUserMsg ? firstN(stripDynamicContext(lastUserMsg.content), 240) : ''
+
           // 添加工具调用状态到消息（summary 让用户看到"正在做什么"）
           const tcEntry = {
             name: toolName,
@@ -2759,7 +2990,7 @@ const sendMessage = async (overrideText = null) => {
           aiMsg.toolCalls.push(tcEntry)
 
           // 记录工具调用日志（中文名 + 内部名，便于用户理解与调试对照）
-          addLog('tool_call', `工具: ${toolNameMap[toolName] || toolName} [${toolName}]\n参数: ${toolCall.function.arguments}`, {
+          addLog('tool_call', `${userCtx ? `用户请求：${userCtx}\n` : ''}工具: ${toolNameMap[toolName] || toolName} [${toolName}]\n参数: ${toolCall.function.arguments}`, {
             toolName: toolName,
             toolArgs: toolCall.function.arguments
           }, currentConversation.value?.id)
@@ -2818,7 +3049,7 @@ const sendMessage = async (overrideText = null) => {
               ? { ...result, imageData: `[图片数据已省略，长度 ${result.imageData.length} 字符]` }
               : result
             // 记录工具返回日志
-            addLog('tool_result', `工具: ${toolNameMap[toolName] || toolName} [${toolName}]\n耗时: ${durationMs}ms\n结果: ${JSON.stringify(logResult)}`, {
+            addLog('tool_result', `${userCtx ? `用户请求：${userCtx}\n` : ''}工具: ${toolNameMap[toolName] || toolName} [${toolName}]\n耗时: ${durationMs}ms\n结果: ${JSON.stringify(logResult)}`, {
               toolName: toolName,
               result: logResult,
               durationMs
@@ -2833,6 +3064,7 @@ const sendMessage = async (overrideText = null) => {
                 emit('external-file-created')
               } else {
                 emit('file-created', result.filePath, result.fileName)
+                if (result.switchFile) await waitForFileSwitch(result.filePath)
               }
             }
             // 不在消息中追加工具结果文本，状态指示器已经显示完成
@@ -2919,6 +3151,7 @@ const sendMessage = async (overrideText = null) => {
               inputText.value = next.text
               attachedRefs.value = next.refs
               attachedFiles.value = next.files
+              attachedSkills.value = next.skills || []
               sendMessage(next.text)
             }, 600)
           }
@@ -2955,7 +3188,7 @@ const sendMessage = async (overrideText = null) => {
             try {
               // 强制压缩：把所有历史（除了最后一条用户消息）压成摘要
               const forcedHistory = messages.value
-                .filter(m => m.role === 'user' || (m.role === 'assistant' && (m.content || (m.toolCalls && m.toolCalls.length))))
+                .filter(m => (m.role === 'user' || (m.role === 'assistant' && (m.content || (m.toolCalls && m.toolCalls.length)))) && shouldKeepContextMessage(m))
                 .map(m => ({ role: m.role, content: m.role === 'user' ? stripDynamicContext(m.content) : m.content, toolCalls: m.toolCalls }))
               // 只保留最后1轮（最后一条user+之前的assistant）
               const lastUserIdx = forcedHistory.map(m => m.role).lastIndexOf('user')
@@ -2975,7 +3208,7 @@ const sendMessage = async (overrideText = null) => {
               // 用压缩后的上下文 + 原始最后一条用户消息重建发送列表
               const rebuilt = await buildContextMessages(
                 messages.value
-                  .filter(m => m.role === 'user' || (m.role === 'assistant' && (m.content || (m.toolCalls && m.toolCalls.length))))
+                  .filter(m => (m.role === 'user' || (m.role === 'assistant' && (m.content || (m.toolCalls && m.toolCalls.length)))) && shouldKeepContextMessage(m))
                   .map(m => ({ role: m.role, content: m.role === 'user' ? stripDynamicContext(m.content) : m.content, toolCalls: m.toolCalls })),
                 SYSTEM_PROMPT,
                 coreTools
@@ -3797,10 +4030,10 @@ ${instructionBlock}
 ${context}
 
 改写规则（严格遵守）：
-1. 每个 ► 节点的改写结果必须是固定格式：【记忆简写】+重点概括。【记忆简写】优先只取 1 个字；仅当 1 个字无法与同层级其他节点区分时，才扩展到 2~4 个字，绝对不要超过 4 个字。允许使用谐音字。紧跟一句精炼的重点概括（40 字内），节点有子节点时需覆盖子节点核心内容，没有子节点则概括自身内容。
-2. 对每个 ◆ 父节点生成记忆概要（generalization）：格式为【记忆简写】+记忆方法。先按同样策略（优先 1 个字，最多 4 个字）串联其全部子节点的记忆简写（可组成谐音口诀、首字串联），再用一句话说明如何记住这组内容（可用谐音、联想、口诀，50 字内）。
+1. 每个 ► 节点的改写结果必须是固定格式：【记忆简写】+重点概括。【记忆简写】优先只取 1 个字；仅当 1 个字无法与同层级其他节点区分时，才扩展到 2~4 个字，绝对不要超过 4 个字。允许使用谐音字，但只允许自然易懂的谐音。重点概括部分：如果原节点文字 ≤ 12 个字，必须直接保留原节点文字，不要扩展、不要改写成更长的句子；如果原节点文字较长，才概括为 40 字内的重点概括。
+2. 对每个 ◆ 父节点生成记忆概要（generalization）：格式为【记忆简写】+记忆方法。先按同样策略（优先 1 个字，最多 4 个字）串联其全部子节点的记忆简写，优先使用首字串联、语义分组；谐音/联想/口诀只有在自然顺口时才使用，禁止生硬谐音、为了押韵扭曲原意、编造无意义联想。记忆方法一句话说明，50 字内。
 3. 必须基于上级节点和同级节点的上下文理解内容，改写不得遗漏关键知识点。
-4. memoryTip：针对本次改写涉及的最高层主题输出一个整体记忆技巧，简短（30字内）、诙谐、好记。
+4. memoryTip：针对本次改写涉及的最高层主题输出一个整体记忆技巧，简短（30字内）、自然、好记；如果编不出自然好记的谐音，就直接给语义归纳或首字串联，不要强行谐音。
 
 返回格式（严格 JSON，不要返回任何其他内容，不要 markdown 代码块）：
 {"rewrites": [{"index": 1, "text": "【记忆简写】重点概括"}], "generalizations": [{"index": 1, "text": "【记忆简写】记忆方法"}], "memoryTip": "整体记忆技巧"}
@@ -4193,8 +4426,15 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
       }, currentConversation.value?.id)
       emit('log-updated')
     }
+    let clozeFallbackUsed = false
     const progressCb = (progress) => {
       let progressText = ''
+      if (progress && progress.fallback) {
+        clozeFallbackUsed = true
+        aiMsg.content = `正在分析${isFullMap ? '整张导图' : '节点内容'}并选择关键词进行挖空...（部分批次 AI 失败，已使用本地规则兜底）`
+        scrollToBottom()
+        return
+      }
       if (progress && typeof progress === 'object' && progress.percent !== undefined) {
         progressText = `已完成 ${progress.done}/${progress.total} 批（${progress.percent}%）`
         if (clozeToolCalls[0]) {
@@ -4231,7 +4471,7 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
 
     // 挖空成功
     finishClozeToolCalls('done')
-    aiMsg.content = `已完成 ${nodeCount} 的智能挖空，共挖空 ${count} 个关键词。\n\n挖空内容已隐藏（半透明紫底+紫下划线），可通过画布右键菜单「显示/隐藏挖空」切换显隐状态。可通过 Ctrl+Z 撤销。`
+    aiMsg.content = `已完成 ${nodeCount} 的智能挖空，共挖空 ${count} 个关键词。${clozeFallbackUsed ? '\n\n说明：部分节点因 AI 失败，已使用更保守的本地规则兜底挖空。' : ''}\n\n挖空内容已隐藏（半透明紫底+紫下划线），可通过画布右键菜单「显示/隐藏挖空」切换显隐状态。可通过 Ctrl+Z 撤销。`
     aiStatus.value = 'done'
     emit('tool-call-status', 'done')
 
@@ -4299,7 +4539,14 @@ const aiQuiz = async (nodesOrNode) => {
   messages.value.push({
     id: genMsgId(),
     role: 'user',
-    content: `AI 出题 ${nodeCount}（题目+答案+解析追加为子节点，答案与解析自动挖空隐藏）`
+    content: `AI 出题 ${nodeCount}`,
+    refs: nodes.map((n, i) => ({
+      id: `quiz-${Date.now()}-${i}`,
+      uid: n.getData?.('uid') || n.uid,
+      fileName: props.currentFileName || '当前导图',
+      label: extractNodeText(n) || '未命名节点',
+      kindLabel: '出题目标'
+    }))
   })
 
   const aiMsg = {
@@ -4335,7 +4582,7 @@ const aiQuiz = async (nodesOrNode) => {
     aiMsg.content = result?.message || 'AI 出题完成'
     aiStatus.value = ok ? 'done' : 'error'
     emit('tool-call-status', ok ? 'done' : 'error')
-    addLog('tool_result', `工具: ai_quiz_append\n耗时: ${Date.now() - toolStartTs}ms\n结果: ${JSON.stringify(result)}`, {
+    addLog('tool_result', `用户请求：AI 出题 ${nodeCount}（${nodes.map(n => extractNodeText(n)).filter(Boolean).slice(0, 5).join('、')}）\n工具: ai_quiz_append\n耗时: ${Date.now() - toolStartTs}ms\n结果: ${JSON.stringify(result)}`, {
       toolName: 'ai_quiz_append',
       result
     }, currentConversation.value?.id)
@@ -4403,7 +4650,7 @@ const reorganizeMindmap = async () => {
     aiMsg.content = result?.message || '整理完成'
     aiStatus.value = ok ? 'done' : 'error'
     emit('tool-call-status', ok ? 'done' : 'error')
-    addLog('tool_result', `工具: reorganize_mindmap\n耗时: ${Date.now() - toolStartTs}ms\n结果: ${JSON.stringify(result)}`, {
+    addLog('tool_result', `用户请求：一键整理导图（整理为新的导图文件）\n工具: reorganize_mindmap\n耗时: ${Date.now() - toolStartTs}ms\n结果: ${JSON.stringify(result)}`, {
       toolName: 'reorganize_mindmap',
       result
     }, currentConversation.value?.id)
@@ -4682,7 +4929,7 @@ const processExternalMessage = async (text, source = 'task', extLogger = null) =
     : '当前没有打开任何文件。'
 
   // 系统提示词（精简英文铁律，同 sendMessage，保证前缀缓存一致）
-  let systemPrompt = SYSTEM_PROMPT
+  let systemPrompt = await buildSystemPromptWithSkills(SYSTEM_PROMPT)
 
   // 动态上下文（同 sendMessage，前缀缓存一致）
   let dynamicContext = `\n\n## Current time\nToday is ${(() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') })()}. Use this date for time references.\n\n## Current file\n${fileInfo}`
@@ -4842,6 +5089,45 @@ const processExternalMessage = async (text, source = 'task', extLogger = null) =
 // ========== 输入框引用胶囊（右键"将节点添加到 AI 对话"） ==========
 // 输入框只显示简洁的蓝色高亮胶囊，发送时才展开为完整上下文（文件名+上级+同级/子树）
 const attachedRefs = ref([])
+const attachedSkills = ref([])
+const skillPickerVisible = ref(false)
+const skillQuery = ref('')
+const allSkills = ref([])
+const filteredSkills = computed(() => {
+  const q = skillQuery.value.trim().toLowerCase()
+  const enabled = allSkills.value.filter(s => s.enabled)
+  return q ? enabled.filter(s => s.name.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q)) : enabled
+})
+
+const loadSkillPicker = async () => {
+  try { allSkills.value = await window.electronAPI?.skills?.list?.() || [] } catch { allSkills.value = [] }
+}
+
+const detectSkillMention = () => {
+  const value = inputText.value || ''
+  const atIdx = value.lastIndexOf('@')
+  if (atIdx >= 0 && !value.slice(atIdx + 1).includes(' ')) {
+    skillQuery.value = value.slice(atIdx + 1)
+    skillPickerVisible.value = true
+  } else {
+    skillPickerVisible.value = false
+  }
+}
+
+const selectSkill = (skill) => {
+  if (!attachedSkills.value.some(s => s.id === skill.id)) {
+    attachedSkills.value.push({ id: skill.id, name: skill.name, description: skill.description, instructions: skill.instructions })
+  }
+  const value = inputText.value || ''
+  const atIdx = value.lastIndexOf('@')
+  if (atIdx >= 0) inputText.value = value.slice(0, atIdx).trimEnd()
+  skillPickerVisible.value = false
+  skillQuery.value = ''
+}
+
+const removeAttachedSkill = (index) => {
+  attachedSkills.value.splice(index, 1)
+}
 
 // ========== 输入框文件胶囊（本地文件拖入输入区，发送时展开为【拖入文件｜路径：…】上下文） ==========
 const attachedFiles = ref([])
@@ -5038,6 +5324,7 @@ onMounted(() => {
   memoryText.value = loadMemory()
   conversations.value = loadConversations()
   loadCurrentModel()
+  loadSkillPicker()
   window.addEventListener('click', onGlobalClick)
   window.addEventListener('dragover', onGlobalDragOver)
   window.addEventListener('drop', onGlobalDrop)
@@ -5346,6 +5633,106 @@ defineExpose({
   text-decoration-color: rgba(5, 150, 105, 0.5);
 }
 
+/* ========== Todo 原子胶囊 ========== */
+.plan-float {
+  position: relative;
+  z-index: 30;
+  display: flex;
+  justify-content: center;
+  pointer-events: auto;
+}
+
+.plan-float-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(0, 122, 255, 0.12);
+  border: 1px solid rgba(0, 122, 255, 0.28);
+  color: var(--apple-blue, #007aff);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.plan-float-icon {
+  font-size: 13px;
+}
+
+.plan-float-progress {
+  font-weight: 700;
+}
+
+.plan-float-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(420px, calc(100vw - 32px));
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.14);
+}
+
+.plan-float-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.plan-float-step:last-child {
+  border-bottom: none;
+}
+
+.plan-float-step.done {
+  color: var(--text-tertiary);
+}
+
+.plan-float-step.done .plan-float-step-text {
+  text-decoration: line-through;
+}
+
+.plan-float-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 1px solid rgba(0, 122, 255, 0.45);
+  border-radius: 4px;
+  color: #fff;
+  background: transparent;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.plan-float-step.done .plan-float-check {
+  background: var(--apple-blue, #007aff);
+  border-color: var(--apple-blue, #007aff);
+}
+
+.plan-pop-enter-active,
+.plan-pop-leave-active {
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.plan-pop-enter-from,
+.plan-pop-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(4px);
+}
+
 /* ========== Tool Call Status ========== */
 .tool-calls {
   display: flex;
@@ -5404,6 +5791,33 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 7px;
+}
+
+.confirm-quick-replies {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.confirm-quick-label {
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+}
+
+.confirm-quick-btn {
+  border: 1px solid rgba(0, 122, 255, 0.25);
+  background: #fff;
+  color: var(--apple-blue, #007aff);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.confirm-quick-btn.primary {
+  background: var(--apple-blue, #007aff);
+  color: #fff;
 }
 
 .qp-caption {
@@ -6116,12 +6530,55 @@ defineExpose({
 
 /* ========== Input Area ========== */
 .chat-input-area {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 12px 16px 16px;
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
+}
+
+.queued-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.queued-message {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(0, 122, 255, 0.06);
+  border: 1px solid rgba(0, 122, 255, 0.14);
+  font-size: 12px;
+}
+
+.queued-index {
+  color: var(--apple-blue, #007aff);
+  font-weight: 700;
+}
+
+.queued-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queued-btn {
+  border: none;
+  background: transparent;
+  color: var(--apple-blue, #007aff);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.queued-btn.danger {
+  color: #ff3b30;
 }
 
 /* ========== 引用节点胶囊 ========== */
@@ -6131,6 +6588,51 @@ defineExpose({
   gap: 6px;
   max-height: 96px;
   overflow-y: auto;
+}
+
+.skill-picker {
+  position: absolute;
+  bottom: 100%;
+  left: 12px;
+  right: 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  z-index: 20;
+}
+
+.skill-picker-title {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 2px 6px 4px;
+}
+
+.skill-picker-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.skill-picker-item:hover {
+  background: rgba(0, 122, 255, 0.08);
+}
+
+.skill-picker-desc {
+  color: var(--text-tertiary);
+  font-size: 11px;
 }
 
 /* ========== 拖入文件胶囊 ========== */

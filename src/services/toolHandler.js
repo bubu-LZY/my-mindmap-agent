@@ -18,7 +18,7 @@ import {
   markCycleCompleted, markCycleUncompleted
 } from '../utils/reviewPlan'
 import {
-  toggleAllCloze, toggleClozeByUid, setNodesClozeHidden, isClozeHiddenAll,
+  toggleAllCloze, toggleClozeByUid, setAllClozeHidden, setNodesClozeHidden, isClozeHiddenAll,
   nodeHasCloze, isUidClozeHidden, clearNodeCloze, applyClozeStyles, setGlobalClozeHidden
 } from '../utils/cloze'
 import { useMindMapStore } from '../stores/mindMapStore'
@@ -46,7 +46,9 @@ const richTextStyleProps = {
 const targetNodesProps = {
   uids: { type: 'array', items: { type: 'string' }, description: 'Node uid list (get from search_nodes, or from the nodes field returned by generate_mindmap/import_file_as_mindmap)' },
   keyword: { type: 'string', description: 'Keyword: matches all nodes whose text contains it' },
-  mode: { type: 'string', enum: ['leaves', 'leaf_parents', 'all'], description: 'all=all nodes; leaves=all leaf nodes; leaf_parents=parents of all leaf nodes (deduped)' },
+  mode: { type: 'string', enum: ['leaves', 'leaf_parents', 'all', 'level_range'], description: 'all=all nodes; leaves=all leaf nodes; leaf_parents=parents of all leaf nodes; level_range=filter by minDepth/maxDepth' },
+  minDepth: { type: 'number', description: 'Only keep nodes at this depth or deeper. Root=0, level-1 children=1, level-2 children=2. Example: minDepth=1 excludes root.' },
+  maxDepth: { type: 'number', description: 'Only keep nodes at this depth or shallower. Example: maxDepth=2 means root, level 1 and level 2 only.' },
   includeChildren: { type: 'boolean', description: 'Also cover all descendants of keyword/uids matched nodes (e.g. to style a whole branch at once); default false' }
 }
 
@@ -140,8 +142,9 @@ const toolCatalog = [
   { name: 'delete_local_file', category: 'File', desc: 'Delete a file on the local disk (to system trash or permanently). Use when the user asks to delete a local mindmap file / local file; always confirm with the user first' },
   { name: 'clear_mindmap', category: 'Edit', desc: 'Clear all nodes of the current mindmap, keeping one empty root (confirm with the user before clearing)' },
   { name: 'ai_continue_children', category: 'AI', desc: 'AI continue children: AI generates child nodes and attaches them for the selected node (or the whole map with scope=root); depth per user request, default 2~5, max 6; keeps original text; Ctrl+Z undoable' },
-  { name: 'ai_recite_rewrite', category: 'AI', desc: 'AI recitation rewrite: leaf nodes become 【memory shorthand】+key summary; non-leaf nodes rewrite each direct child and get a memory-summary mnemonic; targets (uids/keyword/mode) sets rewrite scope; Ctrl+Z undoable' },
+  { name: 'ai_recite_rewrite', category: 'AI', desc: 'AI recitation rewrite: 【memory shorthand】+summary; short original text is preserved verbatim, longer text summarized; natural homophones only; targets (uids/keyword/mode) sets rewrite scope; Ctrl+Z undoable' },
   { name: 'ai_cloze', category: 'AI', desc: 'AI smart cloze: pick keywords to blank out (fill-in-blank) for one or more selected nodes, keeping context clues for review' },
+  { name: 'mechanical_cloze', category: 'AI', desc: 'Mechanical cloze: blank every occurrence of an exact text/regex in target nodes directly, without AI analysis' },
   { name: 'ai_cloze_full_map', category: 'AI', desc: 'AI full-map cloze: blank keywords across the whole opened map (all nodes), ignoring selection; for full self-test review' },
   { name: 'parallel_ai_workers', category: 'AI', desc: 'Split a heavy AI job into multiple independent subtasks and run them concurrently, then aggregate the results; use for large map generation/rewrite/cloze/content production' },
   { name: 'add_to_review', category: 'Study', desc: 'Add nodes to the review plan: targets (uids/keyword/mode) adds all matched in one call; omit = current selection; already-planned nodes skipped' },
@@ -166,6 +169,15 @@ const toolCatalog = [
   { name: 'read_mindmap_file', category: 'KB', desc: 'Read the content of a mindmap file at a given path' },
   { name: 'read_node_image', category: 'KB', desc: 'Recognize text/content in the image attached to a mindmap node (multimodal first, local OCR fallback)' },
   { name: 'activate_tools', category: 'Meta', desc: 'Activate tools by names list OR by keyword (auto-finds matching tools from the catalog, activates them, and returns their full parameter definitions); without params returns the full catalog. Only a subset of tools is active by default; inactive tools MUST be activated with this tool first' },
+  { name: 'list_mcp_servers', category: 'MCP', desc: 'List configured MCP servers (id, name, transport, url/command, enabled)' },
+  { name: 'list_mcp_tools', category: 'MCP', desc: 'List tools exposed by one MCP server' },
+  { name: 'mcp_call_tool', category: 'MCP', desc: 'Call a tool on a configured MCP server' },
+  { name: 'list_skills', category: 'Skills', desc: 'List saved skills (name, description, enabled, autoInvoke)' },
+  { name: 'get_skill', category: 'Skills', desc: 'Get one saved skill including its full instructions' },
+  { name: 'invoke_skill', category: 'Skills', desc: 'Invoke a saved skill by returning its full instructions for immediate execution' },
+  { name: 'create_skill', category: 'Skills', desc: 'Create or update a reusable skill from a successful workflow or known pitfall' },
+  { name: 'update_skill', category: 'Skills', desc: 'Update an existing skill' },
+  { name: 'delete_skill', category: 'Skills', desc: 'Delete a saved skill' },
   { name: 'context_window', category: 'Context', desc: 'Per-model context window table: list, get one, set override, delete override' },
   { name: 'move_node', category: 'Node Ops', desc: 'Move a node under another node (cross-branch restructure); Ctrl+Z undoable' },
   { name: 'batch_move_nodes', category: 'Node Ops', desc: 'Move multiple nodes under one parent in one call (targets + target_parent_uid); Ctrl+Z undoable' },
@@ -253,6 +265,23 @@ export const CORE_TOOL_NAMES = [
   'search_nodes',
   'query_node_styles',
   'batch_node_actions',
+  'delete_node',
+  'insert_parent_node',
+  'batch_move_nodes',
+  'merge_nodes',
+  'outer_frame',
+  'rename_mindmap_file',
+  'delete_local_file',
+  'list_directory',
+  'list_mcp_servers',
+  'list_mcp_tools',
+  'mcp_call_tool',
+  'list_skills',
+  'get_skill',
+  'invoke_skill',
+  'create_skill',
+  'update_skill',
+  'delete_skill',
   // 文件
   'save_mindmap',
   'read_local_file',
@@ -264,6 +293,16 @@ export const CORE_TOOL_NAMES = [
   // 挖空学习（高频，免去工具发现两轮往返）
   'clear_cloze',
   'toggle_cloze_visibility',
+  'list_cloze_nodes',
+  'ai_cloze',
+  'mechanical_cloze',
+  'ai_cloze_full_map',
+  'ai_recite_rewrite',
+  'ai_quiz_append',
+  'add_to_review',
+  'get_today_review_status',
+  'get_review_schedule',
+  'complete_review_task',
   'audit_mindmap',
   'refactor_mindmap',
   'reorganize_mindmap',
@@ -489,13 +528,15 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'select_node',
-      description: 'Select nodes in one call: keyword (all matches) / uids (exact list) / mode (leaf_parents or leaves). Other tools then act on the selection. Never loop per-node.',
+      description: 'Select nodes in one call: keyword (all matches) / uids (exact list) / mode (leaf_parents, leaves, level_range). Other tools then act on the selection. Never loop per-node.',
       parameters: {
         type: 'object',
         properties: {
           keyword: { type: 'string', description: 'Search keyword: selects all nodes whose text contains it (multiple allowed)' },
           uids: { type: 'array', items: { type: 'string' }, description: 'Node uid list (from search_nodes results); selects exactly these nodes' },
-          mode: { type: 'string', enum: ['leaf_parents', 'leaves'], description: 'Structural batch select: leaf_parents=parents of all leaf nodes (deduped); leaves=all leaf nodes' },
+          mode: { type: 'string', enum: ['leaf_parents', 'leaves', 'level_range'], description: 'Structural batch select: leaf_parents=parents of all leaf nodes (deduped); leaves=all leaf nodes; level_range=select nodes by minDepth/maxDepth (root=0)' },
+          minDepth: { type: 'number', description: 'For mode=level_range: minimum depth (root=0)' },
+          maxDepth: { type: 'number', description: 'For mode=level_range: maximum depth (root=0)' },
           includeChildren: { type: 'boolean', description: 'Also select all descendants of matched nodes; default false' }
         }
       }
@@ -1388,7 +1429,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'ai_recite_rewrite',
-      description: 'AI recitation rewrite: turn target nodes into memory-shorthand + summary (shorthand <=4 chars, homophones ok). Leaf nodes rewrite themselves; non-leaf nodes rewrite each direct child + a mnemonic. Parent/sibling/subtree context auto-attached; pre-rewrite text saved as note. targets picks node set; omit = selection. Re-call with full feedback in instruction when user comments on last rewrite. Ctrl+Z undoable.',
+      description: 'AI recitation rewrite: 【memory shorthand】+summary. Short original text (<=12 chars) must keep the original text verbatim; longer text uses a concise summary. Shorthand <=4 chars; natural homophones only, no forced puns. Leaf nodes rewrite themselves; non-leaf nodes rewrite each direct child + a mnemonic. targets picks node set; omit = selection. Re-call with full feedback in instruction when user comments on last rewrite. Ctrl+Z undoable.',
       parameters: {
         type: 'object',
         properties: {
@@ -1433,6 +1474,26 @@ export const aiTools = [
       name: 'ai_cloze_full_map',
       description: 'AI full-map cloze: blank keywords across the whole opened map (all nodes), ignoring current selection; picks keywords per node to create fill-in-blanks for full self-test review. Use when the user says 全文挖空/整张图挖空/全导图挖空/全部挖空.',
       parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mechanical_cloze',
+      description: 'Mechanical cloze: directly blank every occurrence of an exact text or regex in target nodes. No AI analysis, no keyword picking. Use when the user specifies the exact content to blank, e.g. 把“马克思主义”全部挖空 or 用正则挖空所有数字.',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'Exact text to blank; required when regex is empty' },
+          regex: { type: 'string', description: 'Regular expression to blank; e.g. \\d+' },
+          flags: { type: 'string', description: 'Regex flags, default gi' },
+          targets: {
+            type: 'object',
+            description: 'Which nodes to blank; omit = currently selected nodes',
+            properties: targetNodesProps
+          }
+        }
+      }
     }
   },
   {
@@ -1868,6 +1929,121 @@ export const aiTools = [
   {
     type: 'function',
     function: {
+      name: 'list_mcp_servers',
+      description: 'List configured MCP servers. Returns id, name, transport, url/command, enabled.',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_mcp_tools',
+      description: 'List tools exposed by one MCP server. Use before mcp_call_tool when the server tools are unknown.',
+      parameters: {
+        type: 'object',
+        properties: { serverId: { type: 'string', description: 'MCP server id from list_mcp_servers' } },
+        required: ['serverId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mcp_call_tool',
+      description: 'Call a tool on a configured MCP server. Returns the raw MCP tool result.',
+      parameters: {
+        type: 'object',
+        properties: {
+          serverId: { type: 'string', description: 'MCP server id from list_mcp_servers' },
+          toolName: { type: 'string', description: 'Tool name from list_mcp_tools' },
+          arguments: { type: 'object', description: 'Tool arguments object' }
+        },
+        required: ['serverId', 'toolName']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_skills',
+      description: 'List saved skills with name/description/enabled/autoInvoke. Use to decide whether a known workflow exists.',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_skill',
+      description: 'Get a saved skill including its full instructions.',
+      parameters: {
+        type: 'object',
+        properties: { skillId: { type: 'string', description: 'Skill id from list_skills' } },
+        required: ['skillId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'invoke_skill',
+      description: 'Invoke a saved skill by returning its full instructions for immediate execution.',
+      parameters: {
+        type: 'object',
+        properties: { skillId: { type: 'string', description: 'Skill id from list_skills' } },
+        required: ['skillId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_skill',
+      description: 'Create a reusable skill from a successful workflow or known pitfall. The user can later invoke it manually or let AI auto-invoke it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Short skill name' },
+          description: { type: 'string', description: 'What this skill solves' },
+          instructions: { type: 'string', description: 'Step-by-step instructions for future runs' },
+          autoInvoke: { type: 'boolean', description: 'true=AI may auto-use this skill when relevant' }
+        },
+        required: ['name', 'instructions']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_skill',
+      description: 'Update an existing skill.',
+      parameters: {
+        type: 'object',
+        properties: {
+          skillId: { type: 'string', description: 'Skill id from list_skills' },
+          name: { type: 'string', description: 'New name' },
+          description: { type: 'string', description: 'New description' },
+          instructions: { type: 'string', description: 'New instructions' },
+          autoInvoke: { type: 'boolean', description: 'Whether AI may auto-use this skill' }
+        },
+        required: ['skillId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_skill',
+      description: 'Delete a saved skill.',
+      parameters: {
+        type: 'object',
+        properties: { skillId: { type: 'string', description: 'Skill id from list_skills' } },
+        required: ['skillId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'context_window',
       description: 'Per-model context window table used for token estimation/compression. action=list: list all records (builtin + user overrides); action=get: query one model window (value + source); action=set: write/update a user override for one model; action=delete: remove the user override (falls back to builtin/default).',
       parameters: {
@@ -1898,15 +2074,15 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'find_local_file',
-      description: 'Search Desktop/Documents/Downloads/default save dir/app dir by filename keyword; returns full paths. Use when only a filename is known or a read reports "not found"; never guess paths.',
+      description: 'Find local files by filename keyword and return absolute paths. For directory listing use list_directory. If user asks to open a found file, set open=true and ALWAYS include the returned path in your reply. Never guess paths.',
       parameters: {
         type: 'object',
         properties: {
-          keyword: { type: 'string', description: 'Filename keyword (partial match, case-insensitive), e.g. "认知心理学" or "导论-马克思主义"' },
+          keyword: { type: 'string', description: 'Filename keyword (partial match, case-insensitive), e.g. "认知心理学" or "导论-马克思主义". Omit to list files under dirs (default common dirs)' },
           exts: { type: 'array', items: { type: 'string' }, description: 'Extension filter array, e.g. ["md","smm","pdf"]; empty = no filter' },
-          dirs: { type: 'array', items: { type: 'string' }, description: 'Extra dirs to search (absolute paths); default searches Desktop/Documents/Downloads/default save dir/app dir' }
-        },
-        required: ['keyword']
+          dirs: { type: 'array', items: { type: 'string' }, description: 'Extra dirs to search (absolute paths); default searches Desktop/Documents/Downloads/default save dir/app dir' },
+          open: { type: 'boolean', description: 'true=open the first matching file with the system default app after finding it (for user requests like 打开/查看文件)' }
+        }
       }
     }
   },
@@ -2068,25 +2244,22 @@ function resolveTargetNodes(mindMap, targets = {}) {
   // 显式 uid/keyword 优先级最高：即使模型同时误传 mode=all，也不能忽略 uids 去操作整图。
   const hasExplicitTargets = uidList.length > 0 || !!keyword
   if (hasExplicitTargets) {
-    const collectSubtree = (node) => {
-      ;(node.children || []).forEach(c => {
-        const cuid = c.getData?.('uid') || c.uid
-        if (cuid && !seen.has(cuid)) {
-          seen.add(cuid)
-          found.push(c)
-        }
-        collectSubtree(c)
-      })
+    const baseNodes = []
+    const addUnique = (node) => {
+      const uid = node.getData?.('uid') || node.uid
+      if (uid && !seen.has(uid)) {
+        seen.add(uid)
+        found.push(node)
+      }
     }
     const walk = (node) => {
       if (!node || node.isGeneralization) return
       const uid = node.getData?.('uid') || node.uid
       const text = plainText(node.getData?.('text'))
       const matched = (uid && uidSet.has(uid)) || (keyword && normalizeForMatch(text).includes(keyword))
-      if (matched && uid && !seen.has(uid)) {
-        seen.add(uid)
-        found.push(node)
-        if (includeChildren) collectSubtree(node)
+      if (matched && uid) {
+        baseNodes.push(node)
+        addUnique(node)
       }
       ;(node.children || []).forEach(walk)
     }
@@ -2098,22 +2271,100 @@ function resolveTargetNodes(mindMap, targets = {}) {
         if (!node || node.isGeneralization) return
         const uid = node.getData?.('uid') || node.uid
         const text = normalizeForMatch(plainText(node.getData?.('text')))
-        if (uidKeywords.some(k => k && text.includes(k)) && uid && !seen.has(uid)) {
-          seen.add(uid)
-          found.push(node)
-          if (includeChildren) collectSubtree(node)
+        if (uidKeywords.some(k => k && text.includes(k)) && uid) {
+          baseNodes.push(node)
+          addUnique(node)
         }
         ;(node.children || []).forEach(walkByText)
       }
       walkByText(root)
     }
-    if (found.length === 0) {
+
+    if (baseNodes.length === 0) {
+      const active = (mindMap?.renderer?.activeNodeList || []).filter(n => n && !n.isGeneralization)
+      if (active.length > 0) return { nodes: active, error: null }
       return { nodes: [], error: keywordRaw ? `未找到包含"${keywordRaw}"的节点` : '未找到对应 uid 的节点' }
+    }
+
+    // 显式 targets 与结构范围组合：uids/keyword 先定位基点，再按 mode 展开
+    if (mode === 'leaves' || mode === 'leaf_parents') {
+      const expanded = []
+      const expandedSeen = new Set()
+      const addExpanded = (node) => {
+        const uid = node.getData?.('uid') || node.uid
+        if (uid && !expandedSeen.has(uid)) {
+          expandedSeen.add(uid)
+          expanded.push(node)
+        }
+      }
+      const collectStructure = (node, parent) => {
+        if (!node || node.isGeneralization) return
+        const children = (node.children || []).filter(c => !c.isGeneralization)
+        const isLeaf = children.length === 0
+        if (mode === 'leaves' && isLeaf) addExpanded(node)
+        if (mode === 'leaf_parents' && isLeaf && parent) addExpanded(parent)
+        children.forEach(c => collectStructure(c, node))
+      }
+      for (const base of baseNodes) {
+        if (includeChildren) {
+          collectStructure(base, null)
+        } else if (mode === 'leaves') {
+          const children = (base.children || []).filter(c => !c.isGeneralization)
+          if (children.length === 0) addExpanded(base)
+        } else {
+          const children = (base.children || []).filter(c => !c.isGeneralization)
+          if (children.length === 0) {
+            const parent = (() => {
+              const uid = base.getData?.('uid') || base.uid
+              let res = null
+              const walkP = (n, p) => {
+                if (!n || res) return
+                if ((n.getData?.('uid') || n.uid) === uid) { res = p; return }
+                ;(n.children || []).forEach(c => walkP(c, n))
+              }
+              walkP(root, null)
+              return res
+            })()
+            if (parent) addExpanded(parent)
+          }
+        }
+      }
+      if (expanded.length) return { nodes: expanded, error: null }
+      return { nodes: [], error: mode === 'leaves' ? '指定范围内未找到终末节点' : '指定范围内未找到终末节点的父节点' }
+    }
+
+    // 普通展开：includeChildren 时返回基点及其全部后代
+    if (includeChildren) {
+      const collectSubtree = (node) => {
+        ;(node.children || []).forEach(c => {
+          addUnique(c)
+          collectSubtree(c)
+        })
+      }
+      baseNodes.forEach(collectSubtree)
     }
     return { nodes: found, error: null }
   }
 
-  if (mode === 'all') {
+  if (mode === 'level_range') {
+    const minDepth = Number.isFinite(Number(targets.minDepth)) ? Number(targets.minDepth) : 0
+    const maxDepth = Number.isFinite(Number(targets.maxDepth)) ? Number(targets.maxDepth) : Number.MAX_SAFE_INTEGER
+    const walkLevel = (node, depth) => {
+      if (!node || node.isGeneralization) return
+      if (depth >= minDepth && depth <= maxDepth) {
+        const uid = node.getData?.('uid') || node.uid
+        if (uid && !seen.has(uid)) {
+          seen.add(uid)
+          found.push(node)
+        }
+      }
+      ;(node.children || []).forEach(c => walkLevel(c, depth + 1))
+    }
+    walkLevel(root, 0)
+    if (found.length === 0) {
+      return { nodes: [], error: `层级 ${minDepth}~${maxDepth} 内没有节点` }
+    }
+  } else if (mode === 'all') {
     // 全部节点（batch_text_style 常用：对整图内匹配文字片段做样式）
     const walkAll = (node) => {
       if (!node || node.isGeneralization) return
@@ -2517,6 +2768,37 @@ function parseToolCallArgs(raw) {
   return {}
 }
 
+// 从模型回复中稳健提取 JSON 对象：支持代码块围栏、前后说明、常见尾逗号/省略号修复。
+function extractJsonObject(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return null
+  const tryParse = (s) => {
+    try {
+      const val = JSON.parse(s)
+      return val && typeof val === 'object' ? val : null
+    } catch {
+      return null
+    }
+  }
+  let cleaned = raw.replace(/```(?:json)?/gi, '').trim()
+  let val = tryParse(cleaned)
+  if (val) return val
+  const objStart = cleaned.indexOf('{')
+  const objEnd = cleaned.lastIndexOf('}')
+  if (objStart !== -1 && objEnd > objStart) {
+    const candidate = cleaned.slice(objStart, objEnd + 1)
+    val = tryParse(candidate)
+    if (val) return val
+    const repaired = candidate
+      .replace(/,\s*([}\]])/g, '$1')
+      .replace(/,(\s*\.\.\.)/g, '$1')
+      .replace(/\.\.\./g, '')
+    val = tryParse(repaired)
+    if (val) return val
+  }
+  return null
+}
+
 // ========== 全局工具参数归一化：让不同模型的不同写法都落到同一套参数上 ==========
 const ARG_ALIASES = {
   关键词: 'keyword',
@@ -2562,7 +2844,9 @@ const TARGET_ALIASES = {
   target_uid: 'uids',
   target_uids: 'uids',
   node_uids: 'uids',
-  uids: 'uids'
+  uids: 'uids',
+  min_depth: 'minDepth',
+  max_depth: 'maxDepth'
 }
 
 const ARRAY_KEYS = new Set([
@@ -2627,7 +2911,9 @@ const normalizeTargetsObject = (targets) => {
   const out = {}
   for (const [k, v] of Object.entries(targets)) {
     const key = TARGET_ALIASES[k] || k
-    out[key] = key === 'uids' ? coerceArray(key, v) : v
+    if (key === 'uids') out[key] = coerceArray(key, v)
+    else if (key === 'minDepth' || key === 'maxDepth') out[key] = coerceNumber(v)
+    else out[key] = v
   }
   return out
 }
@@ -2662,6 +2948,21 @@ function normalizeToolArgs(name, args = {}) {
     } else {
       out[key] = normalizeScalarArg(key, value)
     }
+  }
+  // 很多模型会把节点范围写在顶层（uids/keyword/mode），但工具统一从 targets 读取。
+  // 对节点目标类工具自动合并，避免“只处理到当前选中节点/第一个节点”的偏差。
+  if ([
+    'delete_node', 'insert_parent_node', 'batch_move_nodes', 'outer_frame',
+    'set_node_style', 'batch_text_style', 'ai_cloze', 'ai_quiz',
+    'ai_quiz_append', 'add_to_review', 'clear_cloze',
+    'toggle_cloze_visibility', 'format_painter', 'find_replace_text'
+  ].includes(name)) {
+    if (!out.targets || typeof out.targets !== 'object' || Array.isArray(out.targets)) {
+      out.targets = {}
+    }
+    if (out.uids !== undefined && out.targets.uids === undefined) out.targets.uids = coerceArray('uids', out.uids)
+    if (out.keyword !== undefined && out.targets.keyword === undefined) out.targets.keyword = out.keyword
+    if (out.mode !== undefined && out.targets.mode === undefined) out.targets.mode = out.mode
   }
   return out
 }
@@ -2759,17 +3060,15 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         const sys = '你是思维导图结构整理专家。根据用户提供的原始导图内容，重新梳理出一个更合理的框架结构。必须严格遵守原文内容，禁止随意增删改、禁止编造、禁止过度总结替换原文，只调整层级归属、分类归纳、排序、分组、合并同类项，使结构更清晰、层级更合理。只输出 JSON，不要任何解释文字。'
         const usr = '请把下面这份思维导图内容重新整理成一个框架更合理的层级结构。\n\n严格要求：\n1. 严格保留原文每个节点的文字内容，禁止增删改、禁止编造、禁止过度总结替换原文\n2. 可以调整：节点的层级归属、分类归纳、排序、分组、合并同类项、把过宽的结构拆分或把过深的层级归纳\n3. 根主题保持原文不变\n4. 只输出 JSON，不要输出任何解释、前言或代码块\n\n输出 JSON 格式：\n{"root":"根主题文字","children":[{"text":"一级节点","children":[{"text":"二级节点","children":[]}]}]}\n\n原始导图内容：\n' + contentText.slice(0, 16000)
 
-        const choice = await aiService.chat(usr, sys, null, { responseFormat: 'json' })
-        let jsonStr = String(choice?.message?.content || '').trim()
-        const braceStart = jsonStr.indexOf('{')
-        const braceEnd = jsonStr.lastIndexOf('}')
-        if (braceStart === -1 || braceEnd === -1) return { success: false, message: 'AI 整理返回内容无法解析，请重试' }
-        let parsed
-        try {
-          parsed = JSON.parse(jsonStr.slice(braceStart, braceEnd + 1))
-        } catch {
-          return { success: false, message: 'AI 整理返回的 JSON 格式异常，请重试' }
+        let choice = await aiService.chat(usr, sys, null, { responseFormat: 'json' })
+        let parsed = extractJsonObject(choice?.message?.content || '')
+        if (!parsed) {
+          const retryUsr = '请重新输出，且必须只输出一个 JSON 对象。不要输出代码块、解释或省略号。如果原文内容过多，可以合并同类项，但不能编造原文。\n\n原始导图内容：\n' + contentText.slice(0, 12000)
+          choice = await aiService.chat(retryUsr, sys, null, { responseFormat: 'json' })
+          parsed = extractJsonObject(choice?.message?.content || '')
         }
+        if (!parsed) return { success: false, message: 'AI 整理返回的 JSON 格式异常，请重试' }
+        if (!Array.isArray(parsed.children)) return { success: false, message: 'AI 整理结果缺少 children 数组，请重试' }
 
         const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         const buildNode = (n) => {
@@ -2783,7 +3082,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           }
           return node
         }
-        const rootText = parsed.root || topicName
+        const rootText = parsed.root || parsed.name || topicName
         const newTree = { data: { text: '<p><span>' + esc(rootText) + '</span></p>' }, children: [] }
         const kids = Array.isArray(parsed.children) ? parsed.children : []
         for (const k of kids) {
@@ -2868,7 +3167,8 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           message: (filePath ? `思维导图已生成并保存：${fileName}` : '思维导图已生成') + uidSection,
           filePath,
           fileName,
-          nodes: uidMap.nodes
+          nodes: uidMap.nodes,
+          switchFile: !!filePath
         }
       } catch (e) {
         console.error('generate_mindmap error:', e)
@@ -2905,7 +3205,12 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         const treeData = mindMap.getData()
         const nodeCount = countNodes(treeData)
         const maxDepth = getMaxDepth(treeData)
-        return { success: true, message: `当前思维导图信息：\n- 节点总数：${nodeCount}\n- 最大深度：${maxDepth} 层` }
+        return {
+          success: true,
+          message: `当前思维导图信息：\n- 节点总数：${nodeCount}\n- 最大深度：${maxDepth} 层`,
+          nodeCount,
+          maxDepth
+        }
       } catch (e) {
         return { success: false, message: `获取导图信息失败: ${e.message}` }
       }
@@ -3049,26 +3354,59 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         if (!parents.length) {
           return { success: false, message: '没有目标父节点。请通过 targets（uids/keyword/mode）指定，或先选中节点' }
         }
-        const rawChildren = Array.isArray(args.children) ? args.children : []
+        let rawChildren = args.children
+        if (typeof rawChildren === 'string') {
+          const parsedChildren = parseToolCallArgs(rawChildren)
+          if (Array.isArray(parsedChildren)) rawChildren = parsedChildren
+          else if (parsedChildren && Array.isArray(parsedChildren.children)) rawChildren = parsedChildren.children
+          else rawChildren = []
+        }
+        rawChildren = Array.isArray(rawChildren) ? rawChildren : []
         if (rawChildren.length === 0) return { success: false, message: '请提供 children（要添加的子节点树）' }
 
-        // 每个父节点单独构建一棵子树：uid 必须各自独立，不能跨父节点复用同一份 childList
-        const buildChildList = (items) => items.map(item => ({
-          data: {
-            text: `<p><span>${escHtml(String(item?.text ?? ''))}</span></p>`,
-            uid: createUid(),
-            richText: true
-          },
-          children: buildChildList(Array.isArray(item?.children) ? item.children : [])
-        }))
+        // 每个父节点单独构建一棵子树：uid 必须各自独立，不能跨父节点复用同一份 childList。
+        // 同时丢弃空文本节点；若模型把父节点文本重复放在子树第一层，自动剥离该重复根，避免“空壳+重复”。
+        const buildChildList = (items) => {
+          const out = []
+          for (const item of items) {
+            const text = String(item?.text ?? '').trim()
+            const kids = Array.isArray(item?.children) ? item.children : []
+            if (!text && kids.length > 0) {
+              out.push(...buildChildList(kids))
+              continue
+            }
+            if (!text) continue
+            out.push({
+              data: {
+                text: `<p><span>${escHtml(text)}</span></p>`,
+                uid: createUid(),
+                richText: true
+              },
+              children: buildChildList(kids)
+            })
+          }
+          return out
+        }
+        const stripDuplicateRoot = (items, parentText) => {
+          if (!Array.isArray(items) || items.length !== 1 || !parentText) return items
+          const first = items[0]
+          const firstText = String(first?.text ?? '').trim()
+          const normalized = (s) => s.replace(/\s+/g, '').toLowerCase()
+          if (normalized(firstText) === normalized(parentText) && Array.isArray(first?.children) && first.children.length > 0) {
+            return first.children
+          }
+          return items
+        }
         const countTree = (items) => items.reduce((s, it) => s + 1 + countTree(Array.isArray(it?.children) ? it.children : []), 0)
-        const perParentCount = countTree(rawChildren)
 
         const firstChildUids = []
         let okParents = 0
         for (const parent of parents) {
           try {
-            const childList = buildChildList(rawChildren)
+            const parentText = nodePlainText(parent.getData?.('text') || '')
+            const childrenForParent = buildChildList(stripDuplicateRoot(rawChildren, parentText))
+            const childList = childrenForParent
+            if (childList.length === 0) continue
             setActiveNodes(mindMap, [parent])
             mindMap.execCommand('INSERT_MULTI_CHILD_NODE', [parent], childList)
             okParents++
@@ -3099,13 +3437,13 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           }, 100)
         }
 
-        const total = okParents * perParentCount
+        const total = okParents * countTree(rawChildren)
         const parentLabel = parents.length > 1
           ? `${okParents}/${parents.length} 个父节点`
           : `节点「${nodePlainText(parents[0].getData?.('text')).slice(0, 20)}」`
         return {
           success: true,
-          message: `已为 ${parentLabel} 添加子树（共 ${total} 个新节点，每父节点 ${perParentCount} 个），可通过 Ctrl+Z 撤销`
+          message: `已为 ${parentLabel} 添加子树（共 ${total} 个新节点），可通过 Ctrl+Z 撤销`
         }
       } catch (e) {
         return { success: false, message: `新增子节点失败: ${e.message}` }
@@ -4273,6 +4611,105 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
       }
     }
 
+    case 'mechanical_cloze': {
+      try {
+        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        const exactText = String(args.text || '').trim()
+        const regexText = String(args.regex || '').trim()
+        if (!exactText && !regexText) return { success: false, message: '请提供 text（精确文本）或 regex（正则）至少一项' }
+
+        let targetNodes
+        if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
+          const { nodes, error } = resolveTargetNodes(mindMap, args.targets)
+          if (error) return { success: false, message: `目标节点解析失败：${error}` }
+          targetNodes = nodes.filter(n => !n.isGeneralization)
+        } else {
+          targetNodes = (mindMap.renderer.activeNodeList || []).filter(n => !n.isGeneralization)
+        }
+        if (!targetNodes.length) return { success: false, message: '没有可挖空的目标节点，请指定 targets 或先选中节点' }
+
+        const flags = String(args.flags || 'gi')
+        const buildMatcher = () => regexText
+          ? new RegExp(regexText, flags)
+          : null
+
+        const wrapHtmlText = (html) => {
+          if (!html || typeof html !== 'string') return html
+          const container = document.createElement('div')
+          container.innerHTML = html
+          const applyTextNode = (node) => {
+            const val = node.nodeValue || ''
+            if (!val) return
+            const ranges = []
+            if (regexText) {
+              const re = buildMatcher()
+              let m
+              while ((m = re.exec(val)) !== null) {
+                if (m[0] === '') { re.lastIndex++; continue }
+                ranges.push([m.index, m.index + m[0].length])
+                if (m.index === re.lastIndex) re.lastIndex++
+              }
+            } else if (exactText) {
+              let idx = val.indexOf(exactText)
+              while (idx !== -1) {
+                ranges.push([idx, idx + exactText.length])
+                idx = val.indexOf(exactText, idx + exactText.length)
+              }
+            }
+            if (!ranges.length) return
+            const frag = document.createDocumentFragment()
+            let last = 0
+            for (const [start, end] of ranges) {
+              if (start > last) frag.appendChild(document.createTextNode(val.slice(last, start)))
+              const span = document.createElement('span')
+              span.className = 'smm-cloze smm-cloze-hidden'
+              span.textContent = val.slice(start, end)
+              frag.appendChild(span)
+              last = end
+            }
+            if (last < val.length) frag.appendChild(document.createTextNode(val.slice(last)))
+            node.parentNode.replaceChild(frag, node)
+          }
+          const walk = (el) => {
+            for (const child of Array.from(el.childNodes)) {
+              if (child.nodeType === Node.TEXT_NODE) applyTextNode(child)
+              else if (child.nodeType === Node.ELEMENT_NODE) walk(child)
+            }
+          }
+          walk(container)
+          return container.innerHTML
+        }
+
+        const changedNodes = []
+        let occurrences = 0
+        for (const node of targetNodes) {
+          const original = node.getData?.('text') || ''
+          const next = wrapHtmlText(original)
+          if (!next || next === original) continue
+          const count = (next.match(/smm-cloze/g) || []).length - (original.match(/smm-cloze/g) || []).length
+          occurrences += Math.max(0, count)
+          if (typeof node.setText === 'function') node.setText(next, true)
+          else node.setData({ text: next, richText: true })
+          changedNodes.push(node)
+        }
+        if (!changedNodes.length) return { success: false, message: '目标节点中没有匹配到指定内容' }
+        mindMap.render()
+        try {
+          setNodesClozeHidden(changedNodes, true)
+          applyClozeStyles()
+        } catch (e) {}
+        return {
+          success: true,
+          message: `已机械挖空 ${occurrences} 处内容，涉及 ${changedNodes.length} 个节点（无需 AI 分析）。可通过 Ctrl+Z 撤销。`,
+          changedNodes: changedNodes.length,
+          occurrences,
+          uids: changedNodes.map(n => n.getData?.('uid') || n.uid)
+        }
+      } catch (e) {
+        return { success: false, message: `机械挖空失败: ${e.message}` }
+      }
+    }
+
     case 'parallel_ai_workers': {
       try {
         const tasks = Array.isArray(args.tasks) ? args.tasks.filter(t => t && t.instruction && t.context) : []
@@ -4675,8 +5112,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         if (wantShow === null) {
           toggleAllCloze()
         } else {
-          const nowHidden = isClozeHiddenAll()
-          if (nowHidden !== !wantShow) toggleAllCloze()
+          setAllClozeHidden(!wantShow)
         }
         const hidden = isClozeHiddenAll()
         return { success: true, message: hidden ? '已隐藏全部挖空答案（自测模式）' : '已显示全部挖空答案' }
@@ -4689,18 +5125,21 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
       try {
         if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
         const found = []
+        const nodes = []
         const walk = (node) => {
           if (!node || node.isGeneralization) return
           if (nodeHasCloze(node)) {
             const uid = node.getData?.('uid') || node.uid
             const text = nodePlainText(node.getData?.('text') || '').slice(0, 50)
-            found.push(`${isUidClozeHidden(uid) ? '隐藏' : '显示'} | ${text} | uid=${uid}`)
+            const hidden = isUidClozeHidden(uid)
+            found.push(`${hidden ? '隐藏' : '显示'} | ${text} | uid=${uid}`)
+            nodes.push({ uid, text, hidden })
           }
           (node.children || []).forEach(walk)
         }
         walk(mindMap.renderer.root)
-        if (!found.length) return { success: true, message: '当前导图没有任何挖空标记' }
-        return { success: true, message: `共 ${found.length} 个节点含挖空：\n${found.join('\n')}` }
+        if (!found.length) return { success: true, message: '当前导图没有任何挖空标记', nodes }
+        return { success: true, message: `共 ${found.length} 个节点含挖空：\n${found.join('\n')}`, nodes, count: nodes.length }
       } catch (e) {
         return { success: false, message: `列出挖空节点失败: ${e.message}` }
       }
@@ -5024,7 +5463,7 @@ ${block}`
         if (truncated) msg += ` 目标节点超过 40 个，本次仅处理前 40 个。`
         if (failures.length) msg += ` 未生成的节点：${failures.join('、')}。`
         msg += ' 可通过 Ctrl+Z 撤销本次出题。'
-        return { success: true, message: msg }
+        return { success: true, message: msg, createdUids, addedCount: added, failures }
       } catch (e) {
         return { success: false, message: `AI 出题追加失败: ${e.message}` }
       }
@@ -5633,6 +6072,107 @@ ${block}`
       }
     }
 
+    case 'list_mcp_servers': {
+      try {
+        const list = await window.electronAPI?.mcp?.list?.() || []
+        return {
+          success: true,
+          message: list.length
+            ? `已配置 ${list.length} 个 MCP 服务：\n${list.map((s, i) => `${i + 1}. ${s.name} [${s.transport}] ${s.url || s.command || ''}（${s.enabled ? '启用' : '停用'}，id=${s.id}）`).join('\n')}`
+            : '尚未配置 MCP 服务。',
+          servers: list
+        }
+      } catch (e) { return { success: false, message: `读取 MCP 服务失败: ${e.message}` } }
+    }
+
+    case 'list_mcp_tools': {
+      try {
+        if (!args.serverId) return { success: false, message: '请提供 serverId' }
+        const tools = await window.electronAPI?.mcp?.listTools?.(args.serverId) || []
+        return { success: true, message: `MCP 服务提供 ${tools.length} 个工具：\n${tools.map((t, i) => `${i + 1}. ${t.name}：${t.description || ''}`).join('\n')}`, tools }
+      } catch (e) { return { success: false, message: `读取 MCP 工具失败: ${e.message}` } }
+    }
+
+    case 'mcp_call_tool': {
+      try {
+        if (!args.serverId || !args.toolName) return { success: false, message: '请提供 serverId 和 toolName' }
+        if (!window.electronAPI?.mcp?.callTool) return { success: false, message: 'MCP 调用功能不可用' }
+        const result = await window.electronAPI?.mcp?.callTool?.(args.serverId, args.toolName, args.arguments || {})
+        return { success: true, message: JSON.stringify(result, null, 2), result }
+      } catch (e) { return { success: false, message: `MCP 调用失败: ${e.message}` } }
+    }
+
+    case 'list_skills': {
+      try {
+        const list = await window.electronAPI?.skills?.list?.() || []
+        return {
+          success: true,
+          message: list.length
+            ? `已保存 ${list.length} 个 Skill：\n${list.map((s, i) => `${i + 1}. ${s.name}：${s.description || '（无描述）'}（${s.enabled ? '启用' : '停用'}${s.autoInvoke ? '，自动调用' : ''}，id=${s.id}）`).join('\n')}`
+            : '尚未保存 Skill。',
+          skills: list
+        }
+      } catch (e) { return { success: false, message: `读取 Skill 失败: ${e.message}` } }
+    }
+
+    case 'get_skill': {
+      try {
+        if (!args.skillId) return { success: false, message: '请提供 skillId' }
+        const list = await window.electronAPI?.skills?.list?.() || []
+        const skill = list.find(s => s.id === args.skillId)
+        if (!skill) return { success: false, message: '未找到该 Skill' }
+        return { success: true, message: `【${skill.name}】\n${skill.description || '（无描述）'}\n\n指令：\n${skill.instructions || '（无指令）'}`, skill }
+      } catch (e) { return { success: false, message: `读取 Skill 失败: ${e.message}` } }
+    }
+
+    case 'invoke_skill': {
+      try {
+        if (!args.skillId) return { success: false, message: '请提供 skillId' }
+        const list = await window.electronAPI?.skills?.list?.() || []
+        const skill = list.find(s => s.id === args.skillId)
+        if (!skill) return { success: false, message: '未找到该 Skill' }
+        return {
+          success: true,
+          message: `已调用 Skill「${skill.name}」。请严格按以下指令执行：\n\n${skill.instructions || '（无指令）'}`,
+          skill
+        }
+      } catch (e) { return { success: false, message: `调用 Skill 失败: ${e.message}` } }
+    }
+
+    case 'create_skill': {
+      try {
+        if (!args.name || !args.instructions) return { success: false, message: '请提供 name 和 instructions' }
+        const skill = await window.electronAPI?.skills?.create?.({
+          name: args.name,
+          description: args.description || '',
+          instructions: args.instructions,
+          autoInvoke: args.autoInvoke === true,
+          source: 'ai'
+        })
+        return { success: true, message: `已创建 Skill「${skill.name}」（id=${skill.id}）`, skill }
+      } catch (e) { return { success: false, message: `创建 Skill 失败: ${e.message}` } }
+    }
+
+    case 'update_skill': {
+      try {
+        if (!args.skillId) return { success: false, message: '请提供 skillId' }
+        const patch = {}
+        for (const k of ['name', 'description', 'instructions', 'autoInvoke', 'enabled']) {
+          if (args[k] !== undefined) patch[k] = args[k]
+        }
+        const skill = await window.electronAPI?.skills?.update?.(args.skillId, patch)
+        return { success: true, message: `已更新 Skill「${skill.name}」`, skill }
+      } catch (e) { return { success: false, message: `更新 Skill 失败: ${e.message}` } }
+    }
+
+    case 'delete_skill': {
+      try {
+        if (!args.skillId) return { success: false, message: '请提供 skillId' }
+        await window.electronAPI?.skills?.remove?.(args.skillId)
+        return { success: true, message: 'Skill 已删除' }
+      } catch (e) { return { success: false, message: `删除 Skill 失败: ${e.message}` } }
+    }
+
     case 'move_node': {
       try {
         if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
@@ -5673,7 +6213,7 @@ ${block}`
           sourceNodes = (mindMap.renderer.activeNodeList || []).filter(n => !n.isGeneralization)
         }
         if (!sourceNodes.length) return { success: false, message: '没有要移动的节点' }
-        const targetUid = args.target_parent_uid
+        const targetUid = args.target_parent_uid || args.targetParentUid
         if (!targetUid) return { success: false, message: '请提供 target_parent_uid' }
         let moved = 0
         let skipped = 0
@@ -6038,10 +6578,13 @@ ${block}`
         if (!window.electronAPI?.fs?.findFile) {
           return { success: false, message: '文件搜索不可用' }
         }
+        const keyword = String(args.keyword || '').trim()
+        const dirs = Array.isArray(args.dirs) && args.dirs.length ? args.dirs : undefined
         const r = await window.electronAPI.fs.findFile({
-          keyword: args.keyword,
+          keyword: keyword || '*',
           exts: Array.isArray(args.exts) ? args.exts : undefined,
-          dirs: Array.isArray(args.dirs) ? args.dirs : undefined
+          dirs,
+          listMode: !keyword
         })
         if (!r || !r.success) {
           return { success: false, message: `搜索失败：${r?.error || '文件系统不可用'}` }
@@ -6050,13 +6593,16 @@ ${block}`
         if (list.length === 0) {
           return {
             success: true,
-            message: `常用目录（${(r.searchedDirs || []).join('、')}）里没有找到文件名含"${args.keyword}"${args.exts ? `且扩展名为 ${args.exts.join('/')}` : ''}的文件。${r.timedOut ? '（部分目录较大，搜索超时截断，可换更具体的关键词重试）' : ''}可让用户确认文件名或提供路径。`
+            message: `常用目录（${(r.searchedDirs || []).join('、')}）里没有找到文件名含"${keyword || '*'}"${args.exts ? `且扩展名为 ${args.exts.join('/')}` : ''}的文件。${r.timedOut ? '（部分目录较大，搜索超时截断，可换更具体的关键词重试）' : ''}可让用户确认文件名或提供路径。`
           }
         }
         const lines = list.map((f, i) => `${i + 1}. ${f.path}（${f.size} 字节，${f.mtime}）`)
+        if (args.open && list[0]?.path && window.electronAPI?.fs?.openFile) {
+          try { await window.electronAPI.fs.openFile(list[0].path) } catch (e) {}
+        }
         return {
           success: true,
-          message: `找到 ${list.length} 个匹配文件：\n${lines.join('\n')}${r.timedOut ? '\n（部分目录较大，结果可能不全）' : ''}\n可直接把 path 传给 read_local_file / import_file_as_mindmap 使用。`
+          message: `找到 ${list.length} 个匹配文件：\n${lines.join('\n')}${r.timedOut ? '\n（部分目录较大，结果可能不全）' : ''}\n完整路径已在上方列出；${args.open && list[0] ? `已自动打开：${list[0].path}` : '如需打开，请用 open=true 或使用系统默认程序打开。'}`
         }
       } catch (e) {
         return { success: false, message: `文件搜索失败: ${e.message}` }
@@ -6197,6 +6743,7 @@ ${block}`
             } else {
               if (args.page_start) pageOpts.pageStart = Number(args.page_start)
               if (args.page_end != null) pageOpts.pageEnd = Number(args.page_end)
+              else if (Number(args.max_chars) >= 50000) pageOpts.pageEnd = 999999
             }
             const img = await pdfToImages(buf.buffer, pageOpts)
             if (!img.success || !img.pages?.length) {
@@ -6204,13 +6751,18 @@ ${block}`
             }
             const parts = []
             let visionFailedReason = null
-            for (let i = 0; i < img.pages.length; i++) {
-              const ocr = await window.electronAPI.ocrSmart(img.pages[i], 'chi_sim+eng')
-              if (ocr && ocr.success && ocr.text) parts.push(ocr.text.trim())
-              if (ocr && ocr.fallback_from === 'ai_vision' && !visionFailedReason) {
-                visionFailedReason = ocr.fallback_reason || '多模态模型调用失败'
+            let cursor = 0
+            const ocrWorker = async () => {
+              while (cursor < img.pages.length) {
+                const i = cursor++
+                const ocr = await window.electronAPI.ocrSmart(img.pages[i], 'chi_sim+eng')
+                if (ocr && ocr.success && ocr.text) parts.push(ocr.text.trim())
+                if (ocr && ocr.fallback_from === 'ai_vision' && !visionFailedReason) {
+                  visionFailedReason = ocr.fallback_reason || '多模态模型调用失败'
+                }
               }
             }
+            await Promise.all(Array.from({ length: Math.min(3, img.pages.length) }, () => ocrWorker()))
             if (!parts.length) {
               return { success: false, message: `pdf 提取与 OCR 均未能识别文字，可能为图片质量过低的扫描版` }
             }

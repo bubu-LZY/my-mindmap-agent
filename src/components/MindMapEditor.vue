@@ -853,7 +853,14 @@ const initMindMap = () => {
   mindMap = new MindMap({
     el: containerRef.value,
     data: normalizedData,
-    layout: 'logicalStructure',
+    layout: (() => {
+      try {
+        const saved = localStorage.getItem('mindmap_layout')
+        return ['logicalStructure', 'logicalStructureLeft', 'mindMap', 'organizationStructure', 'catalogOrganization', 'timeline', 'verticalTimeline', 'fishbone'].includes(saved) ? saved : 'logicalStructure'
+      } catch (e) {
+        return 'logicalStructure'
+      }
+    })(),
     theme: getSavedTheme(),
     readonly: false,
     mousewheelAction: 'zoom',
@@ -1202,7 +1209,7 @@ const initMindMap = () => {
       const onPanMove = (ev) => {
         if (!canvasPanning) return
         // 防御：mousemove 时已无任何按键按下（mouseup 被吞或窗口外释放），立即结束平移
-        if (ev.buttons === 0) { onPanUp(); return }
+        if (ev.buttons === 0 && ev.which === 0) { onPanUp(); return }
         const dx = ev.clientX - canvasPanning.lastX
         const dy = ev.clientY - canvasPanning.lastY
         canvasPanning.lastX = ev.clientX

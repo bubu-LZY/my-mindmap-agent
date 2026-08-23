@@ -64,7 +64,7 @@
             <!-- 层级竖线：每行为每个祖先层级画一段竖线（穿过该级展开图标中心），相邻行首尾相接形成每级一条连续竖线 -->
             <span class="indent-guides" aria-hidden="true">
               <span
-                v-for="i in node.level - 1"
+                v-for="i in (node.isLeaf ? node.level : node.level - 1)"
                 :key="i"
                 class="indent-guide"
                 :style="{ left: (i - 1) * 24 + 12 + 'px' }"

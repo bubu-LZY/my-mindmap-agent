@@ -333,17 +333,37 @@ const pickFallbackCloze = (text) => {
     return tail && tail.length >= 2 ? tail : null
   }
 
+  const pickShortTail = (raw) => {
+    const tail = cleanTail(raw)
+    if (!tail) return null
+    const tokens = tail
+      .split(/[\s,，。！？；、：:！？;()（）\[\]【】"“”‘’]+/)
+      .map(s => s.trim())
+      .filter(Boolean)
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      const token = tokens[i]
+      if (token.length >= 2 && token.length <= 6 && !CLOZE_STOP_WORDS.has(token.toLowerCase())) {
+        return token
+      }
+    }
+    const zh = tail.match(/[\u4e00-\u9fa5]{2,4}$/)
+    if (zh) return zh[0]
+    const en = tail.match(/[A-Za-z][A-Za-z0-9-]{1,5}$/)
+    if (en) return en[0]
+    return tail.length <= 4 ? tail : tail.slice(-4)
+  }
+
   // “标签：值”优先挖值，保留标签作为可推测线索
   const colonPart = value.match(/[:：]\s*([^:：]+)$/)
   if (colonPart) {
-    const tail = cleanTail(colonPart[1])
+    const tail = pickShortTail(colonPart[1])
     if (tail) return tail
   }
 
   // “A 是 B / A 指 B / A 称为 B”这类定义句式：挖“是/即/指”后面的解释部分
   const definitionPart = value.match(/(?:是指|就是|称为|叫做|指的是|意为|是|即|指)\s*([^，。！？；、,.!?;:：]+)$/)
   if (definitionPart) {
-    const tail = cleanTail(definitionPart[1])
+    const tail = pickShortTail(definitionPart[1])
     if (tail) return tail
   }
 
@@ -514,8 +534,6 @@ const callAiForClozeBatched = async (nodes, mode, onProgress, onBatchResult) => 
     }
 
     if (hasTimeout) {
-      // 超时说明当前模型/API 已无法稳定完成这批节点，继续逐批等待只会重复超时。
-      // 立即切换为本地规则降级，处理当前失败批次及所有剩余批次，保证最终能返回结果。
       useFallbackForRemaining = true
       failedBatches.forEach(fb => fallbackNodes.push(...fb))
       usedFallback = true
@@ -556,7 +574,8 @@ const callAiForClozeBatched = async (nodes, mode, onProgress, onBatchResult) => 
       onProgress({
         done: batches.length,
         total: batches.length,
-        percent: 100
+        percent: 100,
+        fallback: true
       })
     }
   }
@@ -600,6 +619,11 @@ const doSmartCloze = async (nodes, mode, onProgress) => {
       throw new Error('AI接口请求失败：网络错误，请检查网络连接和AI配置')
     }
     throw e
+  }
+
+  const usedFallback = !!clozeList.usedFallback
+  if (usedFallback && onProgress) {
+    onProgress({ percent: 100, fallback: true })
   }
 
   if (clozeList.length === 0) {
@@ -694,7 +718,7 @@ export const smartClozeFullMap = async (mode = 'smart', onProgress) => {
     const text = extractPlainText(
       (typeof node.getData === 'function' ? node.getData('text') : node.text) || ''
     )
-    if (text.trim()) {
+    if (level >= 2 && text.trim()) {
       nodes.push({ uid: node.uid, level, text: text.trim() })
     }
     if (node.children) {

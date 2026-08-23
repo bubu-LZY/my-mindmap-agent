@@ -1,5 +1,22 @@
 <template>
   <div v-if="mindMap" class="fixed-toolbar" ref="toolbarRef">
+    <!-- 抓手工具：开启后左键拖动画布，不触发节点选择/编辑 -->
+    <button
+      class="ft-btn"
+      :class="{ active: handMode }"
+      :title="handMode ? '抓手已开启，左键拖动画布（Esc 关闭）' : '抓手工具：开启后左键拖动画布'"
+      @click="toggleHand"
+    >
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8.5 11V6.5a1.5 1.5 0 0 1 3 0V11" />
+        <path d="M11.5 11V5.5a1.5 1.5 0 0 1 3 0V11" />
+        <path d="M14.5 11V7.5a1.5 1.5 0 0 1 3 0V14" />
+        <path d="M8.5 11c-2.2 0-4 1.3-4 3.8 0 2.4 2.1 4.2 4.6 4.2h3.6c2.3 0 4.1-1.2 4.9-3l1.6-3.2c.4-.8-.1-1.8-1-1.8h-3.4c0-1.1-.2-3-.8-4.1a1.5 1.5 0 0 0-2.7.5" />
+      </svg>
+    </button>
+
+    <span class="ft-divider"></span>
+
     <!-- 文字颜色 -->
     <div class="ft-group">
       <button
@@ -258,6 +275,26 @@
       </div>
     </div>
 
+    <!-- 布局 -->
+    <div class="ft-group">
+      <button
+        class="ft-btn ft-font-btn"
+        title="布局结构"
+        @click="togglePanel('layout')"
+      >
+        <span>布局</span>
+        <span class="ft-caret"></span>
+      </button>
+      <div v-if="panel === 'layout'" class="ft-panel ft-panel-list">
+        <button
+          v-for="l in layoutList"
+          :key="l.value"
+          class="ft-list-item"
+          @click="onLayout(l.value)"
+        >{{ l.label }}</button>
+      </div>
+    </div>
+
     <!-- 导出（最右侧） -->
     <div class="ft-group">
       <button
@@ -301,12 +338,59 @@ const toolbarRef = ref(null)
 const panel = ref(null) // 'color' | 'highlight' | 'font' | 'fontSize' | 'export' | null
 const assocCreating = ref(false)
 const painting = ref(false)
+const handMode = ref(false)
 // 格式刷源节点（自定义补充：simple-mind-map painter 只复制节点级样式，这里额外记录源节点以复制文字级样式）
 const painterSourceNode = ref(null)
 const exporting = ref(false)
 const fontSizeLabel = ref('字号')
 
+// 抓手平移状态：只在抓手模式下由文档级捕获监听接管，避免与节点拖拽/框选互相干扰
+let handPanning = null
+
 const hasSelection = computed(() => props.activeNodes.length > 0)
+
+const applyHandCursor = (grabbing) => {
+  const el = props.mindMap?.el
+  if (!el) return
+  el.style.cursor = handMode.value ? (grabbing ? 'grabbing' : 'grab') : ''
+}
+
+const stopHandPan = () => {
+  handPanning = null
+  applyHandCursor(false)
+}
+
+const toggleHand = () => {
+  handMode.value = !handMode.value
+  closePanel()
+  if (!handMode.value) stopHandPan()
+  applyHandCursor(false)
+}
+
+const onHandMousedown = (e) => {
+  if (!handMode.value || e.button !== 0) return
+  const el = props.mindMap?.el
+  if (!el || !el.contains(e.target)) return
+  e.preventDefault()
+  e.stopPropagation()
+  handPanning = { lastX: e.clientX, lastY: e.clientY }
+  applyHandCursor(true)
+}
+
+const onHandMousemove = (e) => {
+  if (!handPanning) return
+  const dx = e.clientX - handPanning.lastX
+  const dy = e.clientY - handPanning.lastY
+  handPanning.lastX = e.clientX
+  handPanning.lastY = e.clientY
+  if (dx || dy) {
+    try { props.mindMap.view.translateXY(dx, dy) } catch (err) {}
+  }
+}
+
+const onHandMouseup = () => {
+  if (handPanning) stopHandPan()
+}
 
 const fontList = [
   { label: '微软雅黑', value: '微软雅黑, Microsoft YaHei' },
@@ -336,6 +420,13 @@ const themeLabels = {
 
 const nodeBgColors = nodeBgColorValues
 
+const layoutList = [
+  { label: '向右展开', value: 'logicalStructure' },
+  { label: '向左展开', value: 'logicalStructureLeft' },
+  { label: '左右两侧展开', value: 'mindMap' },
+  { label: '向下展开', value: 'organizationStructure' }
+]
+
 const exportList = [
   { type: 'copy-md', label: '复制 Markdown 文本' },
   { type: 'png', label: 'PNG 图片' },
@@ -350,7 +441,7 @@ const exportList = [
 ]
 
 const togglePanel = (type) => {
-  if (type !== 'export' && type !== 'theme' && !hasSelection.value) return
+  if (type !== 'export' && type !== 'theme' && type !== 'layout' && !hasSelection.value) return
   panel.value = panel.value === type ? null : type
 }
 
@@ -389,6 +480,22 @@ const onTheme = (theme) => {
   } catch (e) {
     console.error('[FixedToolbar] 切换主题失败:', e)
     ElMessage.error('切换主题失败: ' + e.message)
+  } finally {
+    closePanel()
+  }
+}
+
+const onLayout = (layout) => {
+  const mm = props.mindMap
+  if (!mm || typeof mm.setLayout !== 'function') return
+  try {
+    mm.setLayout(layout)
+    mm.render()
+    try { localStorage.setItem('mindmap_layout', layout) } catch (e) {}
+    ElMessage.success(`布局已切换为「${(layoutList.find(l => l.value === layout) || {}).label || layout}」`)
+  } catch (e) {
+    console.error('[FixedToolbar] 切换布局失败:', e)
+    ElMessage.error('切换布局失败: ' + e.message)
   } finally {
     closePanel()
   }
@@ -661,6 +768,11 @@ const onNodeClick = (node) => {
 
 // ESC 结束格式刷
 const onKeydown = (e) => {
+  if (e.key === 'Escape' && handMode.value) {
+    e.preventDefault()
+    toggleHand()
+    return
+  }
   if (e.key === 'Escape' && painting.value) {
     e.preventDefault()
     stopPainter()
@@ -689,6 +801,10 @@ watch(() => props.mindMap, (mm, old) => {
 
 onMounted(() => {
   document.addEventListener('click', onDocClick, true)
+  document.addEventListener('mousedown', onHandMousedown, true)
+  window.addEventListener('mousemove', onHandMousemove, true)
+  window.addEventListener('mouseup', onHandMouseup, true)
+  window.addEventListener('blur', onHandMouseup)
   window.addEventListener('cloze-state-changed', onClozeStateChanged)
   window.addEventListener('keydown', onKeydown)
   bindEvents(props.mindMap)
@@ -696,9 +812,15 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClick, true)
+  document.removeEventListener('mousedown', onHandMousedown, true)
+  window.removeEventListener('mousemove', onHandMousemove, true)
+  window.removeEventListener('mouseup', onHandMouseup, true)
+  window.removeEventListener('blur', onHandMouseup)
   window.removeEventListener('cloze-state-changed', onClozeStateChanged)
   window.removeEventListener('keydown', onKeydown)
   unbindEvents(props.mindMap)
+  stopHandPan()
+  if (props.mindMap?.el) props.mindMap.el.style.cursor = ''
 })
 </script>
 

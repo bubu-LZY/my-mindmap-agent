@@ -74,6 +74,9 @@ registerLegacyMigrateIPC()
 const databaseModule = require('./ipc/database')
 const feishuBotModule = require('./ipc/feishuBot')
 const wechatBotModule = require('./ipc/wechat')
+const httpServerModule = require('./ipc/httpServer')
+require('./ipc/mcpManager')
+require('./ipc/skillsManager')
 
 // 在默认浏览器中打开 URL
 ipcMain.handle('open-external', async (event, url) => {
@@ -796,6 +799,8 @@ if (!gotTheLock) {
 
     createWindow()
     createTray()
+    httpServerModule.init(() => mainWindow)
+    httpServerModule.initAutoStart()
 
     // 上次用户保持飞书机器人长连接开启的话，等渲染页面加载完成后自动恢复启动
     // （避免消息早于渲染进程就绪到达而丢失）
