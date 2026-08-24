@@ -1,6 +1,6 @@
 # my-mindmap agent
 
-> 基于思维导图（simple-mind-map）与大纲的 **AI 智能体桌面应用**。  
+> 基于思维导图（simple-mind-map）与大纲的 **AI 智能体桌面应用**。
 > 用 AI 生成、整理、扩展、复习你的知识图谱，并支持联网搜索、飞书/微信推送、定时任务与复习计划。
 
 > 💙 **特别致谢**：本项目的思维导图内核由开源项目 **[Simple Mind Map（思绪思维导图）](https://github.com/wanglin2/mind-map)** 强力驱动，感谢作者 **wanglin2** 及所有贡献者的卓越工作，让一个轻量而强大的思维导图引擎得以自由生长。本项目在 MIT 协议下复用其内核并扩展出 AI 智能体能力。
@@ -55,6 +55,7 @@ AI 不只是回答，而是**带着"工牌"去精准修改指定的那份导图*
 | 扩展节点 | 给选中节点 AI 生成多级子节点（先问参考资料/层级/要求） |
 | 节点编辑 | 批量加子节点、改文本、删节点、插父节点、加概要 |
 | 批量样式 | 一键把全图【】内容标蓝加粗；按关键词批量设颜色/高亮/字体 |
+| 批量文本样式 | `batch_text_style`：对节点内匹配文本片段（正则/子串）批量设置富文本样式 |
 | 一键整理框架 | `reorganize_mindmap`：AI 重排层级归类，**原文严格保留**，存为新文件 |
 | 结构审计/重构 | 审计导图质量、安全重构（dry-run + 安全修复） |
 | 主题/布局/视图 | 切换主题、布局、大纲/脑图/复习三模式、缩放、撤销重做 |
@@ -99,10 +100,47 @@ AI 不只是回答，而是**带着"工牌"去精准修改指定的那份导图*
 ### 8. 多窗口 / 多标签（已落地 Tab 标签栏）
 
 - 顶部 **Tab 标签栏**：一个标签 = 一个文件，可切换、可拖拽剥离为独立窗口。
+- **标签拖拽排序**：支持拖拽标签重新排列顺序。
 - **同文件禁止多开**：重复打开会提示并跳转到已有标签。
 - AI 任务**绑定目标文件**（fileId），你切换文件也不会改错图。
 
-### 9. 工程与体验细节
+### 9. 自定义工具功能（新增）
+
+- **用户自定义工具系统**：允许在不改主程序代码的情况下，按规范新增本地工具。
+- **工具目录结构**：每个工具由 `tool.json`（元数据+参数Schema）和 `tool.js`（执行函数）组成，放在 `custom-tools/<tool-id>/` 目录下。
+- **AI 自动调用**：AI 可从工具目录中看到这些工具，并通过 `call_custom_tool` 调用；用户也可直接在对话里说"调用某个工具"。
+- **灵活配置**：支持 `autoInvoke`（是否允许 AI 自动调用）、`readOnly`（是否只读）、`risk`（风险等级）等配置。
+- **示例工具**：`custom-tools/example-hello/` 提供了完整的示例参考。
+
+### 10. 本地 HTTP / WebSocket 远程服务（新增）
+
+- **远程查看与操控**：默认端口 17800，带访问 Token 鉴权（有效期 60 天），支持浏览器/外部设备远程查看与操控导图画面。
+- **实时画面帧流**：支持实时画面帧抓取与流式推送，远程端可查看当前导图画面。
+- **设置页可视化启停**：在设置页「本地 HTTP 服务」开关，开启后可获取访问地址与 Token。
+- **对外 API 技能文档**：`skills/my-mindmap-agent-api/SKILL.md` 供其他 AI Agent 通过本地 HTTP API 调用本应用。
+
+### 11. MCP 服务器管理（新增）
+
+- **接入 MCP 工具服务器**：支持接入 stdio 型 MCP（Model Context Protocol）工具服务器，扩展 AI 可调用的外部能力。
+- **动态管理**：可在设置页启停 MCP 服务器，实时生效。
+
+### 12. 用户自定义技能管理（新增）
+
+- **本地技能 CRUD**：支持在本地创建/编辑/启用 AI 技能（Skills），由 AI 按需自动调用。
+- **技能文档**：每个技能由 SKILL.md 定义，包含触发条件、工作流程、示例等。
+
+### 13. 桌面宠物猫（新增）
+
+- **可爱的桌面宠物**：`cherry-cat-pet/` 模块，包含 Python 生成的精灵图动画（spritesheet）、宠物配置（pet.json）、问答素材（qa/contact-sheet.png）。
+- **互动功能**：可在应用内展示互动，为学习增添乐趣。
+
+### 14. 文件拖拽到 AI 输入框（新增）
+
+- **便捷操作**：从文件树直接拖拽文件到 AI 输入框，自动读取文件内容并添加到对话上下文。
+- **拖拽悬停提示**：拖拽时显示悬停提示浮层，操作更直观。
+- **模块级状态管理**：通过 `dragState.js` 解决 dataTransfer 返回空值的问题。
+
+### 15. 工程与体验细节
 
 - **意图规范化改写**：发送消息前先让 AI 做意图识别与改写，提升弱模型下的指令遵循率。
 - **自动保存 / 软重启**：关闭前自动落盘；界面卡死用"刷新"按钮软重启恢复。
@@ -126,8 +164,11 @@ my-mindmap-agent/
 ├── electron/                 # Electron 主进程 + preload + IPC 模块
 │   ├── main.js               # 窗口、托盘、IPC 安全校验、联网搜索编排
 │   ├── preload.js            # 暴露安全 API 给渲染层
-│   ├── ipc/                  # aiChat / fileManager / feishu / wechat / ocr / taskScheduler…
+│   ├── ipc/                  # aiChat / fileManager / feishu / wechat / ocr / taskScheduler / httpServer / mcpManager / skillsManager / customTools…
 │   └── utils/                # 配置存储、旧版 LevelDB 迁移
+├── cherry-cat-pet/           # 桌面宠物猫模块（spritesheet 动画、配置、问答素材）
+├── custom-tools/             # 用户自定义工具目录（示例工具、README）
+├── skills/                   # AI 技能文档（如 my-mindmap-agent-api）
 ├── build/                    # NSIS 安装脚本
 ├── public/                   # 静态资源（图标）
 ├── tools/                    # 辅助脚本（打包、图标生成、迁移测试等）
@@ -138,7 +179,7 @@ my-mindmap-agent/
 
 > 思维导图渲染内核来自开源项目 [Simple Mind Map](https://github.com/wanglin2/mind-map)（MIT），本项目的 `simple-mind-map` 依赖即源自此仓库。
 
-**技术栈**：Vue 3 · Pinia · Element Plus · Vite 5 · Electron 28 · electron-builder · simple-mind-map · sql.js · tesseract.js（OCR）· jszip · pdfjs-dist · @larksuiteoapi/node-sdk（飞书）。
+**技术栈**：Vue 3 · Pinia · Element Plus · Vite 5 · Electron 28 · electron-builder · simple-mind-map · sql.js · tesseract.js（OCR）· jszip · pdfjs-dist · @larksuiteoapi/node-sdk（飞书）· ws（WebSocket）。
 
 ---
 
@@ -194,6 +235,8 @@ npm run electron:build
    - "把这份导图一键整理成更合理的框架，存为新文件"
    - "给整图做智能挖空，我要自测背诵"
    - "每天早 8 点把今日复习清单推送到我的微信"
+   - "调用自定义工具查询成都天气"
+   - "开启本地 HTTP 服务，让平板也能看导图"
 
 ---
 
@@ -203,6 +246,8 @@ npm run electron:build
 - **导入的 Markdown 层级/加粗不对？** 删除旧的错误 `.smm` 重新导入即可（已修复缩进自动检测与行内样式）。
 - **扫描版 PDF 识别不了？** 会自动走 OCR 兜底（tesseract.js），首次较慢属正常。
 - **弱模型指令误解？** 关键任务建议用更强模型（如 deepseek-chat），并开启意图改写。
+- **如何编写自定义工具？** 参考 `custom-tools-spec.md` 文档，按规范创建工具目录和文件即可。
+- **如何远程访问导图？** 在设置页开启「本地 HTTP 服务」，获取访问地址与 Token，用浏览器访问即可。
 
 ---
 
