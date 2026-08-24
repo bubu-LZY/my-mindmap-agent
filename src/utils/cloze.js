@@ -636,6 +636,100 @@ export const clearNodeCloze = (node) => {
   node.setText(text, !!node.getData('richText'))
 }
 
+/**
+ * 部分清除挖空：只清除分隔符之前（before）或之后（after）的挖空标记。
+ * @param {object} node - 节点对象
+ * @param {string} delimiter - 分隔符文本（如 "："）
+ * @param {'before'|'after'} side - 清除哪一侧的挖空
+ * @returns {boolean} 是否有修改
+ */
+export const clearNodeClozePartial = (node, delimiter, side = 'before') => {
+  let text = node.getData('text') || ''
+  if (typeof text !== 'string' || !text.includes('smm-cloze')) return false
+  if (!delimiter) return false
+
+  const plainText = text.replace(/<[^>]+>/g, '')
+  const delimIdx = plainText.indexOf(delimiter)
+  if (delimIdx < 0) return false
+
+  // 用 DOM 解析 HTML，逐文本节点跟踪纯文本偏移，精确拆分跨越分隔符的挖空 span
+  const doc = new DOMParser().parseFromString(`<div>${text}</div>`, 'text/html')
+  const root = doc.body.firstChild
+  let plainOffset = 0
+  let changed = false
+
+  const getPlainLen = (node) => {
+    if (node.nodeType === 3) return node.textContent.length
+    if (node.nodeType === 1) {
+      let len = 0
+      for (const c of node.childNodes) len += getPlainLen(c)
+      return len
+    }
+    return 0
+  }
+
+  const unwrap = (el) => {
+    const parent = el.parentNode
+    while (el.firstChild) parent.insertBefore(el.firstChild, el)
+    parent.removeChild(el)
+  }
+
+  const walk = (container) => {
+    const children = Array.from(container.childNodes)
+    for (const child of children) {
+      if (child.nodeType === 3) {
+        const len = child.textContent.length
+        plainOffset += len
+        continue
+      }
+      if (child.nodeType !== 1) continue
+      const isCloze = child.classList && child.classList.contains('smm-cloze')
+      const childStart = plainOffset
+      const childLen = getPlainLen(child)
+      const childEnd = childStart + childLen
+
+      if (isCloze) {
+        const beforeDelim = side === 'before' ? childEnd <= delimIdx + delimiter.length : childStart < delimIdx
+        const afterDelim = side === 'after' ? childStart >= delimIdx : childEnd > delimIdx + delimiter.length
+
+        if ((side === 'before' && childEnd <= delimIdx + delimiter.length) ||
+            (side === 'after' && childStart >= delimIdx + delimiter.length)) {
+          // 整个挖空在目标侧 → 移除挖空标签保留内容
+          unwrap(child)
+          changed = true
+          plainOffset = childEnd
+          continue
+        }
+        if ((side === 'before' && childStart < delimIdx) ||
+            (side === 'after' && childEnd > delimIdx + delimiter.length)) {
+          // 挖空跨越分隔符 → 递归进内部逐节点处理
+          walk(child)
+          // 如果子节点全部不再是挖空，移除外层挖空标签
+          const hasClozeChild = Array.from(child.childNodes).some(
+            c => c.nodeType === 1 && c.classList && c.classList.contains('smm-cloze')
+          )
+          if (!hasClozeChild && child.classList.contains('smm-cloze')) {
+            unwrap(child)
+            changed = true
+          }
+          continue
+        }
+        // 整个挖空在对侧 → 跳过不动
+        plainOffset = childEnd
+        continue
+      }
+      // 非挖空元素 → 递归
+      walk(child)
+    }
+  }
+
+  walk(root)
+  if (changed) {
+    node.setText(root.innerHTML, !!node.getData('richText'))
+  }
+  return changed
+}
+
 export const clearAllCloze = () => {
   if (!mindMapRef || !mindMapRef.renderer) return 0
   const root = mindMapRef.renderer.root

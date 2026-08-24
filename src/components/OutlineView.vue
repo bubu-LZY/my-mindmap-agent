@@ -2433,6 +2433,41 @@ const onToolbarExport = async (type) => {
     }
     return
   }
+  // 大纲模式 HTML 导出：生成可交互的折叠/展开 HTML
+  if (type === 'html') {
+    outlineExporting.value = true
+    try {
+      const html = buildOutlineHtml(treeData.value, outlineExportFileName())
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${outlineExportFileName()}.html`
+      a.click()
+      URL.revokeObjectURL(url)
+      ElMessage.success(`已导出：${outlineExportFileName()}.html`)
+    } catch (e) {
+      console.error('[OutlineView] HTML 导出失败:', e)
+      ElMessage.error(`导出失败: ${e.message}`)
+    } finally {
+      outlineExporting.value = false
+    }
+    return
+  }
+  // 大纲模式 PDF 导出：通过 HTML 转 PDF
+  if (type === 'pdf') {
+    outlineExporting.value = true
+    try {
+      await exportOutlineAsPdf(treeData.value, outlineExportFileName())
+      ElMessage.success(`已导出：${outlineExportFileName()}.pdf`)
+    } catch (e) {
+      console.error('[OutlineView] PDF 导出失败:', e)
+      ElMessage.error(`导出失败: ${e.message}`)
+    } finally {
+      outlineExporting.value = false
+    }
+    return
+  }
   if (!mm.doExport) return
   outlineExporting.value = true
   const name = outlineExportFileName()
@@ -2457,6 +2492,149 @@ const onToolbarExport = async (type) => {
   } finally {
     outlineExporting.value = false
   }
+}
+
+// 构建大纲 HTML（支持节点展开/收起 + 挖空显示/隐藏）
+const buildOutlineHtml = (nodes, title) => {
+  const htmlEscape = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+  const renderNode = (node, depth = 0) => {
+    if (!node) return ''
+    const label = String(node.label || '').replace(/<[^>]+>/g, '').trim() || '未命名'
+    const hasCloze = /smm-cloze/.test(String(node.label || ''))
+    const children = node.children || []
+    const hasChildren = children.length > 0
+    const paddingLeft = depth * 24
+
+    let html = `<div class="outline-item" style="padding-left:${paddingLeft}px">`
+    if (hasChildren) {
+      html += `<span class="toggle-btn" onclick="toggleNode(this)">▼</span>`
+    } else {
+      html += `<span class="toggle-placeholder"></span>`
+    }
+    html += `<span class="node-text${hasCloze ? ' has-cloze' : ''}">${htmlEscape(label)}</span>`
+    html += `</div>`
+
+    if (hasChildren) {
+      html += `<div class="children-container">`
+      for (const child of children) {
+        html += renderNode(child, depth + 1)
+      }
+      html += `</div>`
+    }
+    return html
+  }
+
+  let bodyHtml = ''
+  if (Array.isArray(nodes)) {
+    for (const node of nodes) {
+      bodyHtml += renderNode(node, 0)
+    }
+  } else if (nodes) {
+    bodyHtml += renderNode(nodes, 0)
+  }
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>${htmlEscape(title)} - 大纲</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f6f6f8; color: #1d1d1f; padding: 20px; }
+  .toolbar { position: fixed; top: 16px; right: 20px; z-index: 100; display: flex; gap: 8px; }
+  .toolbar button { padding: 8px 14px; border: 1px solid rgba(0,0,0,0.12); border-radius: 8px; background: rgba(255,255,255,0.95); font-size: 13px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.08); transition: all 0.15s; }
+  .toolbar button:hover { background: #f0f0f0; }
+  .toolbar button.active { background: #007aff; color: #fff; border-color: #007aff; }
+  h1 { font-size: 24px; font-weight: 600; margin-bottom: 20px; padding: 10px 0; border-bottom: 2px solid #e5e5ea; }
+  .outline-item { display: flex; align-items: center; padding: 6px 0; gap: 6px; }
+  .toggle-btn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; font-size: 10px; cursor: pointer; color: #86868b; transition: transform 0.2s; user-select: none; flex-shrink: 0; }
+  .toggle-btn.collapsed { transform: rotate(-90deg); }
+  .toggle-placeholder { display: inline-block; width: 20px; flex-shrink: 0; }
+  .node-text { font-size: 15px; line-height: 1.6; }
+  .node-text.has-cloze { background: rgba(124, 58, 237, 0.13); border-bottom: 2px solid rgba(124, 58, 237, 0.7); border-radius: 3px; padding: 0 3px; }
+  .node-text.cloze-hidden { color: transparent !important; background: rgba(124, 58, 237, 0.08); border-bottom-color: rgba(124, 58, 237, 0.3); }
+  .children-container { overflow: hidden; transition: max-height 0.25s ease; }
+  .children-container.collapsed { max-height: 0 !important; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button onclick="expandAll()" title="展开全部">展开全部</button>
+  <button onclick="collapseAll()" title="收起全部">收起全部</button>
+  <button id="clozeToggle" onclick="toggleCloze()" title="显示/隐藏挖空内容">显示挖空</button>
+</div>
+<h1>${htmlEscape(title)}</h1>
+<div class="outline-tree">
+${bodyHtml}
+</div>
+<script>
+function toggleNode(btn) {
+  var item = btn.closest('.outline-item');
+  var children = item.nextElementSibling;
+  if (!children || !children.classList.contains('children-container')) return;
+  var isCollapsed = children.classList.toggle('collapsed');
+  btn.classList.toggle('collapsed', isCollapsed);
+}
+
+function expandAll() {
+  document.querySelectorAll('.children-container').forEach(function(c) {
+    c.classList.remove('collapsed');
+  });
+  document.querySelectorAll('.toggle-btn').forEach(function(b) {
+    b.classList.remove('collapsed');
+  });
+}
+
+function collapseAll() {
+  document.querySelectorAll('.children-container').forEach(function(c) {
+    c.classList.add('collapsed');
+  });
+  document.querySelectorAll('.toggle-btn').forEach(function(b) {
+    b.classList.add('collapsed');
+  });
+}
+
+var clozeVisible = true;
+function toggleCloze() {
+  clozeVisible = !clozeVisible;
+  document.querySelectorAll('.node-text.has-cloze').forEach(function(el) {
+    el.classList.toggle('cloze-hidden', !clozeVisible);
+  });
+  document.getElementById('clozeToggle').textContent = clozeVisible ? '隐藏挖空' : '显示挖空';
+  document.getElementById('clozeToggle').classList.toggle('active', !clozeVisible);
+}
+<' + '/script>
+</body>
+</html>`
+}
+
+// 大纲 PDF 导出（通过打印 HTML 实现）
+const exportOutlineAsPdf = async (nodes, title) => {
+  const html = buildOutlineHtml(nodes, title)
+  // 注入打印样式：隐藏工具栏，展开所有节点
+  const printHtml = html.replace('</head>', `
+<style>
+  @media print { .toolbar { display: none !important; } }
+  .toolbar { display: none; }
+  .children-container { max-height: none !important; }
+  .toggle-btn { display: none; }
+  .toggle-placeholder { display: none; }
+  .outline-item { padding-left: 0 !important; }
+</style>
+</head>`)
+  // 使用 Electron 的打印功能或 window.print
+  const printWindow = window.open('', '_blank')
+  if (!printWindow) throw new Error('无法打开打印窗口，请允许弹出窗口')
+  printWindow.document.write(printHtml)
+  printWindow.document.close()
+  // 等待内容加载完成后触发打印
+  setTimeout(() => {
+    printWindow.print()
+    // 打印对话框关闭后关闭窗口
+    printWindow.onafterprint = () => printWindow.close()
+  }, 500)
 }
 
 /* ============================================================
@@ -2798,6 +2976,9 @@ defineExpose({ refresh, openGeneralization, setFullscreen })
   inset: 0;
   z-index: 5000;
   background-color: var(--main-bg);
+}
+.outline-wrapper.is-fullscreen .outline-toolbar-bar {
+  display: none;
 }
 
 .fullscreen-btn {

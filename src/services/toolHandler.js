@@ -19,7 +19,7 @@ import {
 } from '../utils/reviewPlan'
 import {
   toggleAllCloze, toggleClozeByUid, setAllClozeHidden, setNodesClozeHidden, isClozeHiddenAll,
-  nodeHasCloze, isUidClozeHidden, clearNodeCloze, applyClozeStyles, setGlobalClozeHidden
+  nodeHasCloze, isUidClozeHidden, clearNodeCloze, clearNodeClozePartial, applyClozeStyles, setGlobalClozeHidden
 } from '../utils/cloze'
 import { useMindMapStore } from '../stores/mindMapStore'
 import { extractDocxText, extractPdfText } from '../utils/docExtract'
@@ -118,6 +118,7 @@ const toolCatalog = [
   { name: 'batch_node_actions', category: 'Node Ops', desc: 'Batch node operations (first choice for multi-node tasks): one call picks nodes per step via targets (uids/keyword/mode) and finishes style setting, smart cloze, etc. in batches; no need to select_node first' },
   { name: 'summarize_node', category: 'Node Ops', desc: 'Add a summary (generalization) to nodes: targets (uids/keyword/mode) adds same summary to all matched in one call; omit = selected node' },
   { name: 'search_nodes', category: 'Node Ops', desc: 'Search nodes containing a keyword (results include path/uid/parent info)' },
+  { name: 'query_nodes', category: 'Node Ops', desc: 'Advanced node query with rich filters (text/style/cloze/structure). Replaces multiple search_nodes+query_node_styles. Returns uid, text, clozeWords, path, depth.' },
   { name: 'find_replace_text', category: 'Edit', desc: 'Find & replace text across nodes (literal or regex, preview supported, formatting preserved, scope via targets uids/keyword/mode)' },
   { name: 'change_layout', category: 'View', desc: 'Switch layout structure' },
   { name: 'set_theme', category: 'View', desc: 'Switch theme style' },
@@ -154,7 +155,7 @@ const toolCatalog = [
   { name: 'delete_review_plan', category: 'Study', desc: 'Delete review-plan tasks: by filePath (all tasks of that file), by nodeUid (single task), or all=true for everything; asks the user to confirm before executing' },
   { name: 'toggle_cloze_visibility', category: 'Study', desc: 'Toggle cloze answer show/hide (whole map or given nodes) for recitation self-test' },
   { name: 'list_cloze_nodes', category: 'Study', desc: 'List all nodes with cloze marks (uid, text, visibility)' },
-  { name: 'clear_cloze', category: 'Study', desc: 'Clear cloze marks via targets (uids/keyword/mode, all=whole map); undoable' },
+  { name: 'clear_cloze', category: 'Study', desc: 'Clear cloze marks via targets (uids/keyword/mode, all=whole map); supports before/after to only clear one side of a delimiter; undoable' },
   { name: 'ai_quiz', category: 'AI', desc: 'AI quiz into a new map file: generate self-test questions (single/multiple/short answer) from selected nodes/subtree/whole map, saved as 主题【AI出题】.smm next to the source map; answers and explanations auto-cloze-hidden, click to reveal; current map untouched; use when the user wants questions in a new file' },
   { name: 'ai_quiz_append', category: 'AI', desc: 'AI quiz appended: generate one question per selected node (fill-blank or choice by default) and append 【question+answer+explanation】 merged as one new child node; type tag 【选择】【填空】 bold blue; answer and explanation each on one line, auto-cloze-hidden; original untouched; one batch call; Ctrl+Z undoable' },
   { name: 'audit_mindmap', category: 'Mindmap', desc: 'Audit map structure and quality without modifying it' },
@@ -714,7 +715,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'clear_cloze',
-      description: 'Clear cloze marks: targets picks the nodes (uids/keyword/mode, mode:"all"=clear whole map); text restores to original afterwards; Ctrl+Z undoable.',
+      description: 'Clear cloze marks: targets picks the nodes (uids/keyword/mode, mode:"all"=clear whole map); text restores to original afterwards; Ctrl+Z undoable. Use before/after to only clear cloze on one side of a delimiter (e.g. before:"：" clears cloze only in text before the colon).',
       parameters: {
         type: 'object',
         properties: {
@@ -722,7 +723,9 @@ export const aiTools = [
             type: 'object',
             description: 'Node set to clear cloze marks from',
             properties: targetNodesProps
-          }
+          },
+          before: { type: 'string', description: 'Only clear cloze in the text BEFORE this delimiter (e.g. "：" to clear cloze before colons). The delimiter and text after it keep their cloze.' },
+          after: { type: 'string', description: 'Only clear cloze in the text AFTER this delimiter. The delimiter and text before it keep their cloze.' }
         },
         required: ['targets']
       }
@@ -981,6 +984,19 @@ export const aiTools = [
                   description: 'Target node set of this step',
                   properties: targetNodesProps
                 },
+                condition: {
+                  type: 'object',
+                  description: 'Extra filter applied AFTER targets resolve. Only nodes passing ALL specified conditions are kept. Use for "only nodes whose text contains X" or "only nodes whose text matches a regex" scenarios.',
+                  properties: {
+                    textContains: { type: 'string', description: 'Only keep nodes whose plain text contains this substring (case-insensitive)' },
+                    textNotContains: { type: 'string', description: 'Exclude nodes whose plain text contains this substring' },
+                    textRegex: { type: 'string', description: 'Only keep nodes whose plain text matches this JS regex (e.g. "^\\d+\\.")' },
+                    hasCloze: { type: 'boolean', description: 'true = only nodes with cloze marks; false = only nodes without cloze marks' },
+                    hasStyle: { type: 'string', description: 'Only nodes with this style type (e.g. "bold", "italic", "underline", "color", "highlight", "cloze", "nodeFill", "note")' },
+                    minDepth: { type: 'number', description: 'Only nodes at or deeper than this depth (root=0)' },
+                    maxDepth: { type: 'number', description: 'Only nodes at or shallower than this depth (root=0)' }
+                  }
+                },
                 set_style: {
                   type: 'object',
                   description: 'Batch-set styles of all target nodes of this step (at least one; applies to all text in the node)',
@@ -1032,6 +1048,14 @@ export const aiTools = [
                     regex: { type: 'boolean', description: 'true = treat find as JS regex source, default false = literal substring' },
                     flags: { type: 'string', description: 'Regex flags when regex=true, default "g"' }
                   }
+                },
+                clear_cloze: {
+                  type: 'object',
+                  description: 'Clear cloze marks from target nodes. Without before/after = clear all cloze; with before/after = only clear cloze on one side of the delimiter.',
+                  properties: {
+                    before: { type: 'string', description: 'Only clear cloze in text BEFORE this delimiter (e.g. "：")' },
+                    after: { type: 'string', description: 'Only clear cloze in text AFTER this delimiter' }
+                  }
                 }
               },
               required: ['targets']
@@ -1076,6 +1100,46 @@ export const aiTools = [
           keyword: { type: 'string', description: 'Search keyword' }
         },
         required: ['keyword']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'query_nodes',
+      description: 'Advanced node query with rich filters (AND logic). Replaces multiple search_nodes + query_node_styles calls. Filters: textContains/textNotContains/textRegex/textStartsWith/hasCloze/clozeContains/hasStyle/hasNote/isLeaf/minDepth/maxDepth. Returns full node info: uid, plainText, path, clozeWords, styles, depth. Use for "find all nodes where X and do Y" patterns.',
+      parameters: {
+        type: 'object',
+        properties: {
+          filters: {
+            type: 'object',
+            description: 'Filter conditions (AND logic). All specified conditions must match.',
+            properties: {
+              textContains: { type: 'string', description: 'Plain text contains this substring (case-insensitive)' },
+              textNotContains: { type: 'string', description: 'Plain text does NOT contain this substring' },
+              textRegex: { type: 'string', description: 'Plain text matches this JS regex (e.g. "：")' },
+              textStartsWith: { type: 'string', description: 'Plain text starts with this prefix' },
+              hasCloze: { type: 'boolean', description: 'true = only nodes with cloze marks; false = only without' },
+              clozeContains: { type: 'string', description: 'Cloze words contain this substring (e.g. "社会" finds nodes where cloze words include "社会")' },
+              hasStyle: { type: 'string', description: 'Node has this style type: bold/italic/underline/color/highlight/cloze/nodeFill/note' },
+              hasNote: { type: 'boolean', description: 'true = has note; false = no note' },
+              isLeaf: { type: 'boolean', description: 'true = leaf node (no children); false = has children' },
+              minDepth: { type: 'number', description: 'Minimum depth (root=0)' },
+              maxDepth: { type: 'number', description: 'Maximum depth (root=0)' }
+            }
+          },
+          scope: {
+            type: 'object',
+            description: 'Narrow the search scope (omit = whole map). Applied BEFORE filters.',
+            properties: targetNodesProps
+          },
+          limit: { type: 'number', description: 'Max results to return (default 200, max 500)' },
+          returnFields: {
+            type: 'array',
+            items: { type: 'string', enum: ['uid', 'plainText', 'path', 'clozeWords', 'styles', 'depth', 'isLeaf', 'hasNote', 'rawHtml'] },
+            description: 'Only return these fields (default all except rawHtml). rawHtml includes the node HTML text.'
+          }
+        }
       }
     }
   },
@@ -3680,6 +3744,23 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
               continue
             }
             const targetNodes = nodes.filter(node => !node.isGeneralization)
+            // 条件过滤（dry-run 也需要展示过滤后的节点）
+            if (step.condition && targetNodes.length > 0) {
+              const cond = step.condition
+              const filtered = targetNodes.filter(n => {
+                const plain = nodePlainText(n.getData?.('text') || '')
+                if (cond.textContains && !plain.toLowerCase().includes(cond.textContains.toLowerCase())) return false
+                if (cond.textNotContains && plain.toLowerCase().includes(cond.textNotContains.toLowerCase())) return false
+                if (cond.textRegex) {
+                  try { if (!new RegExp(cond.textRegex, 'i').test(plain)) return false } catch (e) { return false }
+                }
+                if (cond.hasCloze === true && !nodeHasCloze(n)) return false
+                if (cond.hasCloze === false && nodeHasCloze(n)) return false
+                return true
+              })
+              targetNodes.length = 0
+              targetNodes.push(...filtered)
+            }
             const changes = []
             if (step.set_style) changes.push({ operation: 'set_style', value: step.set_style })
             if (step.text_style) changes.push({ operation: 'text_style', value: step.text_style })
@@ -3687,6 +3768,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
             if (Array.isArray(step.update_texts)) changes.push({ operation: 'update_texts', value: step.update_texts })
             if (step.wrap_text) changes.push({ operation: 'wrap_text', value: step.wrap_text })
             if (step.replace_text) changes.push({ operation: 'replace_text', value: step.replace_text })
+            if (step.clear_cloze) changes.push({ operation: 'clear_cloze', value: step.clear_cloze })
             plannedChanges.push({
               step: i + 1,
               targetCount: targetNodes.length,
@@ -3716,6 +3798,32 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
             continue
           }
           const targetNodes = nodes.filter(n => !n.isGeneralization)
+          // 条件过滤：在 targets 基础上进一步筛选
+          if (step.condition && targetNodes.length > 0) {
+            const cond = step.condition
+            const filtered = targetNodes.filter(n => {
+              const plain = nodePlainText(n.getData?.('text') || '')
+              if (cond.textContains && !plain.toLowerCase().includes(cond.textContains.toLowerCase())) return false
+              if (cond.textNotContains && plain.toLowerCase().includes(cond.textNotContains.toLowerCase())) return false
+              if (cond.textRegex) {
+                try { if (!new RegExp(cond.textRegex, 'i').test(plain)) return false } catch (e) { return false }
+              }
+              if (cond.hasCloze === true && !nodeHasCloze(n)) return false
+              if (cond.hasCloze === false && nodeHasCloze(n)) return false
+              if (cond.hasStyle) {
+                const styles = analyzeNodeTextStyles(n)
+                const styleMap = { bold: 'bold', italic: 'italic', underline: 'underline', color: 'textColor', highlight: 'highlightColor', cloze: 'cloze', nodeFill: 'nodeFill', note: 'note' }
+                const key = styleMap[cond.hasStyle]
+                if (key && !styles[key]) return false
+              }
+              return true
+            })
+            if (filtered.length < targetNodes.length) {
+              stepResults.push(`第${i + 1}步条件过滤：${targetNodes.length} → ${filtered.length} 个节点`)
+            }
+            targetNodes.length = 0
+            targetNodes.push(...filtered)
+          }
           if (!targetNodes.length) {
             allOk = false
             stepResults.push(`第${i + 1}步未执行：命中的节点均不可操作`)
@@ -3852,8 +3960,36 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
             }
           }
 
-          if (!step.set_style && !step.text_style && !step.ai_cloze && !step.update_texts && !step.wrap_text && !step.replace_text) {
-            parts.push('未指定任何操作（set_style / text_style / ai_cloze / update_texts / wrap_text / replace_text 至少一项）')
+          if (step.clear_cloze) {
+            const cc = step.clear_cloze
+            const delimiter = cc.before || cc.after || ''
+            const side = cc.before ? 'before' : (cc.after ? 'after' : '')
+            let cleared = 0
+            for (const n of targetNodes) {
+              if (n.isGeneralization) continue
+              const text = n.getData?.('text') || ''
+              if (!text.includes('smm-cloze')) continue
+              try {
+                if (delimiter && side) {
+                  if (clearNodeClozePartial(n, delimiter, side)) cleared++
+                } else {
+                  clearNodeCloze(n)
+                  cleared++
+                }
+              } catch (err) {
+                console.warn('[batch clear_cloze] 单节点清除失败:', err)
+              }
+            }
+            if (cleared > 0) {
+              mindMap.render()
+              applyClozeStyles()
+            }
+            const scopeDesc = delimiter ? `（${side === 'before' ? delimiter + '前' : delimiter + '后'}）` : ''
+            parts.push(cleared > 0 ? `clear_cloze 已清除 ${cleared} 个节点${scopeDesc}的挖空` : 'clear_cloze 未找到匹配的挖空标记')
+          }
+
+          if (!step.set_style && !step.text_style && !step.ai_cloze && !step.update_texts && !step.wrap_text && !step.replace_text && !step.clear_cloze) {
+            parts.push('未指定任何操作（set_style / text_style / ai_cloze / update_texts / wrap_text / replace_text / clear_cloze 至少一项）')
           }
           stepResults.push(`第${i + 1}步：${parts.join('；')}`)
         }
@@ -3923,6 +4059,175 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         }
       } catch (e) {
         return { success: false, message: `搜索节点失败: ${e.message}` }
+      }
+    }
+
+    case 'query_nodes': {
+      try {
+        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        const filters = args.filters || {}
+        const limit = Math.min(Math.max(Number(args.limit) || 200, 1), 500)
+        const returnFields = Array.isArray(args.returnFields) && args.returnFields.length > 0
+          ? new Set(args.returnFields) : new Set(['uid', 'plainText', 'path', 'clozeWords', 'depth', 'isLeaf'])
+
+        // 1. 确定搜索范围
+        let scopeNodes
+        if (args.scope && (args.scope.uids || args.scope.keyword || args.scope.mode)) {
+          const r = resolveTargetNodes(mindMap, args.scope)
+          if (r.error) return { success: false, message: `范围解析失败：${r.error}` }
+          scopeNodes = r.nodes
+        } else {
+          scopeNodes = []
+          const walkAll = (n) => {
+            if (!n || n.isGeneralization) return
+            scopeNodes.push(n)
+            ;(n.children || []).forEach(walkAll)
+          }
+          walkAll(mindMap.renderer.root)
+        }
+
+        // 2. 预编译过滤器
+        const textContains = filters.textContains ? normalizeForMatch(filters.textContains) : ''
+        const textNotContains = filters.textNotContains ? normalizeForMatch(filters.textNotContains) : ''
+        let textRegex = null
+        if (filters.textRegex) {
+          try { textRegex = new RegExp(filters.textRegex, 'i') } catch (e) {
+            return { success: false, message: `textRegex 正则语法错误: ${e.message}` }
+          }
+        }
+        const textStartsWith = filters.textStartsWith || ''
+        const wantHasCloze = filters.hasCloze
+        const clozeContains = filters.clozeContains ? filters.clozeContains.toLowerCase() : ''
+        const wantHasStyle = filters.hasStyle || ''
+        const wantHasNote = filters.hasNote
+        const wantIsLeaf = filters.isLeaf
+        const minDepth = Number.isFinite(Number(filters.minDepth)) ? Number(filters.minDepth) : -1
+        const maxDepth = Number.isFinite(Number(filters.maxDepth)) ? Number(filters.maxDepth) : 999
+
+        // 3. 遍历节点 + 过滤
+        const results = []
+        const nodeDepthMap = new Map()
+        const calcDepth = (node) => {
+          if (nodeDepthMap.has(node)) return nodeDepthMap.get(node)
+          let d = 0
+          let p = node.parent
+          while (p && p !== mindMap.renderer.root) { d++; p = p.parent }
+          nodeDepthMap.set(node, d)
+          return d
+        }
+
+        for (const n of scopeNodes) {
+          if (n.isGeneralization) continue
+          const plain = nodePlainText(n.getData?.('text') || '')
+          const normText = normalizeForMatch(plain)
+          const uid = n.getData?.('uid') || n.uid
+
+          // 文本过滤
+          if (textContains && !normText.includes(textContains)) continue
+          if (textNotContains && normText.includes(textNotContains)) continue
+          if (textRegex && !textRegex.test(plain)) continue
+          if (textStartsWith && !plain.startsWith(textStartsWith)) continue
+
+          // 挖空过滤
+          const hasCloze = nodeHasCloze(n)
+          if (wantHasCloze === true && !hasCloze) continue
+          if (wantHasCloze === false && hasCloze) continue
+
+          // 挖空词过滤
+          let clozeWords = []
+          if (hasCloze || clozeContains || returnFields.has('clozeWords')) {
+            const audit = analyzeNodeTextStyles(n.getData?.('text') || '')
+            clozeWords = audit?.cloze || []
+            if (clozeContains && !clozeWords.some(w => w.toLowerCase().includes(clozeContains))) continue
+          }
+
+          // 样式过滤
+          if (wantHasStyle) {
+            const audit = analyzeNodeTextStyles(n.getData?.('text') || '')
+            const styleMap = { bold: 'bold', italic: 'italic', underline: 'underline', color: 'colors', highlight: 'highlights', cloze: 'cloze', nodeFill: 'nodeFill', note: 'note' }
+            const key = styleMap[wantHasStyle]
+            if (key) {
+              if (key === 'nodeFill') {
+                if (!(n.getData?.('style') || {}).fillColor) continue
+              } else if (key === 'note') {
+                if (!n.getData?.('note')) continue
+              } else if (audit) {
+                const val = audit[key]
+                if (Array.isArray(val) ? val.length === 0 : Object.keys(val).length === 0) continue
+              } else {
+                continue
+              }
+            }
+          }
+
+          // 备注过滤
+          if (wantHasNote === true && !n.getData?.('note')) continue
+          if (wantHasNote === false && n.getData?.('note')) continue
+
+          // 结构过滤
+          const children = (n.children || []).filter(c => !c.isGeneralization)
+          if (wantIsLeaf === true && children.length > 0) continue
+          if (wantIsLeaf === false && children.length === 0) continue
+
+          // 深度过滤
+          const depth = calcDepth(n)
+          if (depth < minDepth || depth > maxDepth) continue
+
+          // 构造结果
+          const entry = {}
+          if (returnFields.has('uid')) entry.uid = uid
+          if (returnFields.has('plainText')) entry.plainText = plain.slice(0, 200)
+          if (returnFields.has('path')) {
+            const parts = []
+            let cur = n
+            while (cur && cur !== mindMap.renderer.root) {
+              parts.unshift(nodePlainText(cur.getData?.('text') || '').slice(0, 30))
+              cur = cur.parent
+            }
+            entry.path = parts.join(' > ')
+          }
+          if (returnFields.has('clozeWords') && clozeWords.length) entry.clozeWords = clozeWords
+          if (returnFields.has('depth')) entry.depth = depth
+          if (returnFields.has('isLeaf')) entry.isLeaf = children.length === 0
+          if (returnFields.has('hasNote')) entry.hasNote = !!n.getData?.('note')
+          if (returnFields.has('rawHtml')) entry.rawHtml = (n.getData?.('text') || '').slice(0, 500)
+          if (returnFields.has('styles')) {
+            const audit = analyzeNodeTextStyles(n.getData?.('text') || '')
+            if (audit) {
+              const s = {}
+              if (Object.keys(audit.colors).length) s.color = Object.keys(audit.colors)
+              if (Object.keys(audit.highlights).length) s.highlight = Object.keys(audit.highlights)
+              if (audit.bold.length) s.bold = true
+              if (audit.italic.length) s.italic = true
+              if (audit.underline.length) s.underline = true
+              if (audit.cloze.length) s.cloze = audit.cloze
+              const st = n.getData?.('style') || {}
+              if (st.fillColor) s.nodeFill = st.fillColor
+              if (Object.keys(s).length) entry.styles = s
+            }
+          }
+          results.push(entry)
+          if (results.length >= limit) break
+        }
+
+        const total = results.length
+        const sample = results.slice(0, 50)
+        const summary = sample.map((r, i) => {
+          const parts = [`${i + 1}.`]
+          if (r.plainText) parts.push(r.plainText.slice(0, 60))
+          if (r.clozeWords?.length) parts.push(`[挖空: ${r.clozeWords.join('、')}]`)
+          if (r.uid) parts.push(`uid=${r.uid.slice(0, 8)}`)
+          return parts.join(' ')
+        }).join('\n')
+
+        return {
+          success: true,
+          total,
+          message: `查询到 ${total} 个节点${total > limit ? `（已截断到 ${limit}）` : ''}：\n${summary}`,
+          results: sample
+        }
+      } catch (e) {
+        return { success: false, message: `查询节点失败: ${e.message}` }
       }
     }
 
@@ -5130,10 +5435,13 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           if (!node || node.isGeneralization) return
           if (nodeHasCloze(node)) {
             const uid = node.getData?.('uid') || node.uid
-            const text = nodePlainText(node.getData?.('text') || '').slice(0, 50)
+            const plain = nodePlainText(node.getData?.('text') || '')
             const hidden = isUidClozeHidden(uid)
-            found.push(`${hidden ? '隐藏' : '显示'} | ${text} | uid=${uid}`)
-            nodes.push({ uid, text, hidden })
+            // 提取挖空词
+            const audit = analyzeNodeTextStyles(node.getData?.('text') || '')
+            const clozeWords = audit?.cloze || []
+            found.push(`${hidden ? '隐藏' : '显示'} | ${plain.slice(0, 60)} | 挖空词: ${clozeWords.join('、') || '（解析失败）'} | uid=${uid}`)
+            nodes.push({ uid, text: plain.slice(0, 60), hidden, clozeWords })
           }
           (node.children || []).forEach(walk)
         }
@@ -5150,14 +5458,20 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
         const { nodes, error } = resolveTargetNodes(mindMap, args.targets || {})
         if (error) return { success: false, message: `目标节点解析失败：${error}` }
+        const delimiter = args.before || args.after || ''
+        const side = args.before ? 'before' : (args.after ? 'after' : '')
         let cleared = 0
         for (const n of nodes) {
           if (n.isGeneralization) continue
           const text = n.getData?.('text') || ''
           if (!text.includes('smm-cloze')) continue
           try {
-            clearNodeCloze(n)
-            cleared++
+            if (delimiter && side) {
+              if (clearNodeClozePartial(n, delimiter, side)) cleared++
+            } else {
+              clearNodeCloze(n)
+              cleared++
+            }
           } catch (err) {
             console.warn('[clear_cloze] 单节点清除失败:', err)
           }
@@ -5166,9 +5480,10 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           mindMap.render()
           applyClozeStyles()
         }
+        const scopeDesc = delimiter ? `（仅${side === 'before' ? '清除' + delimiter + '前' : '清除' + delimiter + '后的'}挖空）` : ''
         return cleared > 0
-          ? { success: true, message: `已清除 ${cleared} 个节点的挖空标记（支持 Ctrl+Z 撤销）` }
-          : { success: false, message: '目标节点中没有挖空标记，无需清除' }
+          ? { success: true, message: `已清除 ${cleared} 个节点的挖空标记${scopeDesc}（支持 Ctrl+Z 撤销）` }
+          : { success: false, message: '目标节点中没有匹配的挖空标记，无需清除' }
       } catch (e) {
         return { success: false, message: `清除挖空失败: ${e.message}` }
       }

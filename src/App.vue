@@ -258,11 +258,11 @@
         </svg>
       </button>
 
-      <!-- AI 悬浮球：AI 侧边栏收起时显示 -->
+      <!-- AI 悬浮球：AI 侧边栏收起时显示（全屏模式下也显示） -->
       <button
         v-if="!aiPanelExpanded && !floatingChatVisible"
         class="ai-float-ball"
-        :class="{ active: floatingChatVisible }"
+        :class="{ active: floatingChatVisible, 'in-fullscreen': mmFullscreen || outlineFullscreen }"
         @click="toggleFloatingChat"
         title="打开 AI 悬浮对话"
       >
@@ -275,7 +275,7 @@
       </button>
 
       <!-- ===== 右侧 AI 面板 ===== -->
-      <aside class="ai-panel" :class="{ collapsed: !aiPanelExpanded, 'floating-chat': !aiPanelExpanded && floatingChatVisible }">
+      <aside class="ai-panel" :class="{ collapsed: !aiPanelExpanded, 'floating-chat': !aiPanelExpanded && floatingChatVisible, 'in-fullscreen': mmFullscreen || outlineFullscreen }">
         <button
           v-if="!aiPanelExpanded && floatingChatVisible"
           class="floating-chat-close"
@@ -1259,6 +1259,10 @@ watch(activeFileId, () => {
     if (inst !== mindMapInstance.value) {
       mindMapInstance.value = inst
     }
+    // 切换 Tab 后主动刷新大纲（mindMap 实例可能需要额外 nextTick 才就绪）
+    nextTick(() => {
+      outlineViewRef.value?.refresh?.()
+    })
   })
 })
 
@@ -1318,18 +1322,42 @@ const onTreeOpenFile = async ({ filePath, fileName, data, isMarkdown, isXmind })
 const onFileRenamed = ({ oldPath, newPath }) => {
   // 同步复习计划中的路径，避免文件被误判为已删除而清掉复习任务
   remapReviewPaths(oldPath, newPath)
-  const cur = currentFilePath.value
-  if (!cur || !oldPath) return
+  if (!oldPath || !newPath) return
   const sep = oldPath.includes('\\') ? '\\' : '/'
-  let next = null
-  if (cur === oldPath) {
-    next = newPath
-  } else if (cur.startsWith(oldPath + sep)) {
-    next = newPath + cur.slice(oldPath.length)
+  const normOld = normalizeFileId(oldPath)
+  const normNew = normalizeFileId(newPath)
+
+  // 同步更新 tabs 数组中匹配的 fileId 和 fileName
+  tabs.value.forEach(tab => {
+    const tabFid = tab.fileId
+    if (tabFid === normOld) {
+      tab.fileId = normNew
+      tab.fileName = normNew.split('/').pop() || tab.fileName
+    } else if (tabFid.startsWith(normOld + '/')) {
+      tab.fileId = normNew + tabFid.slice(normOld.length)
+    }
+  })
+
+  // 同步更新 activeFileId
+  if (activeFileId.value === normOld) {
+    activeFileId.value = normNew
+  } else if (activeFileId.value.startsWith(normOld + '/')) {
+    activeFileId.value = normNew + activeFileId.value.slice(normOld.length)
   }
-  if (next && next !== cur) {
-    currentFilePath.value = next
-    hasFile.value = true
+
+  // 同步更新 currentFilePath
+  const cur = currentFilePath.value
+  if (cur) {
+    let next = null
+    if (cur === oldPath) {
+      next = newPath
+    } else if (cur.startsWith(oldPath + sep)) {
+      next = newPath + cur.slice(oldPath.length)
+    }
+    if (next && next !== cur) {
+      currentFilePath.value = next
+      hasFile.value = true
+    }
   }
 }
 
@@ -1373,21 +1401,47 @@ const onBeforeTreeMove = async ({ srcPath, destDir, resolve }) => {
 
 // 拖拽移动后同步 currentFilePath（当前文件本身或其所在目录被移动）
 const onFileMoved = ({ srcPath, destDir }) => {
-  const cur = currentFilePath.value
   if (!srcPath || !destDir) return
   const sep = destDir.includes('\\') ? '\\' : '/'
+  const fileName = srcPath.split(/[\\/]/).pop()
+  const newPath = destDir + sep + fileName
   // 移动的是文件还是目录未知：按目录前缀重映射可同时覆盖两种情况（复习计划路径同步）
-  remapReviewPaths(srcPath, destDir + sep + srcPath.split(/[\\/]/).pop())
-  if (!cur) return
-  let next = null
-  if (cur === srcPath) {
-    next = destDir + sep + cur.split(/[\\/]/).pop()
-  } else if (cur.startsWith(srcPath + '\\') || cur.startsWith(srcPath + '/')) {
-    next = destDir + sep + cur.slice(srcPath.length + 1)
+  remapReviewPaths(srcPath, newPath)
+
+  const normSrc = normalizeFileId(srcPath)
+  const normDest = normalizeFileId(destDir)
+
+  // 同步更新 tabs 数组中匹配的 fileId 和 fileName
+  tabs.value.forEach(tab => {
+    const tabFid = tab.fileId
+    if (tabFid === normSrc) {
+      tab.fileId = normalizeFileId(newPath)
+      tab.fileName = fileName || tab.fileName
+    } else if (tabFid.startsWith(normSrc + '/')) {
+      tab.fileId = normalizeFileId(destDir + sep + tabFid.slice(normSrc.length + 1))
+    }
+  })
+
+  // 同步更新 activeFileId
+  if (activeFileId.value === normSrc) {
+    activeFileId.value = normalizeFileId(newPath)
+  } else if (activeFileId.value.startsWith(normSrc + '/')) {
+    activeFileId.value = normalizeFileId(destDir + sep + activeFileId.value.slice(normSrc.length + 1))
   }
-  if (next && next !== cur) {
-    currentFilePath.value = next
-    hasFile.value = true
+
+  // 同步更新 currentFilePath
+  const cur = currentFilePath.value
+  if (cur) {
+    let next = null
+    if (cur === srcPath) {
+      next = newPath
+    } else if (cur.startsWith(srcPath + '\\') || cur.startsWith(srcPath + '/')) {
+      next = destDir + sep + cur.slice(srcPath.length + 1)
+    }
+    if (next && next !== cur) {
+      currentFilePath.value = next
+      hasFile.value = true
+    }
   }
 }
 
@@ -2487,6 +2541,9 @@ onBeforeUnmount(() => {
   cursor: pointer;
   backdrop-filter: blur(10px);
 }
+.ai-float-ball.in-fullscreen {
+  z-index: 6000; /* 高于全屏导图的 z-index: 5000 */
+}
 
 .ai-float-ball.active {
   background: var(--apple-blue, #007aff);
@@ -2749,6 +2806,12 @@ onBeforeUnmount(() => {
   border-radius: 18px;
   box-shadow: 0 14px 46px rgba(0, 0, 0, 0.24);
   overflow: hidden;
+}
+
+/* 全屏导图/大纲覆盖层 z-index 为 5000，悬浮对话需要比它更高，
+   否则点击悬浮球后球消失、对话面板却被盖住，看起来像没有展开 */
+.ai-panel.floating-chat.in-fullscreen {
+  z-index: 6000;
 }
 
 /* Log Panel (right of AI panel) */

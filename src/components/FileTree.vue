@@ -58,6 +58,8 @@
         :expand-on-click-node="true"
         :current-node-key="currentFilePath"
         @node-click="handleNodeClick"
+        @node-drag-start="onTreeNodeDragStart"
+        @node-drag-end="onTreeNodeDragEnd"
         @node-drop="handleNodeDrop"
         @node-expand="handleNodeExpand"
         @node-collapse="handleNodeCollapse"
@@ -65,8 +67,6 @@
         <template #default="{ data }">
           <div
             class="tree-node"
-            :draggable="!data.isDir"
-            @dragstart="onNodeDragStart($event, data)"
             @contextmenu.prevent="onContextMenu($event, data)"
             @dragover.prevent="onNodeDragOver($event, data)"
             @drop.prevent="onNodeDropExternal($event, data)"
@@ -177,6 +177,7 @@ import {
   FolderAdd, EditPen, Delete, CircleClose, Refresh, FolderChecked, Aim, CopyDocument, Download
 } from '@element-plus/icons-vue'
 import { getReviewPlan, removeByFilePath } from '../utils/reviewPlan'
+import { setDragFilePath, clearDragFilePath } from '../utils/dragState'
 
 const props = defineProps({
   currentFilePath: {
@@ -681,7 +682,26 @@ const removeRecent = (filePath) => {
   try { localStorage.setItem(RECENT_FILES_KEY, JSON.stringify(next)) } catch {}
 }
 
-const openRecent = (filePath) => {
+// 重命名/移动文件时同步更新最近打开记录中的路径
+const updateRecentPath = (oldPath, newPath) => {
+  const next = recentFiles.value.map(f => {
+    if (f.path === oldPath) return { ...f, path: newPath, name: newPath.split(/[\\/]/).pop() || f.name }
+    return f
+  })
+  recentFiles.value = next
+  try { localStorage.setItem(RECENT_FILES_KEY, JSON.stringify(next)) } catch {}
+}
+
+const openRecent = async (filePath) => {
+  // 检查文件是否存在
+  if (window.electronAPI?.fs?.exists) {
+    const exists = await window.electronAPI.fs.exists(filePath)
+    if (!exists) {
+      ElMessage.warning('文件已不存在，已从最近打开中移除')
+      removeRecent(filePath)
+      return
+    }
+  }
   const name = filePath.split(/[\\/]/).pop() || '未命名'
   openFile(filePath, name)
 }
@@ -733,15 +753,25 @@ const copyFile = async (data) => {
 const hasExternalFiles = (e) =>
   Array.from(e.dataTransfer?.types || []).some(t => t === 'Files')
 
-// 拖拽文件到 AI 对话输入框
-const onNodeDragStart = (e, data) => {
-  if (data.isDir) {
-    e.preventDefault()
-    return
+// 拖拽文件到 AI 对话输入框。
+// 注意：Element Plus 的 el-tree 拖拽起点是 .el-tree-node__content（外层），
+// 内层 .tree-node 的 @dragstart 不会触发，所以必须使用 node-drag-start / node-drag-end。
+const onTreeNodeDragStart = (treeNode, event) => {
+  const data = treeNode && treeNode.data
+  if (!data || data.isDir) return
+  const path = data.path || ''
+  if (!path) return
+  if (event && event.dataTransfer) {
+    event.dataTransfer.setData('application/x-mindmap-file', path)
+    event.dataTransfer.setData('text/plain', path)
+    event.dataTransfer.effectAllowed = 'copyMove'
   }
-  e.dataTransfer.setData('application/x-mindmap-file', data.path || '')
-  e.dataTransfer.setData('text/plain', data.path || '')
-  e.dataTransfer.effectAllowed = 'copyMove'
+  // 模块变量后备：同页拖拽时 dataTransfer.getData() 可能返回空
+  setDragFilePath(path)
+}
+
+const onTreeNodeDragEnd = () => {
+  clearDragFilePath()
 }
 
 const onNodeDragOver = (e, data) => {
@@ -913,7 +943,18 @@ const startInlineEdit = (path, initialName) => {
   })
 }
 
+let inlineEditBusy = false
 const confirmInlineEdit = async (data) => {
+  if (inlineEditBusy) return  // 防重入：Enter 和 blur 可能同时触发
+  inlineEditBusy = true
+  try {
+    await doConfirmInlineEdit(data)
+  } finally {
+    inlineEditBusy = false
+  }
+}
+
+const doConfirmInlineEdit = async (data) => {
   const newName = inlineEditingValue.value.trim()
   const oldPath = inlineEditingPath.value
 
@@ -962,6 +1003,8 @@ const confirmInlineEdit = async (data) => {
     // 原地更新节点数据，避免整树刷新导致懒加载节点丢失
     updateNodeInPlace(oldPath, newPath, finalName, data.isDir)
     // 通知父组件同步 currentFilePath：否则重命名当前文件后自动保存会在旧路径重建文件
+    // 同步更新最近打开记录中的路径
+    updateRecentPath(oldPath, newPath)
     emit('file-renamed', { oldPath, newPath, isDir: !!data.isDir })
   } catch (error) {
     ElMessage.error('重命名失败: ' + error.message)
@@ -1001,6 +1044,17 @@ const removeNode = (data) => {
         reviewItems.forEach(item => removeByFilePath(item.filePath))
       }
       ElMessage.success(hasReview ? `已删除，并同步删除 ${reviewItems.length} 个复习任务` : '已删除')
+      // 从最近打开记录中移除
+      if (data.isDir) {
+        // 目录删除：移除该目录下所有文件的最近记录
+        const dirNorm = data.path.replace(/\\/g, '/').replace(/\/+$/, '')
+        recentFiles.value.filter(f => {
+          const fp = (f.path || '').replace(/\\/g, '/')
+          return fp === dirNorm || fp.startsWith(dirNorm + '/')
+        }).forEach(f => removeRecent(f.path))
+      } else {
+        removeRecent(data.path)
+      }
       // 清理 expandedPaths 中被删除的目录及其子路径
       if (data.isDir) {
         const toRemove = []
@@ -1018,18 +1072,8 @@ const removeNode = (data) => {
       if (node) {
         tree.remove(node)
       }
-      // 如果删除的是当前打开的文件，或当前文件位于被删除目录内，通知父组件关闭
-      // （否则后续保存会在已删除的目录下重建文件）
-      const norm = p => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '')
-      const cur = props.currentFilePath
-      if (cur) {
-        const curN = norm(cur)
-        const targetN = norm(data.path)
-        const insideDeletedDir = data.isDir && (curN === targetN || curN.startsWith(targetN + '/'))
-        if (curN === targetN || insideDeletedDir) {
-          emit('file-deleted', curN === targetN ? cur : cur)
-        }
-      }
+      // 通知父组件：被删除的文件可能有打开的标签，需要同步关闭
+      emit('file-deleted', data.path)
     } catch (error) {
       ElMessage.error('删除失败: ' + error.message)
     }

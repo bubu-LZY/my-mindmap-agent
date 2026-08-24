@@ -445,8 +445,12 @@
         <el-input v-model="s.name" class="mini" />
         <el-input v-model="s.description" class="mini" />
         <el-input v-model="s.instructions" type="textarea" :rows="2" class="grow" />
-        <el-switch v-model="s.enabled" size="small" />
-        <el-switch v-model="s.autoInvoke" size="small" title="自动调用" />
+        <div class="skill-switches">
+          <span class="skill-switch-label">启用</span>
+          <el-switch v-model="s.enabled" size="small" />
+          <span class="skill-switch-label">自动</span>
+          <el-switch v-model="s.autoInvoke" size="small" title="自动调用" />
+        </div>
         <el-button size="small" @click="saveSkill(s)">保存</el-button>
         <el-button size="small" type="danger" @click="removeSkill(s.id)">删除</el-button>
       </div>
@@ -677,7 +681,7 @@ GET ${addr}/api/status?token=${token}
 
 ## Rules
 - Main app must be running and HTTP service enabled.
-- Main window closed => HTTP 503.
+- Main window closed => HTTP 503. A minimized window remains online and controllable.
 - Token invalid/expired => HTTP 401.
 - Timeout at least 120 seconds.
 - If the task creates/saves/renames/moves/exports/modifies a file, the final reply must include the absolute filePath.
@@ -2184,6 +2188,22 @@ onBeforeUnmount(() => {
 .skill-row .grow {
   flex: 1 1 auto;
   min-width: 180px;
+}
+
+.skill-row {
+  flex-wrap: wrap;
+}
+
+.skill-switches {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.skill-switch-label {
+  font-size: 11px;
+  color: #86868b;
 }
 
 /* ---------- 滚动条 ---------- */

@@ -6,7 +6,7 @@ const projectDir = process.cwd()
 const outPath = path.join(projectDir, 'my-mindmap-agent-source.zip')
 const excludeDirs = new Set([
   'node_modules', 'dist', 'release', '.git',
-  '.workbuddy', '.trae', '.trae-cn', '.vscode'
+  '.workbuddy', '.trae', '.trae-cn', '.vscode', 'package'
 ])
 
 async function main() {
@@ -24,6 +24,7 @@ async function main() {
         walk(full, relPath)
       } else if (e.isFile()) {
         if (name.toLowerCase().endsWith('.zip')) continue
+        if (name.toLowerCase().endsWith('.tgz')) continue
         zip.file(relPath, fs.readFileSync(full))
         fileCount++
       }

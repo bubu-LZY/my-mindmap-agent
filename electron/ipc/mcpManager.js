@@ -1,7 +1,10 @@
-const { ipcMain, net } = require('electron')
+const { ipcMain, net, app } = require('electron')
 const store = require('../utils/store')
 const crypto = require('crypto')
 const { spawn } = require('child_process')
+const fs = require('fs')
+const path = require('path')
+const os = require('os')
 
 const STORE_KEY = 'mcpServers'
 const stdioClients = new Map()
@@ -64,12 +67,34 @@ const deleteServer = (id) => {
   return true
 }
 
+const getStdioCwd = (server) => {
+  // stdio MCP 进程默认继承应用启动目录；安装到 Program Files 时该目录不可写，
+  // Playwright MCP 会尝试在其中创建 .playwright-mcp，导致 EPERM。
+  // 这里改为每个 MCP 服务一个用户可写的运行目录。
+  try {
+    const base = app.getPath('userData')
+    const safeId = String(server.id || 'default').replace(/[^a-zA-Z0-9_-]/g, '_')
+    const dir = path.join(base, 'mcp-runtime', safeId)
+    fs.mkdirSync(dir, { recursive: true })
+    return dir
+  } catch (e) {
+    const fallback = os.homedir() || process.env.TEMP || process.cwd()
+    const dir = path.join(fallback, 'my-mindmap-agent-mcp')
+    try { fs.mkdirSync(dir, { recursive: true }) } catch (e2) {}
+    return dir
+  }
+}
+
 const getStdioClient = (server) => {
   if (!server.command) throw new Error('stdio MCP 需要 command')
   if (stdioClients.has(server.id)) return stdioClients.get(server.id)
+  // shell: true 让系统 shell 解析命令路径（解决 Electron 打包后找不到 npx/node 的问题）
+  const isWindows = process.platform === 'win32'
   const proc = spawn(server.command, server.args || [], {
     env: { ...process.env, ...(server.env || {}) },
-    stdio: ['pipe', 'pipe', 'pipe']
+    stdio: ['pipe', 'pipe', 'pipe'],
+    shell: isWindows,
+    cwd: getStdioCwd(server)
   })
   const client = {
     proc,

@@ -553,6 +553,16 @@
           @click="selectSkill(s)"
         >{{ s.name }}<span v-if="s.description" class="skill-picker-desc">{{ s.description }}</span></button>
       </div>
+      <div v-if="mcpPickerVisible" class="skill-picker mcp-picker">
+        <div class="skill-picker-title">选择 MCP 服务</div>
+        <button
+          v-for="m in filteredMcps"
+          :key="m.id"
+          @click="selectMcp(m)"
+          class="skill-picker-item"
+        >{{ m.name }}<span v-if="m.description" class="skill-picker-desc">{{ m.description }}</span></button>
+        <div v-if="filteredMcps.length === 0" class="skill-picker-desc" style="padding: 8px 12px;">无可用 MCP 服务</div>
+      </div>
       <textarea
         ref="textareaRef"
         v-model="inputText"
@@ -563,8 +573,16 @@
         @keydown.enter.shift.exact="onShiftEnter"
         @keydown.delete="onInputKeydownDelete"
         @paste="onPaste"
+        @input="onInputDetect"
       ></textarea>
 
+      <!-- 已附加的 MCP 服务标签 -->
+      <div v-if="attachedMcps.length > 0" class="attached-skills">
+        <span v-for="(m, i) in attachedMcps" :key="m.id" class="attached-skill-tag">
+          🔌 {{ m.name }}
+          <button @click="removeAttachedMcp(i)" class="attached-skill-remove">&times;</button>
+        </span>
+      </div>
       <!-- 拖拽悬停提示浮层 -->
       <div v-if="fileDragActive" class="file-drag-hint">
         <svg viewBox="0 0 16 16" width="15" height="15">
@@ -763,6 +781,7 @@ import { addToReviewPlan } from '../utils/reviewPlan'
 import { renderMarkdown, getMarkdownCSS } from '../utils/markdownRenderer'
 import { stripThinkBlocks } from '../utils/thinkFilter'
 import { initCloze, applyClozeStyles, toggleAllCloze, isClozeHiddenAll } from '../utils/cloze'
+import { getDragFilePath, clearDragFilePath } from '../utils/dragState'
 import { smartClozeNodes, smartClozeFullMap } from '../utils/aiCloze'
 import {
   createConversation,
@@ -2183,33 +2202,29 @@ const generateSkillFromConversation = async () => {
 // ========== 对话上下文增量摘要压缩 ==========
 
 // 精简英文系统提示词：只保留核心动作规则；工具发现走 activate_tools（按需返回目录与参数 schema）
-const SYSTEM_PROMPT = `You are an AI assistant for a mind-map editor (.smm files). Views: mindmap/outline/review. Core tools are active; discover others with activate_tools(keyword="..." or names=["..."]).
+const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/review. Discover inactive tools via activate_tools.
 
-## ACT
-- Clarify ambiguity first; resolve targets by explicit uid/path > current selection > history (reuse, don't re-query).
-- Multi-step task: FIRST emit a <plan> checklist, then execute strictly in that order and emit <step-done>N after each step. Never skip or reorder steps.
-- Batch in ONE call (batch_node_actions / update_node_text / add_child_nodes / find_replace_text). Never loop select_node + edit.
-- Whole-map/terminal-node tasks: get the leaf node set ONCE with select_node(mode="leaves") or batch_node_actions targets.mode="leaves"; NEVER search_nodes one node at a time.
-- After parallel_ai_workers completes, immediately apply/merge its returned content with add_child_nodes or update_node_text. Do not re-search the same nodes, do not repeat add_child_nodes with the same subtree, and do not call search_web unless the user explicitly asked for new external information.
-- Review/recitation tasks ALWAYS use the review tools: get_today_review_status, get_review_schedule, complete_review_task, add_to_review. Never search nodes/files for "复习/到期/今天" to answer review questions.
-- To clear cloze for a depth range, use clear_cloze targets={mode:"level_range",minDepth:1,maxDepth:2} (root=0). Do not enumerate nodes one by one.
-- For指定的内容机械挖空（不是AI选词），use mechanical_cloze(text=... or regex=...) directly; do not use ai_cloze when the user has explicitly told you what to blank.
-- For背诵改写 ALWAYS use ai_recite_rewrite. For生成自测题/出题/追加题目 ALWAYS use ai_quiz (new file) or ai_quiz_append (append to nodes); never hand-craft questions with add_child_nodes/update_node_text.
-- Node operations have dedicated tools: delete_node, insert_parent_node, batch_move_nodes, merge_nodes, outer_frame. Do not simulate them with expand_node/update_node_text/search_nodes.
-- find_local_file returns absolute paths. If the user asks to open/打开 a found file, open it directly and always include the returned path in your reply.
-- merge_mindmap_files reads the source .smm in the background and does NOT require opening the source file first. rename_mindmap_file renames the current file in place; do not use save_mindmap for renaming. To list a folder, use list_directory (not keyword enumeration).
-- MCP: use list_mcp_servers → list_mcp_tools(serverId) → mcp_call_tool(serverId, toolName, arguments) for external capabilities configured in Settings.
-- Skills: use list_skills/get_skill to load saved workflows; create_skill when a successful workflow or a known pitfall should be reused later. Only create/update a skill after the workflow has actually succeeded.
-- If any tool generates, saves, renames, moves, exports, or otherwise modifies a file, ALWAYS include the returned absolute filePath in your final reply.
-- Simple request → act directly. Verify results; on failure retry (≤2) or split steps. Report briefly.
+## RULES
+- Batch in ONE call. Never loop select_node+edit. Use batch_node_actions for multi-node ops.
+- Multi-step: emit <plan> first, then <step-done>N after each. Never skip/reorder.
+- Use DEDICATED tools: delete_node, insert_parent_node, batch_move_nodes, merge_nodes, outer_frame — do NOT simulate with expand_node/update_node_text.
+- Review tasks: get_today_review_status / get_review_schedule / complete_review_task / add_to_review. Never search nodes for review questions.
+- ai_recite_rewrite for recitation. ai_quiz / ai_quiz_append for quizzes. mechanical_cloze for exact-text cloze. ai_cloze for smart keyword cloze.
+- find_local_file returns absolute paths; open found files directly. merge_mindmap_files reads source in background. rename_mindmap_file in place. list_directory for folder listing.
+- MCP: list_mcp_servers → list_mcp_tools → mcp_call_tool. Skills: list_skills / invoke_skill / create_skill (only after success).
+- Include returned filePath in reply when a tool creates/renames/exports a file. Verify results; retry ≤2 on failure.
 
-## MESSAGES
-- 【拖入文件｜路径：xxx】path is valid; retrieve_local_file for questions, read_local_file for full text.
-- 【引用节点｜uid=xxx】apply directly to those uids, don't re-search.
+## QUERY (use query_nodes, not repeated search_nodes+query_node_styles)
+- query_nodes supports filters: textContains, textNotContains, textRegex, hasCloze, clozeContains, hasStyle, isLeaf, minDepth/maxDepth. Returns uid, plainText, path, clozeWords, depth.
+- For "find nodes matching X and do Y": query_nodes(filters: {...}) → batch_node_actions(steps:[{targets:{uids}, condition:{...}, ...}]).
+- batch_node_actions steps support condition: {textContains, textRegex, hasCloze, hasStyle} — filters nodes BEFORE applying ops.
+- clear_cloze supports before/after: clear_cloze(targets:{mode:"all"}, before:"：") clears cloze only before the delimiter.
+
+## CONTEXT
+- 【拖入文件｜路径：xxx】→ retrieve_local_file (questions) or read_local_file (full text).
+- 【引用节点｜uid=xxx】→ apply directly, don't re-search.
 - Pasted content → generate_mindmap.
-
-## MEMORY
-- memory(action=save) only for stable long-term user preferences ("remember…", "always…").`
+- memory(action=save) only for stable long-term preferences ("remember…", "always…").`
 
 const buildSystemPromptWithSkills = async (basePrompt) => {
   try {
@@ -2565,10 +2580,16 @@ const manualCompress = async () => {
 const sendMessage = async (overrideText = null) => {
   // overrideText 可能是事件对象（来自 @click/@keydown），需过滤
   const rawText = (typeof overrideText === 'string') ? overrideText : inputText.value
-  const text = rawText.trim()
+  let text = rawText.trim()
   const refs = attachedRefs.value.slice()
   const files = attachedFiles.value.slice()
   const skills = attachedSkills.value.slice()
+  const mcps = attachedMcps.value.slice()
+  // 将附加的 MCP 服务信息注入到消息上下文
+  if (mcps.length > 0) {
+    const mcpInfo = '\n\n【已选择的 MCP 服务】\n' + mcps.map(m => `- ${m.name}${m.description ? ': ' + m.description : ''}`).join('\n')
+    text = text + mcpInfo
+  }
   // 手动压缩指令：输入"压缩对话"等直接触发压缩，不发消息给 AI
   if (MANUAL_COMPRESS_RE.test(text) && refs.length === 0 && files.length === 0) {
     inputText.value = ''
@@ -2584,6 +2605,7 @@ const sendMessage = async (overrideText = null) => {
     attachedRefs.value = []
     attachedFiles.value = []
     attachedSkills.value = []
+    attachedMcps.value = []
     if (textareaRef.value) textareaRef.value.style.height = 'auto'
     ElMessage.info(`已加入发送队列（第 ${messageQueue.value.length} 条），当前回复完成后自动发送`)
     return
@@ -5128,6 +5150,59 @@ const detectSkillMention = () => {
   }
 }
 
+// MCP 选择器
+const mcpPickerVisible = ref(false)
+const mcpQuery = ref('')
+const allMcps = ref([])
+const attachedMcps = ref([])
+const filteredMcps = computed(() => {
+  const q = mcpQuery.value.trim().toLowerCase()
+  return q ? allMcps.value.filter(m => m.name.toLowerCase().includes(q) || (m.description || '').toLowerCase().includes(q)) : allMcps.value
+})
+
+const loadMcpPicker = async () => {
+  try {
+    const servers = await window.electronAPI?.mcp?.list?.() || []
+    allMcps.value = servers.filter(s => s.enabled !== false).map(s => ({
+      id: s.id || s.name,
+      name: s.name || s.id,
+      description: s.description || ''
+    }))
+  } catch { allMcps.value = [] }
+}
+
+const detectMcpMention = () => {
+  const value = inputText.value || ''
+  const hashIdx = value.lastIndexOf('#')
+  if (hashIdx >= 0 && !value.slice(hashIdx + 1).includes(' ')) {
+    mcpQuery.value = value.slice(hashIdx + 1)
+    mcpPickerVisible.value = true
+    if (allMcps.value.length === 0) loadMcpPicker()
+  } else {
+    mcpPickerVisible.value = false
+  }
+}
+
+const onInputDetect = () => {
+  detectSkillMention()
+  detectMcpMention()
+}
+
+const selectMcp = (mcp) => {
+  if (!attachedMcps.value.some(m => m.id === mcp.id)) {
+    attachedMcps.value.push({ id: mcp.id, name: mcp.name, description: mcp.description })
+  }
+  const value = inputText.value || ''
+  const hashIdx = value.lastIndexOf('#')
+  if (hashIdx >= 0) inputText.value = value.slice(0, hashIdx).trimEnd()
+  mcpPickerVisible.value = false
+  mcpQuery.value = ''
+}
+
+const removeAttachedMcp = (index) => {
+  attachedMcps.value.splice(index, 1)
+}
+
 const selectSkill = (skill) => {
   if (!attachedSkills.value.some(s => s.id === skill.id)) {
     attachedSkills.value.push({ id: skill.id, name: skill.name, description: skill.description, instructions: skill.instructions })
@@ -5159,7 +5234,8 @@ const removeAttachedFile = (index) => {
 
 const dragHasFiles = (e) => {
   const types = Array.from(e.dataTransfer?.types || [])
-  return types.includes('Files') || types.includes('application/x-mindmap-file')
+  // Files: 系统文件拖入; text/plain: 文件树拖入; getDragFilePath: 模块变量后备
+  return types.includes('Files') || types.includes('text/plain') || !!getDragFilePath()
 }
 
 const onFileDragEnter = (e) => {
@@ -5184,8 +5260,11 @@ const onFileDrop = (e) => {
   fileDragDepth = 0
   fileDragActive.value = false
 
-  // 先检查是否从左侧文件树拖入（自定义 MIME 类型）
-  const treePath = e.dataTransfer?.getData('application/x-mindmap-file') || e.dataTransfer?.getData('text/plain')
+  // 先检查是否从左侧文件树拖入（自定义 MIME 类型 + 模块变量后备）
+  const treePath = e.dataTransfer?.getData('application/x-mindmap-file')
+    || e.dataTransfer?.getData('text/plain')
+    || getDragFilePath()
+  clearDragFilePath()
   if (treePath) {
     const name = treePath.split(/[\\/]/).pop() || '未命名'
     if (attachedFiles.value.some(x => x.path === treePath)) {

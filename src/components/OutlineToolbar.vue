@@ -181,9 +181,10 @@ const fontList = [
 
 const fontSizeList = [12, 14, 16, 18, 20, 24, 28, 32, 40, 48]
 
-// 图片类导出（png/svg/pdf）依赖可见画布，大纲模式不提供
 const exportList = [
   { type: 'copy-md', label: '复制 Markdown 文本' },
+  { type: 'html', label: 'HTML 文件' },
+  { type: 'pdf', label: 'PDF 文件' },
   { type: 'json', label: 'JSON 数据' },
   { type: 'smm', label: 'SMM 导图文件' },
   { type: 'md', label: 'Markdown 文件' },
@@ -208,7 +209,7 @@ const onFontSize = (s) => {
 }
 
 const emitAction = (name) => {
-  if (props.disabled) return
+  if (props.disabled && !['hide-cloze', 'show-cloze', 'toggle-cloze'].includes(name)) return
   emit(name)
 }
 
@@ -233,6 +234,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 <style scoped>
 .fixed-toolbar {
   position: relative;
+  z-index: 50;
   display: flex;
   align-items: center;
   gap: 1px;
@@ -324,6 +326,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 
 .ft-panel {
   position: absolute;
+  z-index: 100;
   top: calc(100% + 6px);
   left: 50%;
   transform: translateX(-50%);

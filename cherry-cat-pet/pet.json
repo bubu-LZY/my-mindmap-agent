@@ -1,0 +1,7 @@
+{
+  "id": "cherry-cat",
+  "displayName": "Cherry Cat",
+  "description": "A cute calico tabby cat with a red cherry collar, inspired by a real kitty.",
+  "spriteVersionNumber": 2,
+  "spritesheetPath": "spritesheet.webp"
+}

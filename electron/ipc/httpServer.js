@@ -9,8 +9,9 @@ const store = require('../utils/store')
 const STORE_KEY = 'httpRemoteServer'
 const DEFAULT_PORT = 17800
 const TOKEN_TTL_MS = 60 * 24 * 60 * 60 * 1000
-const FRAME_INTERVAL_MS = 80
-const QUALITY_JPEG = { low: 52, medium: 70, high: 86 }
+const FRAME_INTERVAL_MS = 50  // 降低帧间隔以减少延迟（约20fps）
+const QUALITY_JPEG = { low: 55, medium: 76, high: 90, ultra: 98 }
+const FRAME_HEADER_MAGIC = 0x4d46524d // 'MFRM'
 
 let getMainWindow = () => null
 let server = null
@@ -19,9 +20,20 @@ let port = 0
 let starting = false
 let clients = new Set()
 let streamTimer = null
+// 缓存 quality 设置，避免每帧读 store
+let cachedQuality = null
+const getCachedQuality = () => {
+  if (cachedQuality === null) {
+    const q = readConfig().quality || 'medium'
+    cachedQuality = QUALITY_JPEG[q] ? q : 'medium'
+  }
+  return cachedQuality
+}
+const setCachedQuality = (q) => { cachedQuality = QUALITY_JPEG[q] ? q : 'medium' }
 let capturing = false
 let frameRequested = false
 let preRemoteWindowState = null
+let lastWindowState = null
 const pendingAgentRequests = new Map()
 
 const readConfig = () => store.get(STORE_KEY, {}) || {}
@@ -151,7 +163,22 @@ const restoreWindowStateAfterRemote = (win) => {
 }
 
 const isMainWindowAvailable = (win) => {
-  return !!(win && !win.isDestroyed() && win.isVisible() && !win.isMinimized())
+  // 最小化窗口仍属于“可控制”：渲染进程和输入注入都正常，只是画面可能暂时无法截取。
+  // 只有窗口被关闭（主程序驻留托盘，窗口 hide）或已销毁时才算真正不可用。
+  return !isMainWindowClosed(win)
+}
+
+const isMainWindowClosed = (win) => {
+  if (!win || win.isDestroyed()) return true
+  // Electron 28 在 Windows 上最小化时 isVisible() 为 false；
+  // 因此必须用 isMinimized() 区分“最小化”和“关闭隐藏”。
+  return !win.isVisible() && !win.isMinimized()
+}
+
+const getWindowState = (win) => {
+  if (isMainWindowClosed(win)) return 'closed'
+  if (win && win.isMinimized()) return 'minimized'
+  return 'online'
 }
 
 const openMainWindowForRemote = (win) => {
@@ -167,6 +194,8 @@ const openMainWindowForRemote = (win) => {
 }
 
 const sendStateToAll = (state) => {
+  if (state === lastWindowState) return
+  lastWindowState = state
   const payload = JSON.stringify({ type: 'state', state })
   for (const ws of clients) {
     if (ws.readyState === 1) {
@@ -178,22 +207,28 @@ const sendStateToAll = (state) => {
 const captureFrame = async () => {
   const win = getMainWindow()
   if (!win || win.isDestroyed()) return null
-  if (!isMainWindowAvailable(win)) return null
+  if (isMainWindowClosed(win)) return null
+  if (win.isMinimized()) return null
   try {
     const image = await win.webContents.capturePage()
     if (!image || image.isEmpty()) return null
     const bounds = win.getContentBounds()
-    const quality = readConfig().quality || 'medium'
-    const jpegQuality = QUALITY_JPEG[quality] || QUALITY_JPEG.medium
-    const scaled = image.resize({
-      width: Math.max(1, Math.round(bounds.width)),
-      height: Math.max(1, Math.round(bounds.height)),
-      quality: 'good'
-    })
+    const qualityKey = getCachedQuality()
+    const jpegQuality = QUALITY_JPEG[qualityKey] || QUALITY_JPEG.medium
+    // 以 capturePage 返回的真实物理像素为基准缩放；高分屏下不做这个修正会
+    // 把 2x 物理截图缩小回 1x 逻辑尺寸，导致“超清也只是放大缩小”的模糊感。
+    const scale = qualityKey === 'low' ? 0.75 : qualityKey === 'medium' ? 0.85 : 1
+    const imgSize = image.getSize()
+    const targetW = Math.max(1, Math.round(imgSize.width * scale))
+    const targetH = Math.max(1, Math.round(imgSize.height * scale))
+    const needResize = imgSize.width !== targetW || imgSize.height !== targetH
+    const resizeQuality = qualityKey === 'low' || qualityKey === 'medium' ? 'good' : 'best'
+    const target = needResize ? image.resize({ width: targetW, height: targetH, quality: resizeQuality }) : image
     return {
-      data: scaled.toJPEG(jpegQuality).toString('base64'),
+      data: target.toJPEG(jpegQuality),
       width: bounds.width,
-      height: bounds.height
+      height: bounds.height,
+      scale
     }
   } catch (e) {
     return null
@@ -207,8 +242,9 @@ const broadcastFrame = async () => {
   }
   if (capturing) return
   const win = getMainWindow()
-  if (!isMainWindowAvailable(win)) {
-    sendStateToAll('closed')
+  const state = getWindowState(win)
+  if (state !== 'online') {
+    sendStateToAll(state)
     return
   }
   capturing = true
@@ -219,13 +255,23 @@ const broadcastFrame = async () => {
     setImmediate(broadcastFrame)
   }
   if (!frame) {
-    sendStateToAll('closed')
+    // 刚恢复/最小化时 capturePage 可能拿不到画面；此时窗口并没有关闭，
+    // 保持当前状态，不把远程端误判成黑屏或已关闭。
+    sendStateToAll(getWindowState(getMainWindow()))
     return
   }
-  const payload = JSON.stringify({ type: 'frame', ...frame })
+  lastWindowState = 'online'
+  // 二进制帧：16 字节头部 + JPEG 原始数据。比 base64+JSON 少约 1/3 传输量，
+  // 同时省掉浏览器端 JSON.parse 和 base64 解码，高画质下延迟更低。
+  const header = Buffer.alloc(16)
+  header.writeUInt32LE(FRAME_HEADER_MAGIC, 0)
+  header.writeUInt32LE(frame.width, 4)
+  header.writeUInt32LE(frame.height, 8)
+  header.writeUInt16LE(Math.max(1, Math.round((frame.scale || 1) * 100)), 12)
+  const payload = Buffer.concat([header, frame.data])
   for (const ws of clients) {
     if (ws.readyState === 1) {
-      try { ws.send(payload) } catch (e) {}
+      try { ws.send(payload, { binary: true }) } catch (e) {}
     }
   }
 }
@@ -239,14 +285,46 @@ const requestImmediateFrame = () => {
   setImmediate(broadcastFrame)
 }
 
+const getFrameInterval = (quality) => {
+  // 统一优先保证流畅度；超高画质因编码量更大，允许稍长但仍有约 20fps。
+  switch (quality) {
+    case 'low': return 33      // ~30fps
+    case 'medium': return 33   // ~30fps
+    case 'high': return 40     // ~25fps
+    case 'ultra': return 50    // ~20fps
+    default: return 33
+  }
+}
+
 const startStream = () => {
   if (streamTimer) return
-  streamTimer = setInterval(broadcastFrame, FRAME_INTERVAL_MS)
+  // 用自调度代替 setInterval：每帧截图完成后才安排下一帧，
+  // 避免截图耗时超过间隔时发生漏帧和后续调度堆积，降低远程输入延迟。
+  const runLoop = async () => {
+    if (!clients.size) {
+      stopStream()
+      return
+    }
+    await broadcastFrame()
+    if (!clients.size) {
+      stopStream()
+      return
+    }
+    streamTimer = setTimeout(runLoop, getFrameInterval(getCachedQuality()))
+  }
+  streamTimer = setTimeout(runLoop, 0)
+}
+
+const restartStreamWithQuality = (quality) => {
+  if (!streamTimer) return
+  clearTimeout(streamTimer)
+  streamTimer = null
+  startStream()
 }
 
 const stopStream = () => {
   if (streamTimer) {
-    clearInterval(streamTimer)
+    clearTimeout(streamTimer)
     streamTimer = null
   }
 }
@@ -447,6 +525,9 @@ const handleUpgrade = (req, socket, head) => {
         const cfg = readConfig()
         cfg.quality = message.quality
         writeConfig(cfg)
+        setCachedQuality(message.quality)
+        // 动态调整帧率：低画质更快帧率，高画质稍慢
+        restartStreamWithQuality(message.quality)
         try {
           ws.send(JSON.stringify({ type: 'quality', quality: message.quality }))
         } catch (e) {}
@@ -555,8 +636,11 @@ const init = (getWindow) => {
   })
   ipcMain.handle('http-server:setQuality', async (event, quality) => {
     const config = readConfig()
-    config.quality = QUALITY_JPEG[quality] ? quality : 'medium'
+    const q = QUALITY_JPEG[quality] ? quality : 'medium'
+    config.quality = q
     writeConfig(config)
+    setCachedQuality(q)
+    restartStreamWithQuality(q)
     return getStatus()
   })
   ipcMain.on('agent-api:response', (event, payload) => {
@@ -600,6 +684,9 @@ const REMOTE_PAGE = `<!DOCTYPE html>
   #status { position: fixed; top: 12px; left: 12px; z-index: 10; padding: 7px 10px; background: rgba(0,0,0,.55); border-radius: 8px; font-size: 12px; color: #d6d6de; pointer-events: none; }
   #qualityBar { position: fixed; top: 12px; right: 12px; z-index: 11; padding: 6px 8px; background: rgba(0,0,0,.55); border-radius: 8px; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #d6d6de; }
   #qualityBar select { background: #242429; color: #fff; border: 1px solid #3a3a42; border-radius: 6px; font-size: 12px; padding: 3px 6px; }
+  #minimizedOverlay { position: fixed; inset: 0; z-index: 14; display: none; align-items: center; justify-content: center; background: rgba(17,17,17,.78); }
+  #minimizedOverlay .card { text-align: center; }
+  #minimizedOverlay button { margin-top: 14px; padding: 10px 18px; border: none; border-radius: 10px; background: #0a84ff; color: #fff; font-size: 14px; cursor: pointer; }
   #closedOverlay { position: fixed; inset: 0; z-index: 15; display: none; align-items: center; justify-content: center; background: rgba(17,17,17,.86); }
   #closedOverlay .card { text-align: center; }
   #closedOverlay button { margin-top: 14px; padding: 10px 18px; border: none; border-radius: 10px; background: #0a84ff; color: #fff; font-size: 14px; cursor: pointer; }
@@ -623,6 +710,7 @@ const REMOTE_PAGE = `<!DOCTYPE html>
         <option value="low">流畅</option>
         <option value="medium" selected>均衡</option>
         <option value="high">清晰</option>
+        <option value="ultra">超清</option>
       </select>
     </div>
   </div>
@@ -631,6 +719,13 @@ const REMOTE_PAGE = `<!DOCTYPE html>
       <h1>主页面已关闭</h1>
       <p>请在电脑端打开主程序后重连，或点击下方按钮重试。</p>
       <button id="reconnectBtn">一键重连</button>
+    </div>
+  </div>
+  <div id="minimizedOverlay">
+    <div class="card">
+      <h1>主页面已最小化</h1>
+      <p>当前窗口被缩小，无法获取画面。点击下方按钮恢复窗口后即可继续操作。</p>
+      <button id="restoreBtn">点击恢复窗口</button>
     </div>
   </div>
   <div id="status">未连接</div>
@@ -646,10 +741,22 @@ const REMOTE_PAGE = `<!DOCTYPE html>
   var stage = document.getElementById('stage');
   var statusEl = document.getElementById('status');
   var closedOverlay = document.getElementById('closedOverlay');
+  var minimizedOverlay = document.getElementById('minimizedOverlay');
   var qualitySelect = document.getElementById('qualitySelect');
   var pendingReconnect = false;
+  var frameObjectUrl = null;
 
   var setStatus = function (text) { statusEl.textContent = text; };
+
+  var applyState = function (state) {
+    closedOverlay.style.display = state === 'closed' ? 'flex' : 'none';
+    minimizedOverlay.style.display = state === 'minimized' ? 'flex' : 'none';
+    if (state === 'minimized') {
+      setStatus('主页面已最小化，点击恢复窗口后继续操作');
+    } else if (state === 'online') {
+      setStatus('已连接');
+    }
+  };
 
   var loginAction = function () {
     var value = (document.getElementById('token').value || '').trim();
@@ -678,6 +785,7 @@ const REMOTE_PAGE = `<!DOCTYPE html>
     if (ws) { try { ws.close(); } catch (e) {} }
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + encodeURIComponent(token));
+    ws.binaryType = 'arraybuffer';
     ws.onopen = function () {
       setStatus('已连接');
       if (pendingReconnect) {
@@ -686,16 +794,12 @@ const REMOTE_PAGE = `<!DOCTYPE html>
       }
     };
     ws.onmessage = function (e) {
-      try {
-        var msg = JSON.parse(e.data);
-        if (msg.type === 'frame' && msg.data) {
-          frameWidth = msg.width;
-          frameHeight = msg.height;
-          img.src = 'data:image/jpeg;base64,' + msg.data;
-          closedOverlay.style.display = 'none';
-        } else if (msg.type === 'inputError') {
+      if (typeof e.data === 'string') {
+        try {
+          var msg = JSON.parse(e.data);
+          if (msg.type === 'inputError') {
           setStatus('操作注入失败：' + (msg.error || '未知错误'));
-        } else if (msg.type === 'editableFocus') {
+          } else if (msg.type === 'editableFocus') {
           if (msg.editable) {
             imeInput.value = '';
             imeInput.dataset.composing = '0';
@@ -708,16 +812,34 @@ const REMOTE_PAGE = `<!DOCTYPE html>
             imeInput.value = '';
             imeInput.blur();
           }
-        } else if (msg.type === 'state') {
-          if (msg.state === 'closed') {
-            closedOverlay.style.display = 'flex';
-          } else {
-            closedOverlay.style.display = 'none';
-          }
-        } else if (msg.type === 'ready' || msg.type === 'quality') {
+          } else if (msg.type === 'state') {
+          applyState(msg.state);
+          } else if (msg.type === 'ready' || msg.type === 'quality') {
           if (msg.quality) qualitySelect.value = msg.quality;
-        }
-      } catch (err) {}
+          if (msg.state) applyState(msg.state);
+          }
+        } catch (err) {}
+      } else if (e.data instanceof ArrayBuffer) {
+        try {
+          var buf = e.data;
+          var dv = new DataView(buf);
+          if (buf.byteLength < 16 || dv.getUint32(0, true) !== 0x4d46524d) return;
+          frameWidth = dv.getUint32(4, true);
+          frameHeight = dv.getUint32(8, true);
+          var jpeg = new Uint8Array(buf, 16);
+          var blob = new Blob([jpeg], { type: 'image/jpeg' });
+          var url = URL.createObjectURL(blob);
+          var oldUrl = frameObjectUrl;
+          frameObjectUrl = url;
+          img.onload = function () {
+            if (oldUrl) { try { URL.revokeObjectURL(oldUrl) } catch (e) {} }
+          };
+          img.src = url;
+          closedOverlay.style.display = 'none';
+          minimizedOverlay.style.display = 'none';
+          setStatus('已连接');
+        } catch (err) {}
+      }
     };
     ws.onclose = function () { setStatus('连接断开'); };
     ws.onerror = function () { setStatus('连接错误'); };
@@ -744,6 +866,17 @@ const REMOTE_PAGE = `<!DOCTYPE html>
   document.getElementById('reconnectBtn').addEventListener('click', function () {
     closedOverlay.style.display = 'none';
     setStatus('正在重连...');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'reconnect' }));
+    } else {
+      pendingReconnect = true;
+      connect();
+    }
+  });
+
+  document.getElementById('restoreBtn').addEventListener('click', function () {
+    minimizedOverlay.style.display = 'none';
+    setStatus('正在恢复窗口...');
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'reconnect' }));
     } else {

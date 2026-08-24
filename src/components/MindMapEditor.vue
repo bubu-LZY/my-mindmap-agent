@@ -8,7 +8,7 @@
     <div ref="containerRef" class="mind-map-container"></div>
 
     <!-- 固定工具栏：悬浮于思维导图画布之上（顶部文件名下方） -->
-    <FixedToolbar :mindMap="mindMap" :activeNodes="fixedToolbarNodes" @node-note="onNodeNote" />
+    <FixedToolbar v-if="!isFullscreen" :mindMap="mindMap" :activeNodes="fixedToolbarNodes" @node-note="onNodeNote" />
 
     <!-- 全屏展示：整个界面只保留导图，ESC 或再次点击退出 -->
     <button
@@ -332,6 +332,7 @@ let previewLastMouse = { x: -1, y: -1 }
 let previewMoveThrottle = null
 let previewInteracting = false // 悬浮窗内拖动导图/拖动窗口中（PreviewOverlay 上报）
 let canvasPanActive = false // 主画布右/中键平移中
+let canvasPanCleanup = null // 画布平移相关监听器的清理函数
 
 const isMouseOverPreviewKeepArea = () => {
   const el = document.elementFromPoint(previewLastMouse.x, previewLastMouse.y)
@@ -1203,9 +1204,20 @@ const initMindMap = () => {
     let canvasPanning = null // { lastX, lastY }
     let canvasPanMoveHandler = null
     let canvasPanUpHandler = null
+    let documentMiddleMousedownHandler = null
+    let documentMiddleMouseupHandler = null
+    let middleBuiltinActive = false
+    const stopMiddleBuiltin = () => {
+      if (!middleBuiltinActive) return
+      middleBuiltinActive = false
+      if (mindMap && mindMap.opt) mindMap.opt.isDisableDrag = true
+    }
+    // 记录平移由哪个按键发起（1=中键, 2=右键），用于 mouseup 时精确匹配
+    let canvasPanButton = -1
     const stopCanvasPan = () => {
       canvasPanning = null
       canvasPanActive = false
+      canvasPanButton = -1
       rightMouseDownPos = null
       if (canvasPanMoveHandler) {
         window.removeEventListener('mousemove', canvasPanMoveHandler, true)
@@ -1217,24 +1229,35 @@ const initMindMap = () => {
       }
       if (previewVisible.value) schedulePreviewHide(400)
     }
-    const startCanvasPan = (x, y) => {
+    const doPanMove = (clientX, clientY) => {
+      if (!canvasPanning) return
+      const dx = clientX - canvasPanning.lastX
+      const dy = clientY - canvasPanning.lastY
+      canvasPanning.lastX = clientX
+      canvasPanning.lastY = clientY
+      if (dx || dy) {
+        try { mindMap.view.translateXY(dx, dy) } catch (err) {}
+      }
+    }
+    const startCanvasPan = (x, y, button) => {
       if (canvasPanning) stopCanvasPan()
       canvasPanning = { lastX: x, lastY: y }
       canvasPanActive = true
+      canvasPanButton = button
       clearPreviewHideTimer() // 画布平移期间预览保持显示
       canvasPanMoveHandler = (ev) => {
-        if (!canvasPanning) return
-        // 防御：mousemove 时已无任何按键按下（mouseup 被吞或窗口外释放），立即结束平移
-        if (ev.buttons === 0 && ev.which === 0) { stopCanvasPan(); return }
-        const dx = ev.clientX - canvasPanning.lastX
-        const dy = ev.clientY - canvasPanning.lastY
-        canvasPanning.lastX = ev.clientX
-        canvasPanning.lastY = ev.clientY
-        if (dx || dy) {
-          try { mindMap.view.translateXY(dx, dy) } catch (err) {}
+        // 阻止浏览器中键自动滚动的残余行为
+        ev.preventDefault()
+        doPanMove(ev.clientX, ev.clientY)
+      }
+      canvasPanUpHandler = (ev) => {
+        // 中键平移时，任意按键松开都结束（中键松开 ev.button===1）；
+        // 右键平移时，仅右键松开才结束（ev.button===2）。
+        // 这样避免左键误点提前终止右键拖动。
+        if (canvasPanButton === 1 || ev.button === canvasPanButton) {
+          stopCanvasPan()
         }
       }
-      canvasPanUpHandler = () => stopCanvasPan()
       // capture 阶段监听：库在非根节点的 mouseup 上会 stopPropagation（非中键一律吞掉），
       // 冒泡阶段的 window 监听收不到 mouseup，导致平移状态卡死、画布持续跟随鼠标；
       // capture 在目标元素处理器之前触发，不受 stopPropagation 影响
@@ -1242,6 +1265,21 @@ const initMindMap = () => {
       window.addEventListener('mouseup', canvasPanUpHandler, true)
     }
     window.addEventListener('blur', stopCanvasPan)
+    // 保存清理引用，确保 onBeforeUnmount 时能移除所有动态注册的监听器
+    canvasPanCleanup = () => {
+      stopCanvasPan()
+      window.removeEventListener('blur', stopCanvasPan)
+      if (documentMiddleMousedownHandler) {
+        document.removeEventListener('mousedown', documentMiddleMousedownHandler, true)
+        documentMiddleMousedownHandler = null
+      }
+      if (documentMiddleMouseupHandler) {
+        window.removeEventListener('mouseup', documentMiddleMouseupHandler, true)
+        documentMiddleMouseupHandler = null
+      }
+      stopMiddleBuiltin()
+      window.removeEventListener('blur', stopMiddleBuiltin)
+    }
 
     // capture 阶段监听：必须先于库的节点 mousedown 处理器执行，
     // 否则多选在快照前就被库清空，右键菜单退化为单节点
@@ -1252,16 +1290,28 @@ const initMindMap = () => {
         // 快照当前多选状态（contextmenu 事件前，库可能清空多选）
         const activeNodes = mindMap.renderer?.activeNodeList
         rightDownActiveNodes = (activeNodes && activeNodes.length > 1) ? activeNodes.slice() : []
-      } else if (e.button === 1) {
-        // 中键：捕获阶段拦截，阻止浏览器自动滚动图标和库的节点/拖拽处理，立即开始平移
-        e.preventDefault()
-        e.stopPropagation()
-        startCanvasPan(e.clientX, e.clientY)
       } else if (e.button === 0) {
         // 左键按下意味着可能开始新选择，使旧快照失效
         rightDownActiveNodes = []
       }
     }, true)
+    // 中键平移复用 simple-mind-map 内置拖拽：按下时临时关闭 isDisableDrag，
+    // 让库自身的 view 拖拽逻辑处理平移；松开/失焦后恢复，避免影响自定义右键平移。
+    documentMiddleMousedownHandler = (e) => {
+      if (e.button !== 1) return
+      if (!svgEl || !svgEl.contains(e.target)) return
+      e.preventDefault()
+      middleBuiltinActive = true
+      if (mindMap && mindMap.opt) mindMap.opt.isDisableDrag = false
+    }
+    document.addEventListener('mousedown', documentMiddleMousedownHandler, true)
+    documentMiddleMouseupHandler = (e) => {
+      if (e.button !== 1 || !middleBuiltinActive) return
+      middleBuiltinActive = false
+      if (mindMap && mindMap.opt) mindMap.opt.isDisableDrag = true
+    }
+    window.addEventListener('mouseup', documentMiddleMouseupHandler, true)
+    window.addEventListener('blur', stopMiddleBuiltin)
     svgEl.addEventListener('mousemove', (e) => {
       if (rightMouseDownPos) {
         const dx = e.clientX - rightMouseDownPos.x
@@ -1269,7 +1319,7 @@ const initMindMap = () => {
         if (!isRightDragging && Math.sqrt(dx * dx + dy * dy) > 5) {
           isRightDragging = true
           // 右键判定为拖动后开始平移画布（不再弹菜单）
-          startCanvasPan(e.clientX, e.clientY)
+          startCanvasPan(e.clientX, e.clientY, 2)
         }
       }
     })
@@ -1282,7 +1332,7 @@ const initMindMap = () => {
     svgEl.addEventListener('contextmenu', (e) => {
       if (isRightDragging) e.preventDefault()
     })
-    // Chromium 的中键自动滚动可能在 auxclick 阶段补触发，双保险拦截
+    // auxclick 双保险：阻止中键松开时触发的浏览器默认行为（如新标签/剪贴板）
     svgEl.addEventListener('auxclick', (e) => {
       if (e.button === 1) e.preventDefault()
     }, true)
@@ -2377,6 +2427,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  // 清理画布平移相关的 window 级监听器（防止组件卸载后残留）
+  if (canvasPanCleanup) { canvasPanCleanup(); canvasPanCleanup = null }
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null
@@ -2605,6 +2657,8 @@ defineExpose({
   width: 100%;
   height: 100%;
   touch-action: none;
+  /* 阻止浏览器中键自动滚动（autoscroll 圆圈图标）和 overscroll 行为 */
+  overscroll-behavior: none;
 }
 
 /* 确保 SVG 占满容器 */
