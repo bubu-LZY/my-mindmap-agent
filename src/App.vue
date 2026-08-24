@@ -406,7 +406,6 @@ import { addFeishuLog } from './utils/feishuLogStore'
 import { addPanelLog } from './utils/panelLogStore'
 import { feishuService } from './services/feishuService'
 import { wechatService } from './services/wechatService'
-import { createSampleMindMap } from './sample-mindmap'
 import { useMindMapStore } from './stores/mindMapStore'
 import {
   applyTextStyleToNodes,
@@ -2284,14 +2283,6 @@ const startReviewReminder = () => {
 onMounted(() => {
   initMindMapInstance()
   window.addEventListener('keydown', handleKeyDown)
-
-  // 浏览器模式：自动加载示例思维导图
-  if (window.__IS_BROWSER__) {
-    nextTick(() => {
-      const sampleData = createSampleMindMap()
-      openInTab('/示例思维导图.smm', sampleData, '示例思维导图.smm', false)
-    })
-  }
   // 关闭前保护：有未落盘修改时先保存再退出
   window.addEventListener('beforeunload', onBeforeUnload)
   // 延迟后台重建搜索索引，不影响启动速度

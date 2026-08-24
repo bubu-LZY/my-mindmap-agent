@@ -5266,6 +5266,7 @@ const detectSkillMention = () => {
   if (atIdx >= 0 && !value.slice(atIdx + 1).includes(' ')) {
     skillQuery.value = value.slice(atIdx + 1)
     skillPickerVisible.value = true
+    loadSkillPicker()
   } else {
     skillPickerVisible.value = false
   }
@@ -5298,7 +5299,7 @@ const detectMcpMention = () => {
   if (hashIdx >= 0 && !value.slice(hashIdx + 1).includes(' ')) {
     mcpQuery.value = value.slice(hashIdx + 1)
     mcpPickerVisible.value = true
-    if (allMcps.value.length === 0) loadMcpPicker()
+    loadMcpPicker()
   } else {
     mcpPickerVisible.value = false
   }
@@ -5365,7 +5366,7 @@ const detectToolMention = () => {
   if (slashIdx >= 0 && !value.slice(slashIdx + 1).includes(' ')) {
     toolQuery.value = value.slice(slashIdx + 1)
     toolPickerVisible.value = true
-    if (allToolOptions.value.length === 0) loadToolPicker()
+    loadToolPicker()
   } else {
     toolPickerVisible.value = false
   }

@@ -61,7 +61,41 @@
             rows="3"
             class="form-input form-textarea"
             placeholder="定时触发时发送给 AI 的提示词..."
+            @input="onPromptInput"
           ></textarea>
+        </div>
+
+        <!-- 引用原子胶囊 -->
+        <div v-if="promptSkills.length || promptMcps.length || promptTools.length" class="ts-mention-chips">
+          <span v-for="(s, i) in promptSkills" :key="'s'+s.id" class="ts-mention-chip">
+            @{{ s.name }}<button class="ts-mention-remove" @click="removePromptSkill(i)">×</button>
+          </span>
+          <span v-for="(m, i) in promptMcps" :key="'m'+m.id" class="ts-mention-chip">
+            #{{ m.name }}<button class="ts-mention-remove" @click="removePromptMcp(i)">×</button>
+          </span>
+          <span v-for="(t, i) in promptTools" :key="'t'+t.id" class="ts-mention-chip">
+            /{{ t.name }}<button class="ts-mention-remove" @click="removePromptTool(i)">×</button>
+          </span>
+        </div>
+
+        <!-- 引用选择弹层 -->
+        <div v-if="promptSkillPickerVisible" class="ts-mention-picker">
+          <div class="ts-mention-title">选择 Skill</div>
+          <button v-for="s in filteredPromptSkills" :key="s.id" class="ts-mention-item" @click="selectPromptSkill(s)">
+            {{ s.name }}<span v-if="s.description">{{ s.description }}</span>
+          </button>
+        </div>
+        <div v-if="promptMcpPickerVisible" class="ts-mention-picker">
+          <div class="ts-mention-title">选择 MCP</div>
+          <button v-for="m in filteredPromptMcps" :key="m.id" class="ts-mention-item" @click="selectPromptMcp(m)">
+            {{ m.name }}<span v-if="m.description">{{ m.description }}</span>
+          </button>
+        </div>
+        <div v-if="promptToolPickerVisible" class="ts-mention-picker">
+          <div class="ts-mention-title">选择工具</div>
+          <button v-for="t in filteredPromptTools" :key="t.id" class="ts-mention-item" @click="selectPromptTool(t)">
+            {{ t.name }}<span v-if="t.description">{{ t.description }}</span>
+          </button>
         </div>
 
         <!-- 周期类型 -->
@@ -228,6 +262,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { taskSchedulerService } from '../services/taskSchedulerService'
 import { addPanelLog } from '../utils/panelLogStore'
 import PanelRunLog from './PanelRunLog.vue'
+import { aiTools } from '../services/toolHandler'
 
 const props = defineProps({
   visible: {
@@ -268,6 +303,34 @@ const newTask = reactive({
   enabled: true
 })
 
+// 提示词引用：@Skill / #MCP / /工具
+const promptSkills = ref([])
+const promptMcps = ref([])
+const promptTools = ref([])
+
+const promptSkillPickerVisible = ref(false)
+const promptMcpPickerVisible = ref(false)
+const promptToolPickerVisible = ref(false)
+const promptSkillQuery = ref('')
+const promptMcpQuery = ref('')
+const promptToolQuery = ref('')
+const promptAllSkills = ref([])
+const promptAllMcps = ref([])
+const promptAllTools = ref([])
+
+const filteredPromptSkills = computed(() => {
+  const q = promptSkillQuery.value.trim().toLowerCase()
+  return q ? promptAllSkills.value.filter(s => s.name.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q)) : promptAllSkills.value
+})
+const filteredPromptMcps = computed(() => {
+  const q = promptMcpQuery.value.trim().toLowerCase()
+  return q ? promptAllMcps.value.filter(m => m.name.toLowerCase().includes(q) || (m.description || '').toLowerCase().includes(q)) : promptAllMcps.value
+})
+const filteredPromptTools = computed(() => {
+  const q = promptToolQuery.value.trim().toLowerCase()
+  return q ? promptAllTools.value.filter(t => t.name.toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q)) : promptAllTools.value
+})
+
 // 编辑状态：为空字符串表示新建模式，否则为正在编辑的任务 ID
 const editingTaskId = ref('')
 
@@ -285,7 +348,7 @@ const busyTaskId = ref('')
 const isFormValid = computed(() => {
   return (
     newTask.name.trim() !== '' &&
-    newTask.prompt.trim() !== '' &&
+    (newTask.prompt.trim() !== '' || promptSkills.value.length > 0 || promptMcps.value.length > 0 || promptTools.value.length > 0) &&
     newTask.datetime !== ''
   )
 })
@@ -306,6 +369,106 @@ function getDefaultDatetime() {
   const hours = String(now.getHours()).padStart(2, '0')
   const minutes = String(now.getMinutes()).padStart(2, '0')
   return `${year}-${month}-${day}T${hours}:${minutes}`
+}
+
+async function loadPromptSkillOptions() {
+  try {
+    const list = await window.electronAPI?.skills?.list?.() || []
+    promptAllSkills.value = list.filter(s => s && s.id && s.enabled !== false).map(s => ({
+      id: s.id, name: s.name || s.id, description: s.description || '', instructions: s.instructions || ''
+    }))
+  } catch { promptAllSkills.value = [] }
+}
+
+async function loadPromptMcpOptions() {
+  try {
+    const list = await window.electronAPI?.mcp?.list?.() || []
+    promptAllMcps.value = list.filter(m => m && m.id && m.enabled !== false).map(m => ({
+      id: m.id, name: m.name || m.id, description: m.description || ''
+    }))
+  } catch { promptAllMcps.value = [] }
+}
+
+async function loadPromptToolOptions() {
+  const builtins = (aiTools || []).map(t => ({
+    id: t.function?.name || '',
+    name: t.function?.name || '',
+    description: t.function?.description || ''
+  })).filter(t => t.id)
+  let customs = []
+  try {
+    const list = await window.electronAPI?.customTools?.list?.() || []
+    customs = list.filter(t => t && t.id).map(t => ({ id: t.id, name: t.name || t.id, description: t.description || '' }))
+  } catch { customs = [] }
+  promptAllTools.value = [...builtins, ...customs]
+}
+
+function closePromptPickers() {
+  promptSkillPickerVisible.value = false
+  promptMcpPickerVisible.value = false
+  promptToolPickerVisible.value = false
+}
+
+function onPromptInput() {
+  const value = newTask.prompt || ''
+  const atIdx = value.lastIndexOf('@')
+  const hashIdx = value.lastIndexOf('#')
+  const slashIdx = value.lastIndexOf('/')
+  const latest = Math.max(atIdx, hashIdx, slashIdx)
+  const trigger = latest === atIdx ? '@' : latest === hashIdx ? '#' : latest === slashIdx ? '/' : ''
+  closePromptPickers()
+  if (!trigger) return
+  const query = value.slice(latest + 1)
+  if (query.includes(' ')) return
+  if (trigger === '@') {
+    promptSkillQuery.value = query
+    promptSkillPickerVisible.value = true
+    loadPromptSkillOptions()
+  } else if (trigger === '#') {
+    promptMcpQuery.value = query
+    promptMcpPickerVisible.value = true
+    loadPromptMcpOptions()
+  } else {
+    promptToolQuery.value = query
+    promptToolPickerVisible.value = true
+    loadPromptToolOptions()
+  }
+}
+
+function removeTriggerToken(trigger) {
+  const value = newTask.prompt || ''
+  const idx = value.lastIndexOf(trigger)
+  if (idx >= 0) newTask.prompt = value.slice(0, idx).trimEnd()
+}
+
+function selectPromptSkill(s) {
+  if (!promptSkills.value.some(x => x.id === s.id)) promptSkills.value.push(s)
+  removeTriggerToken('@')
+  closePromptPickers()
+}
+
+function selectPromptMcp(m) {
+  if (!promptMcps.value.some(x => x.id === m.id)) promptMcps.value.push(m)
+  removeTriggerToken('#')
+  closePromptPickers()
+}
+
+function selectPromptTool(t) {
+  if (!promptTools.value.some(x => x.id === t.id)) promptTools.value.push(t)
+  removeTriggerToken('/')
+  closePromptPickers()
+}
+
+function removePromptSkill(i) { promptSkills.value.splice(i, 1) }
+function removePromptMcp(i) { promptMcps.value.splice(i, 1) }
+function removePromptTool(i) { promptTools.value.splice(i, 1) }
+
+function buildTaskPrompt() {
+  const parts = [newTask.prompt.trim()]
+  if (promptSkills.value.length) parts.push(`【已选用 Skill】\n${promptSkills.value.map(s => `@${s.name}（id=${s.id}）\n${s.instructions || ''}`).join('\n\n')}`)
+  if (promptMcps.value.length) parts.push(`【已选择的 MCP 服务】\n${promptMcps.value.map(m => `#${m.name}${m.description ? '：' + m.description : ''}`).join('\n')}`)
+  if (promptTools.value.length) parts.push(`【已引用工具】\n${promptTools.value.map(t => `/${t.name}${t.description ? '：' + t.description : ''}`).join('\n')}`)
+  return parts.filter(Boolean).join('\n')
 }
 
 /**
@@ -339,6 +502,9 @@ function resetForm() {
   newTask.cycle = 'once'
   newTask.datetime = getDefaultDatetime()
   newTask.enabled = true
+  promptSkills.value = []
+  promptMcps.value = []
+  promptTools.value = []
 }
 
 /**
@@ -355,6 +521,9 @@ function editTask(task) {
   const m = dt.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)
   newTask.datetime = m ? m[0] : getDefaultDatetime()
   newTask.enabled = task.enabled !== false
+  promptSkills.value = []
+  promptMcps.value = []
+  promptTools.value = []
   createResult.value = null
   // 表单在面板顶部，滚动上去方便用户直接修改
   document.querySelector('.ts-body')?.scrollTo({ top: 0, behavior: 'smooth' })
@@ -378,7 +547,7 @@ async function saveTask() {
   const isEdit = !!editingTaskId.value
   const payload = {
     name: newTask.name.trim(),
-    prompt: newTask.prompt.trim(),
+    prompt: buildTaskPrompt(),
     datetime: newTask.datetime,
     cycle: newTask.cycle,
     enabled: newTask.enabled
@@ -1161,5 +1330,73 @@ input[type="datetime-local"].form-input {
   display: flex;
   gap: 4px;
   flex-shrink: 0;
+}
+
+.ts-mention-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ts-mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: rgba(0, 122, 255, 0.1);
+  color: var(--apple-blue);
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.ts-mention-remove {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.ts-mention-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.ts-mention-title {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.ts-mention-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.ts-mention-item:hover {
+  background: rgba(0, 122, 255, 0.08);
+}
+
+.ts-mention-item span {
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 </style>

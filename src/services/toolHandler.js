@@ -167,6 +167,7 @@ const toolCatalog = [
   { name: 'get_location', category: 'Web', desc: 'Get the current location (IP-based, free, no key) so weather/local search matches the actual city' },
   { name: 'search_knowledge_base', category: 'KB', desc: 'Search content and filenames of all indexed mindmap files; cross-file node search' },
   { name: 'semantic_search', desc: 'Semantic search: retrieve similar files and nodes from the local SQLite knowledge base using multiple AI-intent keywords', category: 'KB' },
+  { name: 'semantic_tool_search', category: 'Discovery', desc: 'Semantically find the best tool, custom tool, MCP server, or Skill for the user request (unified local scoring)' },
   { name: 'read_mindmap_file', category: 'KB', desc: 'Read the content of a mindmap file at a given path' },
   { name: 'read_node_image', category: 'KB', desc: 'Recognize text/content in the image attached to a mindmap node (multimodal first, local OCR fallback)' },
   { name: 'activate_tools', category: 'Meta', desc: 'Activate tools by names list OR by keyword (auto-finds matching tools from the catalog, activates them, and returns their full parameter definitions); without params returns the full catalog. Only a subset of tools is active by default; inactive tools MUST be activated with this tool first' },
@@ -233,6 +234,74 @@ export const TOOL_METADATA = {
 }
 // 工具目录 → 系统提示词紧凑目录（名称+截断描述，按类目分组）。
 // 让模型开局即知全部工具名，直接 activate_tools(names) 激活，省掉目录浏览轮次
+// 统一语义检索：工具 / 自定义工具 / MCP / Skill 全量注册，本地加权打分。
+// 不依赖原生 sqlite-vec：向量或元数据均可在 JS 内计算，后续可无缝接 embedding。
+export async function semanticToolSearch(query, limit = 10) {
+  const q = String(query || '').trim().toLowerCase()
+  if (!q) return []
+  const tokens = q.split(/[\s,，、/|]+/).filter(Boolean)
+
+  const builtins = (aiTools || []).map(t => ({
+    kind: 'tool',
+    id: t.function?.name || '',
+    name: t.function?.name || '',
+    description: t.function?.description || '',
+    enabled: true,
+    autoInvoke: false
+  })).filter(x => x.id)
+
+  let custom = []
+  try {
+    custom = ((await window.electronAPI?.customTools?.list?.()) || []).map(t => ({
+      kind: 'custom_tool',
+      id: t.id,
+      name: t.name || t.id,
+      description: t.description || '',
+      enabled: t.enabled !== false,
+      autoInvoke: t.autoInvoke === true
+    }))
+  } catch (e) { custom = [] }
+
+  let skills = []
+  try {
+    skills = ((await window.electronAPI?.skills?.list?.()) || []).map(s => ({
+      kind: 'skill',
+      id: s.id,
+      name: s.name || s.id,
+      description: s.description || '',
+      enabled: s.enabled !== false,
+      autoInvoke: s.autoInvoke === true
+    }))
+  } catch (e) { skills = [] }
+
+  let mcps = []
+  try {
+    mcps = ((await window.electronAPI?.mcp?.list?.()) || []).map(m => ({
+      kind: 'mcp',
+      id: m.id,
+      name: m.name || m.id,
+      description: m.description || `${m.transport || ''} ${m.url || m.command || ''}`.trim(),
+      enabled: m.enabled !== false,
+      autoInvoke: false
+    }))
+  } catch (e) { mcps = [] }
+
+  const pool = [...builtins, ...custom, ...skills, ...mcps]
+  const scored = pool.map(item => {
+    const hay = `${item.name} ${item.description}`.toLowerCase()
+    let score = 0
+    for (const token of tokens) {
+      if (item.name.toLowerCase().includes(token)) score += 6
+      if ((item.description || '').toLowerCase().includes(token)) score += 3
+      if (hay.includes(token)) score += 1
+    }
+    if (item.enabled === false) score -= 3
+    if (item.autoInvoke === true) score += 1
+    return { ...item, score }
+  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, limit)
+  return scored
+}
+
 export function buildToolCatalogText(maxDescLen = 90) {
   const byCat = new Map()
   for (const t of toolCatalog) {
@@ -259,6 +328,7 @@ export function buildToolCatalogText(maxDescLen = 90) {
 export const CORE_TOOL_NAMES = [
   // 工具发现（必须永远可用）
   'activate_tools',
+  'semantic_tool_search',
   // 导图读取
   'get_mindmap_content',
   'get_mindmap_info',
@@ -1749,6 +1819,21 @@ export const aiTools = [
           }
         },
         required: ['query', 'keywords']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'semantic_tool_search',
+      description: 'Find the best matching built-in tool, custom tool, MCP server, or saved Skill for a user request. Use this when many tools/MCPs/Skills exist and the user asks which tool/capability to use, or when the request does not clearly map to one known tool name.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'User request or capability description' },
+          limit: { type: 'number', description: 'Max results, default 10' }
+        },
+        required: ['query']
       }
     }
   },
@@ -6262,6 +6347,21 @@ ${block}`
       }
     }
 
+    case 'semantic_tool_search': {
+      try {
+        if (!args.query) return { success: false, message: '请提供 query' }
+        const limit = Math.min(Math.max(Number(args.limit) || 10, 1), 30)
+        const hits = await semanticToolSearch(args.query, limit)
+        if (!hits.length) return { success: true, message: `没有找到与「${args.query}」匹配的工具、MCP、Skill 或自定义工具。` }
+        const text = hits.map((h, i) =>
+          `${i + 1}. [${h.kind}] ${h.name}${h.id ? `（id=${h.id}）` : ''}${h.description ? `：${h.description}` : ''}（score=${h.score}）`
+        ).join('\n')
+        return { success: true, message: `为「${args.query}」找到 ${hits.length} 个候选：\n\n${text}`, results: hits }
+      } catch (e) {
+        return { success: false, message: `语义工具检索失败: ${e.message}` }
+      }
+    }
+
     case 'read_mindmap_file': {
       try {
         const filePath = args.filePath || ''
@@ -6393,12 +6493,23 @@ ${block}`
         const limit = Math.max(1, Number(args.limit) || 6)
         const activated = []
         const notFound = []
+        const customActivations = []
+        const customList = await window.electronAPI?.customTools?.list?.() || []
+        const findCustom = (n) => {
+          const q = String(n).trim()
+          return customList.find(t => t.id === q || t.name === q) || null
+        }
 
         if (names.length > 0) {
           for (const n of names) {
             const def = aiTools.find(t => t.function.name === n)
-            if (def) activated.push(n)
-            else notFound.push(n)
+            if (def) {
+              activated.push(n)
+            } else {
+              const custom = findCustom(n)
+              if (custom && !customActivations.some(c => c.id === custom.id)) customActivations.push(custom)
+              else if (!custom) notFound.push(n)
+            }
           }
         }
 
@@ -6414,17 +6525,27 @@ ${block}`
           for (const m of matched) {
             if (!activated.includes(m.name) && aiTools.some(t => t.function.name === m.name)) activated.push(m.name)
           }
-        }
-
-        // 无参：返回完整紧凑目录（与系统提示词内嵌目录一致），供模型挑选后精确激活
-        if (activated.length === 0 && !keyword) {
-          return {
-            success: true,
-            message: `完整工具目录：\n\n${buildToolCatalogText()}\n\n用 activate_tools(names=["工具名"]) 一次性激活需要的工具。`
+          for (const c of customList) {
+            if (
+              (c.id || '').toLowerCase().includes(keyword) ||
+              (c.name || '').toLowerCase().includes(keyword) ||
+              (c.description || '').toLowerCase().includes(keyword) ||
+              (c.category || '').toLowerCase().includes(keyword)
+            ) {
+              if (!customActivations.some(x => x.id === c.id)) customActivations.push(c)
+            }
           }
         }
 
-        if (activated.length === 0) {
+        // 无参：返回完整紧凑目录（与系统提示词内嵌目录一致），供模型挑选后精确激活
+        if (activated.length === 0 && customActivations.length === 0 && !keyword) {
+          return {
+            success: true,
+            message: `完整工具目录：\n\n${buildToolCatalogText()}${customList.length ? `\n\n自定义工具：\n${customList.map(c => `- ${c.name}（id=${c.id}，用 call_custom_tool 调用）`).join('\n')}` : ''}\n\n用 activate_tools(names=["工具名"]) 一次性激活需要的工具。`
+          }
+        }
+
+        if (activated.length === 0 && customActivations.length === 0) {
           return {
             success: false,
             message: keyword
@@ -6433,12 +6554,15 @@ ${block}`
           }
         }
 
-        const defs = getToolsByNames(activated).map(t =>
+        const defs = getToolsByNames(activated).filter(Boolean).map(t =>
           `${t.function.name}: ${t.function.description}\n参数: ${JSON.stringify(t.function.parameters)}`
         ).join('\n\n')
-        let msg = `已激活 ${activated.length} 个工具，本会话内可直接调用：\n\n${defs}`
+        const customDefs = customActivations.map(c =>
+          `自定义工具 ${c.name}（id=${c.id}）：使用 call_custom_tool(toolId="${c.id}", arguments={...}) 调用。参数 Schema：${JSON.stringify(c.parameters || {})}`
+        ).join('\n\n')
+        let msg = `已激活 ${activated.length + customActivations.length} 个工具，本会话内可直接调用：\n\n${[defs, customDefs].filter(Boolean).join('\n\n')}`
         if (notFound.length > 0) msg += `\n\n未找到（请检查名称，可用 keyword 模糊查找）: ${notFound.join(', ')}`
-        return { success: true, message: msg, activatedTools: activated }
+        return { success: true, message: msg, activatedTools: activated, customTools: customActivations }
       } catch (e) {
         return { success: false, message: `激活工具失败: ${e.message}` }
       }
@@ -6491,7 +6615,11 @@ ${block}`
       try {
         if (!args.toolId) return { success: false, message: '请提供 toolId' }
         if (!window.electronAPI?.customTools?.call) return { success: false, message: '自定义工具调用功能不可用' }
-        const result = await window.electronAPI.customTools.call(args.toolId, args.arguments || {})
+        const meta = {
+          currentFilePath: typeof extraHandlers?.currentFilePath === 'function' ? extraHandlers.currentFilePath() : '',
+          currentFileName: typeof extraHandlers?.currentFileName === 'function' ? extraHandlers.currentFileName() : ''
+        }
+        const result = await window.electronAPI.customTools.call(args.toolId, args.arguments || {}, meta)
         if (result && result.success === false) {
           return { success: false, message: result.message || '自定义工具执行失败', result }
         }
@@ -6518,6 +6646,7 @@ ${block}`
         const list = await window.electronAPI?.skills?.list?.() || []
         const skill = list.find(s => s.id === args.skillId)
         if (!skill) return { success: false, message: '未找到该 Skill' }
+        if (skill.enabled === false) return { success: false, message: '该 Skill 已停用' }
         return { success: true, message: `【${skill.name}】\n${skill.description || '（无描述）'}\n\n指令：\n${skill.instructions || '（无指令）'}`, skill }
       } catch (e) { return { success: false, message: `读取 Skill 失败: ${e.message}` } }
     }
@@ -6528,6 +6657,7 @@ ${block}`
         const list = await window.electronAPI?.skills?.list?.() || []
         const skill = list.find(s => s.id === args.skillId)
         if (!skill) return { success: false, message: '未找到该 Skill' }
+        if (skill.enabled === false) return { success: false, message: '该 Skill 已停用' }
         return {
           success: true,
           message: `已调用 Skill「${skill.name}」。请严格按以下指令执行：\n\n${skill.instructions || '（无指令）'}`,

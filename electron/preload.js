@@ -133,10 +133,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 自定义工具（userData/custom-tools + 项目 custom-tools）
   customTools: {
     list: () => ipcRenderer.invoke('customTools:list'),
-    call: (id, args) => ipcRenderer.invoke('customTools:call', id, args),
+    update: (id, patch) => ipcRenderer.invoke('customTools:update', id, patch),
+    call: (id, args, meta) => ipcRenderer.invoke('customTools:call', id, args, meta),
     openDir: () => ipcRenderer.invoke('customTools:openDir'),
     getSpec: () => ipcRenderer.invoke('customTools:getSpec'),
-    saveSpec: () => ipcRenderer.invoke('customTools:saveSpec')
+    saveSpec: () => ipcRenderer.invoke('customTools:saveSpec'),
+    importFolder: (folderName, files) => ipcRenderer.invoke('customTools:importFolder', { folderName, files })
   },
 
   // OCR 识别

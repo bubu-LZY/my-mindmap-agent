@@ -467,6 +467,15 @@
         <el-button size="small" @click="downloadCustomToolsSpec">下载编写规范</el-button>
         <el-button size="small" @click="loadCustomTools">刷新工具</el-button>
       </div>
+      <div
+        class="custom-tools-drop"
+        @dragover.prevent="customToolDragOver = true"
+        @dragleave.prevent="customToolDragOver = false"
+        @drop.prevent="onCustomToolFolderDrop"
+      >
+        <span>将工具文件夹拖到这里快速添加</span>
+        <span class="custom-tools-drop-hint">请拖入包含 tool.json 和 tool.js 的文件夹</span>
+      </div>
       <div v-if="customTools.length === 0" class="mcp-skill-row" style="padding: 12px 0; color: var(--text-secondary);">
         暂未发现自定义工具。点击“下载编写规范”后按规范创建工具，再刷新即可。
       </div>
@@ -478,9 +487,9 @@
         <div class="mcp-skill-desc">{{ t.description || '无描述' }}</div>
         <div class="skill-switches">
           <span class="skill-switch-label">启用</span>
-          <el-switch v-model="t.enabled" size="small" disabled />
+          <el-switch v-model="t.enabled" size="small" @change="updateCustomTool(t, 'enabled', $event)" />
           <span class="skill-switch-label">自动</span>
-          <el-switch v-model="t.autoInvoke" size="small" disabled />
+          <el-switch v-model="t.autoInvoke" size="small" @change="updateCustomTool(t, 'autoInvoke', $event)" />
         </div>
       </div>
     </div>
@@ -1521,6 +1530,7 @@ const removeSkill = async (id) => {
 
 // ========== 自定义工具目录管理 ==========
 const customTools = ref([])
+const customToolDragOver = ref(false)
 
 const loadCustomTools = async () => {
   if (!window.electronAPI?.customTools?.list) return
@@ -1553,6 +1563,71 @@ const downloadCustomToolsSpec = async () => {
     await openCustomToolsDir()
   } catch (e) {
     ElMessage.error('下载编写规范失败')
+  }
+}
+
+const updateCustomTool = async (tool, field, value) => {
+  if (!window.electronAPI?.customTools?.update) return
+  try {
+    await window.electronAPI.customTools.update(tool.id, { [field]: value })
+    ElMessage.success('工具设置已保存')
+    await loadCustomTools()
+  } catch (e) {
+    ElMessage.error(`保存工具设置失败：${e.message || '未知错误'}`)
+    await loadCustomTools()
+  }
+}
+
+const onCustomToolFolderDrop = async (event) => {
+  customToolDragOver.value = false
+  const items = Array.from(event.dataTransfer?.items || [])
+  const entry = items.find(item => item.kind === 'file' && typeof item.webkitGetAsEntry === 'function')?.webkitGetAsEntry()
+  if (!entry || !entry.isDirectory) {
+    ElMessage.warning('请拖入一个工具文件夹（文件夹内需包含 tool.json 和 tool.js）')
+    return
+  }
+  const files = []
+  const readEntry = (dirEntry, parentPath = '') => new Promise((resolve, reject) => {
+    const reader = dirEntry.createReader()
+    const all = []
+    const readBatch = () => {
+      reader.readEntries(async (entries) => {
+        if (!entries.length) {
+          for (const e of all) {
+            if (e.isFile) {
+              const file = await new Promise((res, rej) => e.file((f) => res(f), rej))
+              const data = await new Promise((res, rej) => {
+                const fr = new FileReader()
+                fr.onload = () => res(String(fr.result || '').split(',')[1] || '')
+                fr.onerror = rej
+                fr.readAsDataURL(file)
+              })
+              files.push({ relativePath: parentPath ? `${parentPath}/${e.name}` : e.name, base64: data })
+            } else if (e.isDirectory) {
+              await readEntry(e, parentPath ? `${parentPath}/${e.name}` : e.name)
+            }
+          }
+          resolve()
+          return
+        }
+        all.push(...entries)
+        readBatch()
+      }, reject)
+    }
+    readBatch()
+  })
+  try {
+    await readEntry(entry)
+    if (!files.some(f => /(^|\/)tool\.json$/i.test(f.relativePath))) {
+      ElMessage.warning('该文件夹中没有 tool.json，请放入规范要求的工具文件夹')
+      return
+    }
+    const res = await window.electronAPI.customTools.importFolder(entry.name, files)
+    if (!res?.ok) throw new Error(res?.error || '导入失败')
+    ElMessage.success(`已导入工具文件夹：${res.dir}`)
+    await loadCustomTools()
+  } catch (e) {
+    ElMessage.error(`导入工具失败：${e.message || '未知错误'}`)
   }
 }
 
@@ -2245,6 +2320,32 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 8px;
   margin: 8px 0;
+}
+
+.custom-tools-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 10px 0;
+  padding: 16px;
+  border: 1px dashed rgba(0, 122, 255, 0.35);
+  border-radius: 10px;
+  background: rgba(0, 122, 255, 0.04);
+  color: var(--text-secondary, #6e6e73);
+  font-size: 13px;
+  text-align: center;
+}
+
+.custom-tools-drop:hover {
+  border-color: rgba(0, 122, 255, 0.7);
+  background: rgba(0, 122, 255, 0.08);
+}
+
+.custom-tools-drop-hint {
+  font-size: 11px;
+  color: var(--text-tertiary, #a1a1a6);
 }
 
 .mcp-skill-row .mini,

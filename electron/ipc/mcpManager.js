@@ -216,11 +216,13 @@ ipcMain.handle('mcp:delete', async (e, id) => deleteServer(id))
 ipcMain.handle('mcp:listTools', async (e, id) => {
   const server = listServers().find(s => s.id === id)
   if (!server) throw new Error('MCP 服务不存在')
+  if (server.enabled === false) throw new Error('MCP 服务已停用')
   return getTools(server)
 })
 ipcMain.handle('mcp:callTool', async (e, id, toolName, args) => {
   const server = listServers().find(s => s.id === id)
   if (!server) throw new Error('MCP 服务不存在')
+  if (server.enabled === false) throw new Error('MCP 服务已停用')
   return callTool(server, toolName, args)
 })
 

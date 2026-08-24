@@ -21,12 +21,6 @@ export default defineConfig({
   build: {
     commonjsOptions: {
       transformMixedEsModules: true
-    },
-    outDir: 'web-dist',
-    rollupOptions: {
-      input: {
-        main: fileURLToPath(new URL('./web/index.html', import.meta.url))
-      }
     }
   }
 })
