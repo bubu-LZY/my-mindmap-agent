@@ -69,7 +69,7 @@
     'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 
   /* --- Layout Dimensions --- */
-  --navbar-height: 36px;
+  --navbar-height: 30px;
   --sidebar-width: 300px;
   --sidebar-width-review: 400px;
   --ai-panel-width: 360px;

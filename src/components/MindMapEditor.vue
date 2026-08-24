@@ -874,6 +874,14 @@ const initMindMap = () => {
     // 标志位卡在按下状态后画布会永久跟随鼠标（需点击文件树才能解除）；
     // 库自带平移还会与本组件平移叠加（双重速度）
     isDisableDrag: true,
+    // 节点量大时开启性能模式：只渲染视口及四周少量节点，拖动/缩放不会全量重绘。
+    // AI 工具读取数据仍走 mindMap.getData()，不受懒渲染影响。
+    openPerformance: true,
+    performanceConfig: {
+      time: 120,
+      padding: 120,
+      removeNodeWhenOutCanvas: true
+    },
     // 编辑时实时在节点上渲染文字，编辑框透明无阴影贴合节点，而非独立悬浮窗
     openRealtimeRenderOnNodeTextEdit: true,
     // 节点图片缩放/删除按钮更紧凑

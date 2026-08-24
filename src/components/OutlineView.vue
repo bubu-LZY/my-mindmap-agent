@@ -35,7 +35,8 @@
     <!-- 文字编辑工具栏 -->
     <TextToolbar
       :visible="textToolbarVisible"
-      :get-mind-map="() => props.mindMap"
+      :get-mind-map="() => null"
+      position-mode="fixed"
       @interact-start="onToolbarInteractStart"
       @interact-end="onToolbarInteractEnd"
     />
@@ -192,7 +193,7 @@ import OutlineToolbar from './OutlineToolbar.vue'
 import Contextmenu from './Contextmenu.vue'
 import NoteDialog from './NoteDialog.vue'
 import PreviewOverlay from './PreviewOverlay.vue'
-import { applyTextStyleToNodes, ensureInlineSpan } from '../utils/textStyle'
+import { applyTextStyleToNodes, ensureIsolatedInlineSpan, setTextDecorationToken } from '../utils/textStyle'
 import Tribute from 'tributejs'
 import 'tributejs/dist/tribute.css'
 import {
@@ -287,6 +288,10 @@ const props = defineProps({
     type: Boolean,
     default: true
   },
+  currentFileName: {
+    type: String,
+    default: ''
+  },
   // 当前导图数据（App 层同步维护）：思维导图实例未就绪/隐藏容器渲染异常时的兜底数据源
   mindMapData: {
     type: Object,
@@ -378,6 +383,29 @@ const onTreeClickCapture = (e) => {
   // 点击挖空只做显隐切换，不进入编辑：blur 触发编辑内容保存
   if (document.activeElement === nodeTextEl) nodeTextEl.blur()
   applyOutlineClozeStyles()
+}
+
+// document 捕获兜底：确保挖空点击即使不落在 tree-container 上也能切换显隐。
+const onDocumentClozeClick = (e) => {
+  const clozeEl = e.target?.closest?.('.smm-cloze')
+  if (!clozeEl) return
+  const nodeTextEl = clozeEl.closest('.node-text')
+  if (!nodeTextEl) return
+  e.preventDefault()
+  e.stopPropagation()
+  const uid = nodeTextEl.dataset?.uid
+  if (!uid) return
+  toggleClozeByUid(uid)
+  if (document.activeElement === nodeTextEl) nodeTextEl.blur()
+  applyOutlineClozeStyles()
+}
+
+// 阻止挖空文字被浏览器双击选词/聚焦拖拽选中，快速点击显隐时不会留下蓝色选区。
+const onDocumentClozeMousedown = (e) => {
+  const clozeEl = e.target?.closest?.('.smm-cloze')
+  if (!clozeEl) return
+  e.preventDefault()
+  e.stopPropagation()
 }
 
 /** 解开 DOM 中的挖空 span（保留内容） */
@@ -2081,12 +2109,169 @@ const findTargetNode = () => {
 
 // 文字样式：颜色/高亮/粗斜体/下划线/删除线/字体/字号
 const onToolbarApply = (action) => {
+  // 大纲编辑态：顶部固定工具栏的颜色/字体/加粗等动作优先作用于当前选中文字，
+  // 避免误走“选中节点”提示。
+  if (isOutlineTextEditing() && applyOutlineTextStyleAction(action)) return
   const node = findTargetNode()
   if (!node) {
     try { ElMessage.warning('请先选中或编辑一个节点') } catch (e) {}
     return
   }
   applyTextStyleToNodes(props.mindMap, [node], action)
+}
+
+/* ============ 大纲选区文字样式（供 App 快捷键复用） ============ */
+const collectOutlineSelectionTextNodes = () => {
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return null
+  const range = sel.getRangeAt(0)
+  if (range.collapsed) return null
+  const root = range.commonAncestorContainer
+  const walkRoot = root && root.nodeType === 3 ? root.parentElement : root
+  if (!walkRoot) return null
+  const textNodes = []
+  const walker = document.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT)
+  while (walker.nextNode()) {
+    const tn = walker.currentNode
+    if (!tn.nodeValue || !tn.nodeValue.length) continue
+    let start = 0
+    let end = tn.nodeValue.length
+    let included = false
+    if (tn === range.startContainer && tn === range.endContainer) {
+      start = range.startOffset
+      end = range.endOffset
+      included = start < end
+    } else if (tn === range.startContainer) {
+      start = range.startOffset
+      end = tn.nodeValue.length
+      included = start < end
+    } else if (tn === range.endContainer) {
+      start = 0
+      end = range.endOffset
+      included = start < end
+    } else {
+      try {
+        included = range.comparePoint(tn, 0) >= 0 && range.comparePoint(tn, tn.nodeValue.length) <= 0
+      } catch (e) {
+        included = range.intersectsNode(tn)
+      }
+    }
+    if (!included || start >= end) continue
+    textNodes.push({ tn, start, end })
+  }
+  return textNodes.length ? textNodes : null
+}
+
+const splitOutlineSelectionNode = (item) => {
+  let node = item.tn
+  if (item.end < node.nodeValue.length) node.splitText(item.end)
+  if (item.start > 0) node = node.splitText(item.start)
+  return node
+}
+
+const applyOutlineSelectionStyles = (styles) => {
+  const items = collectOutlineSelectionTextNodes()
+  if (!items || !items.length || !styles.length) return false
+  let changed = 0
+  let lastEl = null
+  for (const item of items) {
+    try {
+      const node = splitOutlineSelectionNode(item)
+      const el = ensureIsolatedInlineSpan(node)
+      lastEl = el
+      for (const [prop, value] of styles) {
+        if (value === false || value === null || value === '') el.style.removeProperty(prop)
+        else el.style.setProperty(prop, value)
+      }
+      changed++
+    } catch (e) {}
+  }
+  if (lastEl) {
+    try {
+      const sel = window.getSelection()
+      const range = document.createRange()
+      range.selectNodeContents(lastEl)
+      range.collapse(false)
+      sel.removeAllRanges()
+      sel.addRange(range)
+    } catch (e) {}
+  }
+  return changed > 0
+}
+
+const applyOutlineSelectionDecoration = (token, add) => {
+  const items = collectOutlineSelectionTextNodes()
+  if (!items || !items.length) return false
+  let changed = 0
+  let lastEl = null
+  for (const item of items) {
+    try {
+      const node = splitOutlineSelectionNode(item)
+      const el = ensureIsolatedInlineSpan(node)
+      lastEl = el
+      setTextDecorationToken(el, token, add)
+      changed++
+    } catch (e) {}
+  }
+  if (lastEl) {
+    try {
+      const sel = window.getSelection()
+      const range = document.createRange()
+      range.selectNodeContents(lastEl)
+      range.collapse(false)
+      sel.removeAllRanges()
+      sel.addRange(range)
+    } catch (e) {}
+  }
+  return changed > 0
+}
+
+const isOutlineTextEditing = () => {
+  const el = document.activeElement
+  if (!el || !el.closest || !el.closest('.node-text')) return false
+  const sel = window.getSelection()
+  return !!(sel && sel.rangeCount > 0 && !sel.getRangeAt(0).collapsed)
+}
+
+const applyOutlineTextStyleAction = (action) => {
+  if (!isOutlineTextEditing()) return false
+  if (action.startsWith('color:')) {
+    return applyOutlineSelectionStyles([['color', action.slice(6)]])
+  }
+  if (action.startsWith('highlight:')) {
+    return applyOutlineSelectionStyles([['background-color', action.slice(10)]])
+  }
+  if (action.startsWith('font:')) {
+    const value = action.slice(5)
+    return applyOutlineSelectionStyles(value ? [['font-family', value]] : [['font-family', false]])
+  }
+  if (action.startsWith('fontsize:')) {
+    const value = action.slice(9)
+    return applyOutlineSelectionStyles(value ? [['font-size', value + 'px']] : [['font-size', false]])
+  }
+  if (action === 'bold') {
+    const add = !document.queryCommandState('bold')
+    return applyOutlineSelectionStyles([['font-weight', add ? 'bold' : 'normal']])
+  }
+  if (action === 'italic-on') {
+    return applyOutlineSelectionStyles([['font-style', 'italic']])
+  }
+  if (action === 'italic-off') {
+    return applyOutlineSelectionStyles([['font-style', 'normal']])
+  }
+  if (action === 'italic') {
+    const add = !document.queryCommandState('italic')
+    return applyOutlineSelectionStyles([['font-style', add ? 'italic' : 'normal']])
+  }
+  if (action === 'underline') {
+    const add = !document.queryCommandState('underline')
+    return applyOutlineSelectionDecoration('underline', add)
+  }
+  if (action === 'strikethrough') {
+    const add = !document.queryCommandState('strikeThrough')
+    return applyOutlineSelectionDecoration('line-through', add)
+  }
+  return false
 }
 
 /* ============ 格式刷（大纲模式） ============ */
@@ -2232,7 +2417,7 @@ const applyPainterToSelection = () => {
       if (start >= end) continue
       if (end < tn.nodeValue.length) tn.splitText(end)
       if (start > 0) node = tn.splitText(start)
-      const el = ensureInlineSpan(node)
+      const el = ensureIsolatedInlineSpan(node)
       for (const [k, v] of styleProps) el.style.setProperty(k, v)
       changed++
     } catch (e) {}
@@ -2406,8 +2591,10 @@ const onToolbarShowCloze = () => {
 const outlineExporting = ref(false)
 const outlineExportFileName = () => {
   const root = treeData.value[0]
-  const text = String(root?.label || '').replace(/<[^>]+>/g, '').trim()
-  return (text.slice(0, 30) || '思维导图').replace(/[\\/:*?"<>|]/g, '_')
+  const rootText = String(root?.label || '').replace(/<[^>]+>/g, '').trim()
+  const fileName = String(props.currentFileName || '').split(/[\\/]/).pop() || ''
+  const base = (fileName.replace(/\.[^.]+$/, '') || rootText).slice(0, 30) || '大纲'
+  return `${base.replace(/[\\/:*?"<>|]/g, '_')}-大纲`
 }
 
 const onToolbarExport = async (type) => {
@@ -2512,7 +2699,7 @@ const buildOutlineHtml = (nodes, title) => {
     } else {
       html += `<span class="toggle-placeholder"></span>`
     }
-    html += `<span class="node-text${hasCloze ? ' has-cloze' : ''}">${htmlEscape(label)}</span>`
+    html += `<span class="node-text${hasCloze ? ' has-cloze' : ''}"${hasCloze ? ' onclick="toggleNodeCloze(this)" title="点击显示/隐藏挖空内容"' : ''}>${htmlEscape(label)}</span>`
     html += `</div>`
 
     if (hasChildren) {
@@ -2539,7 +2726,7 @@ const buildOutlineHtml = (nodes, title) => {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>${htmlEscape(title)} - 大纲</title>
+<title>${htmlEscape(title)}</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f6f6f8; color: #1d1d1f; padding: 20px; }
@@ -2605,7 +2792,11 @@ function toggleCloze() {
   document.getElementById('clozeToggle').textContent = clozeVisible ? '隐藏挖空' : '显示挖空';
   document.getElementById('clozeToggle').classList.toggle('active', !clozeVisible);
 }
-<' + '/script>
+
+function toggleNodeCloze(el) {
+  el.classList.toggle('cloze-hidden');
+}
+<\/script>
 </body>
 </html>`
 }
@@ -2871,6 +3062,8 @@ onMounted(() => {
 
   // 引用链接点击/悬浮（document capture）
   document.addEventListener('click', onOutlineLinkClick, true)
+  document.addEventListener('click', onDocumentClozeClick, true)
+  document.addEventListener('mousedown', onDocumentClozeMousedown, true)
   document.addEventListener('mouseover', onOutlineLinkHover, true)
   document.addEventListener('mouseout', onOutlineLinkLeave, true)
   window.addEventListener('mousemove', onPreviewMouseMove)
@@ -2889,6 +3082,8 @@ onBeforeUnmount(() => {
   unregisterListeners(props.mindMap)
   window.removeEventListener('cloze-state-changed', onClozeStateChanged)
   document.removeEventListener('click', onOutlineLinkClick, true)
+  document.removeEventListener('click', onDocumentClozeClick, true)
+  document.removeEventListener('mousedown', onDocumentClozeMousedown, true)
   document.removeEventListener('mouseover', onOutlineLinkHover, true)
   document.removeEventListener('mouseout', onOutlineLinkLeave, true)
   window.removeEventListener('mousemove', onPreviewMouseMove)
@@ -2958,11 +3153,18 @@ watch(() => props.visible, (newVisible, oldVisible) => {
   }
 })
 
-defineExpose({ refresh, openGeneralization, setFullscreen })
+defineExpose({
+  refresh,
+  openGeneralization,
+  setFullscreen,
+  isOutlineTextEditing,
+  applyOutlineTextStyleAction
+})
 </script>
 
 <style scoped>
 .outline-wrapper {
+  position: relative;
   width: 100%;
   height: 100%;
   flex-direction: column;
@@ -3148,6 +3350,18 @@ defineExpose({ refresh, openGeneralization, setFullscreen })
   justify-content: center;
   padding: 6px 12px 2px;
   flex-shrink: 0;
+  position: relative;
+  z-index: 20;
+}
+
+.tree-container {
+  position: relative;
+  z-index: 1;
+}
+
+/* 大纲根节点/最上方选区时，浮动文字工具栏必须压在顶部工具栏和树内容之上 */
+:deep(.text-toolbar) {
+  z-index: 1200 !important;
 }
 
 /* ========== 外框括线（同一父节点下 groupId 相同的兄弟节点） ========== */

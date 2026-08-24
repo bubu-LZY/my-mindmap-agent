@@ -130,6 +130,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     remove: (id) => ipcRenderer.invoke('skills:delete', id)
   },
 
+  // 自定义工具（userData/custom-tools + 项目 custom-tools）
+  customTools: {
+    list: () => ipcRenderer.invoke('customTools:list'),
+    call: (id, args) => ipcRenderer.invoke('customTools:call', id, args),
+    openDir: () => ipcRenderer.invoke('customTools:openDir'),
+    getSpec: () => ipcRenderer.invoke('customTools:getSpec'),
+    saveSpec: () => ipcRenderer.invoke('customTools:saveSpec')
+  },
+
   // OCR 识别
   ocrImage: (imagePath) => ipcRenderer.invoke('ocr-image', imagePath),
   ocrBase64: (base64Data, lang) => ipcRenderer.invoke('ocr-base64', base64Data, lang),

@@ -121,6 +121,24 @@ export const ensureInlineSpan = (textNode) => {
   return el
 }
 
+// 选区范围样式专用：如果父级 span 已包含其他兄弟文本/元素，必须再包一层新 span，
+// 否则直接给父级 span 设置样式会把同一节点内未被选中的文字也一起改掉。
+export const ensureIsolatedInlineSpan = (textNode) => {
+  let el = textNode.parentElement
+  const needWrap = !el ||
+    el.tagName === 'P' ||
+    el.tagName === 'DIV' ||
+    (el.classList && el.classList.contains('smm-cloze')) ||
+    (el.childNodes && el.childNodes.length > 1)
+  if (needWrap) {
+    const span = document.createElement('span')
+    textNode.replaceWith(span)
+    span.appendChild(textNode)
+    el = span
+  }
+  return el
+}
+
 // 沿祖先链读取内联样式属性值
 export const getEffectiveProp = (el, prop) => {
   let cur = el

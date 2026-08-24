@@ -215,6 +215,7 @@
             :mindMap="activeMindMap"
             :visible="viewMode === 'outline'"
             :mindMapData="mindMapData"
+            :current-file-name="currentFileName"
             @ai-continue="handleAiContinue"
             @ai-add-child="handleAiAddChild"
             @ai-rewrite="handleAiRewrite"
@@ -1879,7 +1880,9 @@ const getTextEditContext = (e) => {
   if (!el || !el.tagName) return null
   const tag = el.tagName.toUpperCase()
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return 'input'
-  if (el.isContentEditable) return 'richtext'
+  // 大纲模式下焦点事件 target 常是 contenteditable 内部的子 span，直接判断
+  // isContentEditable 会误判为画布，导致 Ctrl+Z/B/I 等被导图命令拦截。
+  if (el.isContentEditable || (el.closest && el.closest('[contenteditable="true"]'))) return 'richtext'
   return null
 }
 
@@ -1900,6 +1903,13 @@ const getTextEditContext = (e) => {
 // └────────────────┴──────────────────┴──────────────────┴──────────────────┘
 // 颜色/高亮快捷键：编辑态作用于选中文字；非编辑态作用于全部选中节点（支持多选）
 const applyColorShortcut = (action, label) => {
+  // 大纲模式：选中文字时直接作用于大纲 DOM 选区，不再走导图节点/Quill 分支。
+  if (viewMode.value === 'outline' && outlineViewRef.value?.isOutlineTextEditing?.()) {
+    if (outlineViewRef.value.applyOutlineTextStyleAction?.(action)) {
+      ElMessage.success(`已设置${label}`)
+    }
+    return
+  }
   // 复习模式与思维导图模式共用同一套导图操作（复习模式仅左侧多一个复习计划面板）
   // 优先从编辑器组件实时取实例：mindMapInstance 可能因切换文件/重建导图而过时
   const mm = (editorRef.value && editorRef.value.getMindMap && editorRef.value.getMindMap()) || mindMapInstance.value
@@ -1939,6 +1949,13 @@ const applyColorShortcut = (action, label) => {
 
 // toggle 样式快捷键（Ctrl+`删除线 / Ctrl+B 加粗）：编辑态作用于选中文字，非编辑态(点击节点未进入编辑)作用于整个节点内容
 const applyToggleStyleShortcut = (action, styleLabel, verb) => {
+  // 大纲模式：选中文字时直接作用于大纲 DOM 选区。
+  if (viewMode.value === 'outline' && outlineViewRef.value?.isOutlineTextEditing?.()) {
+    if (outlineViewRef.value.applyOutlineTextStyleAction?.(action)) {
+      ElMessage.success(`已${verb}选中文字`)
+    }
+    return
+  }
   // 复习模式与思维导图模式共用同一套导图操作
   // 优先从编辑器组件实时取实例：mindMapInstance 可能因切换文件/重建导图而过时
   const mm = (editorRef.value && editorRef.value.getMindMap && editorRef.value.getMindMap()) || mindMapInstance.value
@@ -2388,7 +2405,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 2px;
   padding: 0 8px;
-  height: 32px;
+  height: 26px;
   background-color: var(--navbar-bg);
   border-bottom: 1px solid var(--border-color);
   overflow-x: auto;
@@ -2400,7 +2417,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 26px;
+  height: 22px;
   padding: 0 10px;
   border-radius: 6px;
   font-size: 12.5px;

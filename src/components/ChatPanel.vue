@@ -98,6 +98,43 @@
               <span class="ref-chip-kind">{{ r.kindLabel }}</span>
             </span>
           </div>
+          <!-- 已发送的 Skill / MCP 原子胶囊 -->
+          <div v-if="msg.skills && msg.skills.length" class="msg-refs">
+            <span
+              v-for="s in msg.skills"
+              :key="s.id"
+              class="ref-chip msg-ref-chip"
+              title="已引用 Skill"
+            >
+              <span class="ref-chip-file">Skill</span>
+              <span class="ref-chip-sep">›</span>
+              <span class="ref-chip-text">{{ s.name }}</span>
+            </span>
+          </div>
+          <div v-if="msg.mcps && msg.mcps.length" class="msg-refs">
+            <span
+              v-for="m in msg.mcps"
+              :key="m.id"
+              class="ref-chip msg-ref-chip"
+              title="已引用 MCP"
+            >
+              <span class="ref-chip-file">MCP</span>
+              <span class="ref-chip-sep">›</span>
+              <span class="ref-chip-text">{{ m.name }}</span>
+            </span>
+          </div>
+          <div v-if="msg.tools && msg.tools.length" class="msg-refs">
+            <span
+              v-for="t in msg.tools"
+              :key="t.id"
+              class="ref-chip msg-ref-chip"
+              title="已引用工具"
+            >
+              <span class="ref-chip-file">工具</span>
+              <span class="ref-chip-sep">›</span>
+              <span class="ref-chip-text">{{ t.name }}</span>
+            </span>
+          </div>
         </div>
 
         <!-- AI 消息 -->
@@ -563,6 +600,31 @@
         >{{ m.name }}<span v-if="m.description" class="skill-picker-desc">{{ m.description }}</span></button>
         <div v-if="filteredMcps.length === 0" class="skill-picker-desc" style="padding: 8px 12px;">无可用 MCP 服务</div>
       </div>
+      <!-- / 工具选择弹层 -->
+      <div v-if="toolPickerVisible" class="skill-picker tool-picker">
+        <div class="skill-picker-title">选择工具</div>
+        <button
+          v-for="t in filteredToolOptions"
+          :key="t.id"
+          class="skill-picker-item"
+          @click="selectTool(t)"
+        >{{ t.name }}<span v-if="t.description" class="skill-picker-desc">{{ t.description }}</span></button>
+        <div v-if="filteredToolOptions.length === 0" class="skill-picker-desc" style="padding: 8px 12px;">无可用工具</div>
+      </div>
+      <!-- 工具原子胶囊 -->
+      <div v-if="attachedTools.length" class="attached-refs">
+        <span
+          v-for="(t, i) in attachedTools"
+          :key="t.id"
+          class="ref-chip tool-chip"
+          :title="t.description || t.name"
+        >
+          <span class="ref-chip-file">工具</span>
+          <span class="ref-chip-sep">›</span>
+          <span class="ref-chip-text">{{ t.name }}</span>
+          <button class="ref-chip-close" title="移除工具" @click="removeAttachedTool(i)">×</button>
+        </span>
+      </div>
       <textarea
         ref="textareaRef"
         v-model="inputText"
@@ -767,7 +829,7 @@
 
 <script setup>
 import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Setting } from '@element-plus/icons-vue'
 import { treeToText, treeToSkeletonText, countNodes } from '../utils/treeUtils'
 import { createUid } from 'simple-mind-map/src/utils'
@@ -873,7 +935,7 @@ const releaseAILock = (token) => {
 const isAIBusy = () => aiLockToken !== 0
 
 // 是否可发送：有文字、有引用胶囊或有拖入文件胶囊
-const canSend = computed(() => inputText.value.trim() !== '' || attachedRefs.value.length > 0 || attachedFiles.value.length > 0 || attachedSkills.value.length > 0)
+const canSend = computed(() => inputText.value.trim() !== '' || attachedRefs.value.length > 0 || attachedFiles.value.length > 0 || attachedSkills.value.length > 0 || attachedMcps.value.length > 0 || attachedTools.value.length > 0)
 
 // 对话管理
 const currentConversation = ref(null)
@@ -1637,6 +1699,8 @@ const jumpQueue = () => {
     attachedRefs.value = next.refs
     attachedFiles.value = next.files
     attachedSkills.value = next.skills || []
+    attachedMcps.value = next.mcps || []
+    attachedTools.value = next.tools || []
     if (textareaRef.value) textareaRef.value.style.height = 'auto'
     sendMessage(next.text)
   }, 350)
@@ -1650,6 +1714,8 @@ const editQueuedMessage = (index) => {
   attachedRefs.value = item.refs || []
   attachedFiles.value = item.files || []
   attachedSkills.value = item.skills || []
+  attachedMcps.value = item.mcps || []
+  attachedTools.value = item.tools || []
   nextTick(() => {
     if (textareaRef.value) {
       textareaRef.value.focus()
@@ -2149,8 +2215,9 @@ const saveMemorySettings = () => {
 }
 
 const distillingSkill = ref(false)
+let pendingSkillDistill = false
 
-const generateSkillFromConversation = async () => {
+const runSkillDistill = async (requirements = '') => {
   if (messages.value.length === 0) {
     ElMessage.warning('当前对话还没有内容')
     return
@@ -2167,7 +2234,10 @@ const generateSkillFromConversation = async () => {
       const tools = (m.toolCalls || []).map(tc => `[工具 ${tc.displayName || tc.name} → ${tc.status}]`).join(' ')
       return `${role}：${text}${tools ? `\n${tools}` : ''}`
     }).join('\n\n')
-    const prompt = `请分析以下对话，判断能否沉淀为一个可复用的 Skill。\n\n要求：\n1. feasible=true 表示当前系统能力可以支持该 Skill；如果必须依赖外部未配置服务、或需要系统不存在的底层能力，则 feasible=false。\n2. 只沉淀已经验证成功的流程，失败过程不要固化为 Skill。\n3. name 短小明确，instructions 是给未来 AI 执行的逐步指令。\n\n只输出 JSON：\n{"feasible":true,"reason":"为什么可行/不可行","name":"技能名","description":"解决什么问题","instructions":"步骤1；步骤2"} \n\n当前可用工具摘要：\n${buildToolCatalogText(55)}\n\n对话内容：\n${transcript.slice(0, 18000)}`
+    const requirementText = String(requirements || '').trim()
+      ? `\n用户对本次沉淀的额外要求：\n${String(requirements).trim()}\n`
+      : ''
+    const prompt = `请分析以下对话，判断能否沉淀为一个可复用的 Skill。\n\n要求：\n1. feasible=true 表示当前系统能力可以支持该 Skill；如果必须依赖外部未配置服务、或需要系统不存在的底层能力，则 feasible=false。\n2. 只沉淀已经验证成功的流程，失败过程不要固化为 Skill。\n3. name 短小明确，instructions 是给未来 AI 执行的逐步指令。${requirementText}\n只输出 JSON：\n{"feasible":true,"reason":"为什么可行/不可行","name":"技能名","description":"解决什么问题","instructions":"步骤1；步骤2"} \n\n当前可用工具摘要：\n${buildToolCatalogText(55)}\n\n对话内容：\n${transcript.slice(0, 18000)}`
     const choice = await aiService.chat(prompt, '你是一个技能沉淀器，只输出严格 JSON。', null, { responseFormat: 'json' })
     const content = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
     const start = content.indexOf('{')
@@ -2192,6 +2262,36 @@ const generateSkillFromConversation = async () => {
     ElMessage.error(`沉淀 Skill 失败：${e.message || e}`)
   } finally {
     distillingSkill.value = false
+  }
+}
+
+const generateSkillFromConversation = async () => {
+  if (messages.value.length === 0) {
+    ElMessage.warning('当前对话还没有内容')
+    return
+  }
+  if (!window.electronAPI?.skills?.create) {
+    ElMessage.warning('当前环境不支持 Skill 创建')
+    return
+  }
+  try {
+    await ElMessageBox.confirm('是否对即将沉淀的 Skill 有额外要求？', '沉淀 Skill', {
+      confirmButtonText: '有要求',
+      cancelButtonText: '没有要求',
+      type: 'info'
+    })
+    // 选择“有要求”：进入输入框，发送内容作为本次沉淀的额外要求。
+    pendingSkillDistill = true
+    inputText.value = ''
+    if (textareaRef.value) {
+      textareaRef.value.focus()
+      textareaRef.value.style.height = 'auto'
+    }
+    ElMessage.info('请直接输入沉淀要求，然后回车发送；没有要求可点“没有要求”直接沉淀')
+  } catch (action) {
+    if (action === 'cancel') {
+      await runSkillDistill('')
+    }
   }
 }
 
@@ -2585,10 +2685,14 @@ const sendMessage = async (overrideText = null) => {
   const files = attachedFiles.value.slice()
   const skills = attachedSkills.value.slice()
   const mcps = attachedMcps.value.slice()
-  // 将附加的 MCP 服务信息注入到消息上下文
-  if (mcps.length > 0) {
-    const mcpInfo = '\n\n【已选择的 MCP 服务】\n' + mcps.map(m => `- ${m.name}${m.description ? ': ' + m.description : ''}`).join('\n')
-    text = text + mcpInfo
+  const tools = attachedTools.value.slice()
+  // Skill 沉淀流程：点击“Skill”按钮后进入的要求输入，不当作普通聊天发送。
+  if (pendingSkillDistill) {
+    pendingSkillDistill = false
+    inputText.value = ''
+    if (textareaRef.value) textareaRef.value.style.height = 'auto'
+    await runSkillDistill(text)
+    return
   }
   // 手动压缩指令：输入"压缩对话"等直接触发压缩，不发消息给 AI
   if (MANUAL_COMPRESS_RE.test(text) && refs.length === 0 && files.length === 0) {
@@ -2597,15 +2701,16 @@ const sendMessage = async (overrideText = null) => {
     await manualCompress()
     return
   }
-  if (!text && refs.length === 0 && files.length === 0 && skills.length === 0) return
+  if (!text && refs.length === 0 && files.length === 0 && skills.length === 0 && mcps.length === 0 && tools.length === 0) return
   // thinking（AI 输出中）与 calling（工具执行中）：加入发送队列，回复完成后自动逐条发送
   if (aiStatus.value === 'thinking' || aiStatus.value === 'calling') {
-    messageQueue.value.push({ text, refs, files, skills })
+    messageQueue.value.push({ text, refs, files, skills, mcps, tools })
     inputText.value = ''
     attachedRefs.value = []
     attachedFiles.value = []
     attachedSkills.value = []
     attachedMcps.value = []
+    attachedTools.value = []
     if (textareaRef.value) textareaRef.value.style.height = 'auto'
     ElMessage.info(`已加入发送队列（第 ${messageQueue.value.length} 条），当前回复完成后自动发送`)
     return
@@ -2663,10 +2768,18 @@ const sendMessage = async (overrideText = null) => {
   const skillsContext = skills.length
     ? `【已选用 Skill】\n${skills.map(s => `@${s.name}（id=${s.id}）\n${s.instructions || ''}`).join('\n\n')}`
     : ''
+  const mcpsContext = mcps.length
+    ? `【已选择的 MCP 服务】\n${mcps.map(m => `#${m.name}${m.description ? '：' + m.description : ''}`).join('\n')}`
+    : ''
+  const toolsContext = tools.length
+    ? `【已引用工具】\n${tools.map(t => `/${t.name}${t.description ? '：' + t.description : ''}`).join('\n')}`
+    : ''
   const contextParts = []
   if (filesContext) contextParts.push(filesContext)
   if (refsContext) contextParts.push(refsContext)
   if (skillsContext) contextParts.push(skillsContext)
+  if (mcpsContext) contextParts.push(mcpsContext)
+  if (toolsContext) contextParts.push(toolsContext)
   const fullContent = contextParts.length ? `${contextParts.join('\n')}\n${text}` : text
   // 引用/文件均以原子胶囊展示（消息列表），content 仅保留用户文字；完整上下文仍通过 fullContent 发送给 AI
   const displayContent = text
@@ -2690,6 +2803,12 @@ const sendMessage = async (overrideText = null) => {
   }
   if (skills.length) {
     userMsg.skills = skills.map(s => ({ id: s.id, name: s.name, description: s.description }))
+  }
+  if (mcps.length) {
+    userMsg.mcps = mcps.map(m => ({ id: m.id, name: m.name, description: m.description }))
+  }
+  if (tools.length) {
+    userMsg.tools = tools.map(t => ({ id: t.id, name: t.name, description: t.description }))
   }
 
   // 带图消息处理：多模态启用且配置完整 → 原图直发多模态配置档；否则后台本地 OCR，识别结果随消息一起发给大模型（不写入输入框）
@@ -3188,6 +3307,8 @@ const sendMessage = async (overrideText = null) => {
               attachedRefs.value = next.refs
               attachedFiles.value = next.files
               attachedSkills.value = next.skills || []
+              attachedMcps.value = next.mcps || []
+              attachedTools.value = next.tools || []
               sendMessage(next.text)
             }, 600)
           }
@@ -5186,6 +5307,7 @@ const detectMcpMention = () => {
 const onInputDetect = () => {
   detectSkillMention()
   detectMcpMention()
+  detectToolMention()
 }
 
 const selectMcp = (mcp) => {
@@ -5201,6 +5323,67 @@ const selectMcp = (mcp) => {
 
 const removeAttachedMcp = (index) => {
   attachedMcps.value.splice(index, 1)
+}
+
+// / 工具选择器（内置工具 + 自定义工具）
+const toolPickerVisible = ref(false)
+const toolQuery = ref('')
+const allToolOptions = ref([])
+const attachedTools = ref([])
+const filteredToolOptions = computed(() => {
+  const q = toolQuery.value.trim().toLowerCase()
+  return q
+    ? allToolOptions.value.filter(t => t.name.toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q))
+    : allToolOptions.value
+})
+
+const loadToolPicker = async () => {
+  const builtins = (aiTools || []).map(t => ({
+    id: t.function?.name || '',
+    name: toolNameMap[t.function?.name] || t.function?.name || '',
+    description: t.function?.description || '',
+    category: 'builtin'
+  })).filter(t => t.id && t.name)
+  let customs = []
+  try {
+    const list = await window.electronAPI?.customTools?.list?.() || []
+    customs = list.filter(t => t && t.id).map(t => ({
+      id: t.id,
+      name: t.name || t.id,
+      description: t.description || '',
+      category: 'custom'
+    }))
+  } catch (e) {
+    customs = []
+  }
+  allToolOptions.value = [...builtins, ...customs]
+}
+
+const detectToolMention = () => {
+  const value = inputText.value || ''
+  const slashIdx = value.lastIndexOf('/')
+  if (slashIdx >= 0 && !value.slice(slashIdx + 1).includes(' ')) {
+    toolQuery.value = value.slice(slashIdx + 1)
+    toolPickerVisible.value = true
+    if (allToolOptions.value.length === 0) loadToolPicker()
+  } else {
+    toolPickerVisible.value = false
+  }
+}
+
+const selectTool = (tool) => {
+  if (!attachedTools.value.some(t => t.id === tool.id)) {
+    attachedTools.value.push({ id: tool.id, name: tool.name, description: tool.description, category: tool.category })
+  }
+  const value = inputText.value || ''
+  const slashIdx = value.lastIndexOf('/')
+  if (slashIdx >= 0) inputText.value = value.slice(0, slashIdx).trimEnd()
+  toolPickerVisible.value = false
+  toolQuery.value = ''
+}
+
+const removeAttachedTool = (index) => {
+  attachedTools.value.splice(index, 1)
 }
 
 const selectSkill = (skill) => {
@@ -5423,6 +5606,7 @@ onMounted(() => {
   conversations.value = loadConversations()
   loadCurrentModel()
   loadSkillPicker()
+  loadToolPicker()
   window.addEventListener('click', onGlobalClick)
   window.addEventListener('dragover', onGlobalDragOver)
   window.addEventListener('drop', onGlobalDrop)

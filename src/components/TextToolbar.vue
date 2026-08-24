@@ -1,13 +1,15 @@
 <template>
   <Transition name="tb-slide">
-    <div
-      v-show="visible"
-      ref="toolbarRef"
-      class="text-toolbar"
-      :style="toolbarStyle"
-      @mousedown="onToolbarMousedown"
-      @click.stop
-    >
+    <Teleport to="body" :disabled="positionMode !== 'fixed'">
+      <div
+        v-show="visible"
+        ref="toolbarRef"
+        class="text-toolbar"
+        :class="{ 'is-fixed': positionMode === 'fixed' }"
+        :style="toolbarStyle"
+        @mousedown="onToolbarMousedown"
+        @click.stop
+      >
       <!-- 加粗 -->
       <button
         class="tb-btn"
@@ -134,18 +136,23 @@
           <path d="M4 7h16M9 7l5 10M15 7l-3 6"/>
         </svg>
       </button>
-    </div>
+      </div>
+    </Teleport>
   </Transition>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
-import { textColorValues, highlightColorValues } from '../utils/textStyle'
+import { textColorValues, highlightColorValues, ensureIsolatedInlineSpan, setTextDecorationToken } from '../utils/textStyle'
 
 const props = defineProps({
   visible: {
     type: Boolean,
     default: false
+  },
+  positionMode: {
+    type: String,
+    default: 'absolute' // 'absolute' | 'fixed'
   },
   // 获取思维导图实例的函数（用于直接取 richText.quill，不再依赖从未设置的 DOM.__quill）
   getMindMap: {
@@ -332,6 +339,153 @@ const getQuill = () => {
   return null
 }
 
+// ============ DOM Range 内联样式（大纲 contenteditable 专用） ============
+// document.execCommand 在复杂富文本 contenteditable 中会不稳定，甚至把样式
+// 应用到整个节点；这里直接拆分选区文本节点并写内联样式，确保只改选中片段。
+const collectSelectedTextNodes = () => {
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return null
+  const range = sel.getRangeAt(0)
+  if (range.collapsed) return null
+  const root = range.commonAncestorContainer
+  const walkRoot = root && root.nodeType === 3 ? root.parentElement : root
+  if (!walkRoot) return null
+  const textNodes = []
+  const walker = document.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT)
+  while (walker.nextNode()) {
+    const tn = walker.currentNode
+    if (!tn.nodeValue || !tn.nodeValue.length) continue
+    let start = 0
+    let end = tn.nodeValue.length
+    let included = false
+    if (tn === range.startContainer && tn === range.endContainer) {
+      start = range.startOffset
+      end = range.endOffset
+      included = start < end
+    } else if (tn === range.startContainer) {
+      start = range.startOffset
+      end = tn.nodeValue.length
+      included = start < end
+    } else if (tn === range.endContainer) {
+      start = 0
+      end = range.endOffset
+      included = start < end
+    } else {
+      // 只有完全落在选区内部的文本节点才处理，避免把紧邻选区的相邻文字一并改样式
+      try {
+        included = range.comparePoint(tn, 0) >= 0 && range.comparePoint(tn, tn.nodeValue.length) <= 0
+      } catch (e) {
+        included = range.intersectsNode(tn)
+      }
+    }
+    if (!included || start >= end) continue
+    try {
+      textNodes.push({ tn, start, end })
+    } catch (e) {}
+  }
+  return textNodes.length ? textNodes : null
+}
+
+const splitTextNodeForRange = (item) => {
+  let node = item.tn
+  if (item.end < node.nodeValue.length) node.splitText(item.end)
+  if (item.start > 0) node = node.splitText(item.start)
+  return node
+}
+
+const applyDomInlineStyles = (styles) => {
+  const items = collectSelectedTextNodes()
+  if (!items || !items.length || !styles.length) return false
+  let changed = 0
+  let lastEl = null
+  for (const item of items) {
+    if (item.start >= item.end) continue
+    try {
+      const node = splitTextNodeForRange(item)
+      const el = ensureIsolatedInlineSpan(node)
+      lastEl = el
+      for (const [prop, value] of styles) {
+        if (value === false || value === null || value === '') {
+          el.style.removeProperty(prop)
+        } else {
+          el.style.setProperty(prop, value)
+        }
+      }
+      changed++
+    } catch (e) {}
+  }
+  if (lastEl) {
+    try {
+      const sel = window.getSelection()
+      const range = document.createRange()
+      range.selectNodeContents(lastEl)
+      range.collapse(false)
+      sel.removeAllRanges()
+      sel.addRange(range)
+    } catch (e) {}
+  }
+  return changed > 0
+}
+
+const applyDomDecorationToggle = (token, add) => {
+  const items = collectSelectedTextNodes()
+  if (!items || !items.length) return false
+  let changed = 0
+  let lastEl = null
+  for (const item of items) {
+    if (item.start >= item.end) continue
+    try {
+      const node = splitTextNodeForRange(item)
+      const el = ensureIsolatedInlineSpan(node)
+      lastEl = el
+      setTextDecorationToken(el, token, add)
+      changed++
+    } catch (e) {}
+  }
+  if (lastEl) {
+    try {
+      const sel = window.getSelection()
+      const range = document.createRange()
+      range.selectNodeContents(lastEl)
+      range.collapse(false)
+      sel.removeAllRanges()
+      sel.addRange(range)
+    } catch (e) {}
+  }
+  return changed > 0
+}
+
+const applyDomFontSize = (value) => {
+  const styles = value ? [['font-size', value]] : [['font-size', false]]
+  return applyDomInlineStyles(styles)
+}
+
+const execDomCommand = (command) => {
+  if (command === 'bold') {
+    const add = !document.queryCommandState('bold')
+    applyDomInlineStyles([['font-weight', add ? 'bold' : 'normal']])
+  } else if (command === 'italic') {
+    const add = !document.queryCommandState('italic')
+    applyDomInlineStyles([['font-style', add ? 'italic' : 'normal']])
+  } else if (command === 'underline') {
+    const add = !document.queryCommandState('underline')
+    applyDomDecorationToggle('underline', add)
+  } else if (command === 'strikeThrough') {
+    const add = !document.queryCommandState('strikeThrough')
+    applyDomDecorationToggle('line-through', add)
+  } else if (command === 'removeFormat') {
+    applyDomInlineStyles([
+      ['font-weight', false],
+      ['font-style', false],
+      ['text-decoration-line', false],
+      ['color', false],
+      ['background-color', false],
+      ['font-size', false],
+      ['font-family', false]
+    ])
+  }
+}
+
 // 执行格式命令 —— 先恢复选区，再优先使用 Quill API，回退到 execCommand
 const exec = (command) => {
   restoreSelection()
@@ -350,7 +504,7 @@ const exec = (command) => {
       }
     }
   } else {
-    document.execCommand(command, false, null)
+    execDomCommand(command)
   }
   updateStates()
 }
@@ -396,9 +550,9 @@ const applyColor = (command, color) => {
     }
   } else {
     if (color) {
-      document.execCommand(command, false, color)
+      applyDomInlineStyles([[command === 'foreColor' ? 'color' : 'background-color', color]])
     } else {
-      document.execCommand('removeFormat', false, null)
+      applyDomInlineStyles([[command === 'foreColor' ? 'color' : 'background-color', false]])
     }
   }
 
@@ -425,8 +579,7 @@ const execFontSize = (s) => {
       setTimeout(() => { try { mm.render() } catch (e) {} }, 0)
     }
   } else {
-    const sizeMap = { small: '2', normal: '3', large: '5', huge: '6' }
-    document.execCommand('fontSize', false, sizeMap[s.value] || '3')
+    applyDomFontSize(s.value === 'normal' ? '' : s.px + 'px')
   }
   sizeMenuOpen.value = false
   updateStates()
@@ -491,10 +644,6 @@ const updatePosition = () => {
   const range = sel.getRangeAt(0)
   const selRect = getRectForPosition(range)
   if (!selRect) return
-
-  const offsetParent = toolbar.offsetParent
-  if (!offsetParent) return
-  const parentRect = offsetParent.getBoundingClientRect()
 
   const tbRect = toolbar.getBoundingClientRect()
   const tbHeight = tbRect.height
@@ -568,8 +717,11 @@ const updatePosition = () => {
     pick = fallbacks.find(c => candidateOk(c, false))
   }
 
-  // 仍不可用则取默认候选（选区上方居中）并 clamp 进视口
-  if (!pick) pick = candidates[0]
+  // 仍不可用：顶部空间不足时强制放在选区下方，避免根节点场景工具条被吸到
+  // 视口顶部后覆盖住根节点文字，导致工具点不到。
+  if (!pick) {
+    pick = selRect.top < tbHeight + GAP + EDGE + 4 ? candidates[1] : candidates[0]
+  }
   let top = pick.top
   let left = pick.left
   if (top < EDGE) top = EDGE
@@ -577,8 +729,16 @@ const updatePosition = () => {
   if (left < EDGE) left = EDGE
   if (left + tbWidth > vw - EDGE) left = Math.max(EDGE, vw - tbWidth - EDGE)
 
-  toolbarStyle.top = `${Math.round(top - parentRect.top)}px`
-  toolbarStyle.left = `${Math.round(left - parentRect.left)}px`
+  if (props.positionMode === 'fixed') {
+    toolbarStyle.top = `${Math.round(top)}px`
+    toolbarStyle.left = `${Math.round(left)}px`
+  } else {
+    const offsetParent = toolbar.offsetParent
+    if (!offsetParent) return
+    const parentRect = offsetParent.getBoundingClientRect()
+    toolbarStyle.top = `${Math.round(top - parentRect.top)}px`
+    toolbarStyle.left = `${Math.round(left - parentRect.left)}px`
+  }
   toolbarStyle.transform = `translateX(${pick.x}) translateY(var(--tb-slide-y, 0px))`
 }
 
@@ -670,6 +830,10 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.06);
   user-select: none;
+}
+
+.text-toolbar.is-fixed {
+  position: fixed;
 }
 
 /* 按钮 */

@@ -456,6 +456,35 @@
       </div>
     </div>
 
+    <!-- 自定义工具目录 -->
+    <div id="sec-custom-tools" class="settings-section">
+      <h3>工具目录</h3>
+      <p class="vision-desc">
+        将自定义工具按规范放到工具目录后，AI 即可通过 list_custom_tools / call_custom_tool 调用。
+      </p>
+      <div class="profile-bar">
+        <el-button size="small" @click="openCustomToolsDir">打开工具目录</el-button>
+        <el-button size="small" @click="downloadCustomToolsSpec">下载编写规范</el-button>
+        <el-button size="small" @click="loadCustomTools">刷新工具</el-button>
+      </div>
+      <div v-if="customTools.length === 0" class="mcp-skill-row" style="padding: 12px 0; color: var(--text-secondary);">
+        暂未发现自定义工具。点击“下载编写规范”后按规范创建工具，再刷新即可。
+      </div>
+      <div v-for="t in customTools" :key="t.id" class="mcp-skill-row">
+        <div class="mcp-skill-name">
+          <span class="mcp-skill-title">{{ t.name || t.id }}</span>
+          <span class="mcp-skill-id">{{ t.id }}<template v-if="!t.hasScript"> · 缺少 tool.js</template></span>
+        </div>
+        <div class="mcp-skill-desc">{{ t.description || '无描述' }}</div>
+        <div class="skill-switches">
+          <span class="skill-switch-label">启用</span>
+          <el-switch v-model="t.enabled" size="small" disabled />
+          <span class="skill-switch-label">自动</span>
+          <el-switch v-model="t.autoInvoke" size="small" disabled />
+        </div>
+      </div>
+    </div>
+
     <!-- 三方集成：FeishuPanel 直接内嵌 -->
     <div id="sec-integrations" class="settings-section">
       <h3>三方集成</h3>
@@ -1490,6 +1519,43 @@ const removeSkill = async (id) => {
   try { await window.electronAPI.skills.remove(id); await loadSkills(); ElMessage.success('Skill 已删除') } catch (e) { ElMessage.error('删除失败: ' + e.message) }
 }
 
+// ========== 自定义工具目录管理 ==========
+const customTools = ref([])
+
+const loadCustomTools = async () => {
+  if (!window.electronAPI?.customTools?.list) return
+  try {
+    customTools.value = await window.electronAPI.customTools.list()
+  } catch (e) {
+    customTools.value = []
+  }
+}
+
+const openCustomToolsDir = async () => {
+  if (!window.electronAPI?.customTools?.openDir) return
+  try {
+    const res = await window.electronAPI.customTools.openDir()
+    if (res && !res.ok) ElMessage.error(`打开目录失败：${res.error || '未知错误'}`)
+  } catch (e) {
+    ElMessage.error('打开工具目录失败')
+  }
+}
+
+const downloadCustomToolsSpec = async () => {
+  if (!window.electronAPI?.customTools?.saveSpec) return
+  try {
+    const res = await window.electronAPI.customTools.saveSpec()
+    if (!res || !res.ok) {
+      ElMessage.error(`保存规范失败：${res?.error || '未知错误'}`)
+      return
+    }
+    ElMessage.success(`编写规范已保存到工具目录：${res.path}`)
+    await openCustomToolsDir()
+  } catch (e) {
+    ElMessage.error('下载编写规范失败')
+  }
+}
+
 // ========== 侧边目录导航 ==========
 const tocSections = [
   { id: 'sec-ai-config', label: 'AI 模型配置' },
@@ -1499,6 +1565,7 @@ const tocSections = [
   { id: 'sec-system', label: '系统' },
   { id: 'sec-mcp', label: 'MCP 服务' },
   { id: 'sec-skills', label: 'Skills' },
+  { id: 'sec-custom-tools', label: '工具目录' },
   { id: 'sec-integrations', label: '三方集成' },
   { id: 'sec-messages', label: '消息中心' },
   { id: 'sec-about', label: '关于' }
@@ -1540,6 +1607,7 @@ onMounted(() => {
   loadHttpServer()
   loadMcp()
   loadSkills()
+  loadCustomTools()
   setupTocObserver()
 })
 

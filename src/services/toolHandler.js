@@ -173,6 +173,8 @@ const toolCatalog = [
   { name: 'list_mcp_servers', category: 'MCP', desc: 'List configured MCP servers (id, name, transport, url/command, enabled)' },
   { name: 'list_mcp_tools', category: 'MCP', desc: 'List tools exposed by one MCP server' },
   { name: 'mcp_call_tool', category: 'MCP', desc: 'Call a tool on a configured MCP server' },
+  { name: 'list_custom_tools', category: 'Custom', desc: 'List custom tools placed in the custom-tools directory' },
+  { name: 'call_custom_tool', category: 'Custom', desc: 'Call a custom tool by id' },
   { name: 'list_skills', category: 'Skills', desc: 'List saved skills (name, description, enabled, autoInvoke)' },
   { name: 'get_skill', category: 'Skills', desc: 'Get one saved skill including its full instructions' },
   { name: 'invoke_skill', category: 'Skills', desc: 'Invoke a saved skill by returning its full instructions for immediate execution' },
@@ -199,6 +201,7 @@ const toolCatalog = [
   { name: 'export_to_markdown', category: 'Export', desc: 'SMM to Markdown: export the whole map as a .md file (default save dir)' },
   { name: 'export_mindmap_pdf', category: 'Export', desc: 'Map to PDF: export the whole mindmap (canvas graphic) as a .pdf file (default save dir)' },
   { name: 'export_outline_pdf', category: 'Export', desc: 'Outline to PDF: typeset the indented outline text into a PDF doc (default save dir), good for printing' },
+  { name: 'save_text_file', category: 'Export', desc: 'Save arbitrary generated text/markdown/HTML/JSON content directly to the default save dir. Use whenever the AI has composed a document (e.g. quiz HTML) that should be exported as a file instead of printed in chat' },
   { name: 'find_related', category: 'KB', desc: 'Related content: find things related to a keyword in the local KB and current map, and suggest how to link them into the current map' },
   { name: 'memory', category: 'Memory', desc: 'Long-term memory: save (only for explicit long-term intent), get (list all), forget (delete by id)' },
   { name: 'read_local_file', category: 'KB', desc: 'Read a local document in full: txt/md/json direct, docx/pdf text extraction, images auto-OCR, .smm to outline text; required when analyzing local files the user references' },
@@ -277,6 +280,8 @@ export const CORE_TOOL_NAMES = [
   'list_mcp_servers',
   'list_mcp_tools',
   'mcp_call_tool',
+  'list_custom_tools',
+  'call_custom_tool',
   'list_skills',
   'get_skill',
   'invoke_skill',
@@ -288,6 +293,7 @@ export const CORE_TOOL_NAMES = [
   'read_local_file',
   'retrieve_local_file',
   'find_local_file',
+  'save_text_file',
   // 搜索
   'search_knowledge_base',
   'read_node_image',
@@ -964,6 +970,23 @@ export const aiTools = [
   {
     type: 'function',
     function: {
+      name: 'save_text_file',
+      description: 'Save any AI-generated document content (HTML/Markdown/plain text/JSON/CSV) directly to the default save dir. Use whenever the user asks to export generated content as a file, especially custom HTML documents, quiz pages, or reports that are not natively supported by other export tools. Always return the saved filePath.',
+      parameters: {
+        type: 'object',
+        properties: {
+          content: { type: 'string', description: 'Full file content to save' },
+          file_name: { type: 'string', description: 'File name WITHOUT extension, e.g. 马克思教材自测题' },
+          extension: { type: 'string', enum: ['html', 'md', 'txt', 'json', 'csv'], description: 'File extension; default html' },
+          overwrite: { type: 'boolean', description: 'true=overwrite if same file exists; default true' }
+        },
+        required: ['content', 'file_name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'batch_node_actions',
       description: 'First choice for multi-node tasks: finish in ONE call (never loop select_node). Each step picks nodes via targets; ops per step: set_style, text_style, ai_cloze, wrap_text, update_texts, replace_text. Multiple steps run in order. Example: steps=[{targets:{mode:"leaf_parents"},set_style:{textColor:"#ff3b30"}},{targets:{mode:"leaves"},ai_cloze:true}].',
       parameters: {
@@ -1093,13 +1116,15 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'search_nodes',
-      description: 'Search nodes in the mindmap containing the given keyword; each result carries the node path, uid, parentPath and parentUid (parent info included so no second lookup is needed)',
+      description: 'Search nodes containing one or more keywords in ONE call (use keywords array to avoid repeated search_nodes). Each result carries node path, uid, parentPath and parentUid. mode=all requires all keywords, mode=any (default) returns nodes matching any keyword.',
       parameters: {
         type: 'object',
         properties: {
-          keyword: { type: 'string', description: 'Search keyword' }
-        },
-        required: ['keyword']
+          keyword: { type: 'string', description: 'Single search keyword' },
+          keywords: { type: 'array', items: { type: 'string' }, description: 'Multiple search keywords; preferred over repeated calls' },
+          mode: { type: 'string', enum: ['any', 'all'], description: 'any=match any keyword (default); all=match all keywords' },
+          max_results: { type: 'number', description: 'Maximum results to return, default 200' }
+        }
       }
     }
   },
@@ -2023,6 +2048,29 @@ export const aiTools = [
           arguments: { type: 'object', description: 'Tool arguments object' }
         },
         required: ['serverId', 'toolName']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_custom_tools',
+      description: 'List custom tools from the custom-tools directory. Returns id, name, description, category, enabled, autoInvoke, parameters, hasScript.',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'call_custom_tool',
+      description: 'Call a custom tool by id. Arguments must match the tool\'s parameters schema from list_custom_tools. Use this for user-added tools.',
+      parameters: {
+        type: 'object',
+        properties: {
+          toolId: { type: 'string', description: 'Custom tool id from list_custom_tools' },
+          arguments: { type: 'object', description: 'Tool arguments object' }
+        },
+        required: ['toolId']
       }
     }
   },
@@ -4030,15 +4078,24 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
       try {
         if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
         const treeData = mindMap.getData()
-        const keyword = normalizeForMatch(args.keyword || '')
+        const rawKeywords = []
+        if (args.keyword) rawKeywords.push(String(args.keyword))
+        if (Array.isArray(args.keywords)) args.keywords.forEach((k) => rawKeywords.push(String(k)))
+        const keywords = [...new Set(rawKeywords.map((k) => normalizeForMatch(k)).filter(Boolean))]
+        if (!keywords.length) return { success: false, message: '请至少提供一个 keyword 或 keywords 参数' }
+        const mode = args.mode === 'all' ? 'all' : 'any'
+        const maxResults = Math.min(Math.max(Number(args.max_results) || 200, 1), 1000)
         const results = []
         function traverse(node, parents) {
-        const rawText = node.data?.text || node.text || ''
-        const plain = rawText.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim()
-        // 关键词已被 normalizeForMatch 去掉全部空白，节点文本也必须同样归一化后匹配，
-        // 否则含空格的检索词（如“第一章 世界的物质性及发展规律”）会因空格差异而漏配
-        const text = normalizeForMatch(rawText)
-        if (keyword && text.includes(keyword)) {
+          const rawText = node.data?.text || node.text || ''
+          const plain = rawText.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim()
+          // 关键词已被 normalizeForMatch 去掉全部空白，节点文本也必须同样归一化后匹配，
+          // 否则含空格的检索词（如“第一章 世界的物质性及发展规律”）会因空格差异而漏配
+          const text = normalizeForMatch(rawText)
+          const matched = mode === 'all'
+            ? keywords.every((keyword) => text.includes(keyword))
+            : keywords.some((keyword) => text.includes(keyword))
+          if (matched && results.length < maxResults) {
             const uid = node.data?.uid || node.uid
             // 直接用递归路径拼接，避免命中多时 getNodePath 全树 O(n) 遍历导致 O(n²)
             const path = parents.map(p => p.text).concat([plain]).join(' > ')
@@ -4053,7 +4110,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         return {
           success: true,
           message: results.length
-            ? `找到 ${results.length} 个匹配节点：\n${results.map((r, i) => `${i + 1}. ${r.path}${r.uid ? `（uid: ${r.uid}）` : ''}`).join('\n')}`
+            ? `找到 ${results.length} 个匹配节点${results.length >= maxResults ? '（已达 max_results 上限）' : ''}：\n${results.map((r, i) => `${i + 1}. ${r.path}${r.uid ? `（uid: ${r.uid}）` : ''}`).join('\n')}`
             : '未找到匹配的节点',
           results
         }
@@ -6417,6 +6474,31 @@ ${block}`
       } catch (e) { return { success: false, message: `MCP 调用失败: ${e.message}` } }
     }
 
+    case 'list_custom_tools': {
+      try {
+        const list = await window.electronAPI?.customTools?.list?.() || []
+        return {
+          success: true,
+          message: list.length
+            ? `发现 ${list.length} 个自定义工具：\n${list.map((t, i) => `${i + 1}. ${t.name || t.id}（id=${t.id}，${t.enabled === false ? '停用' : '启用'}，${t.autoInvoke === true ? '自动调用' : '手动调用'}）${t.description ? '：' + t.description : ''}`).join('\n')}`
+            : '尚未发现自定义工具。',
+          tools: list
+        }
+      } catch (e) { return { success: false, message: `读取自定义工具失败: ${e.message}` } }
+    }
+
+    case 'call_custom_tool': {
+      try {
+        if (!args.toolId) return { success: false, message: '请提供 toolId' }
+        if (!window.electronAPI?.customTools?.call) return { success: false, message: '自定义工具调用功能不可用' }
+        const result = await window.electronAPI.customTools.call(args.toolId, args.arguments || {})
+        if (result && result.success === false) {
+          return { success: false, message: result.message || '自定义工具执行失败', result }
+        }
+        return { success: true, message: result?.message || JSON.stringify(result), result }
+      } catch (e) { return { success: false, message: `自定义工具调用失败: ${e.message}` } }
+    }
+
     case 'list_skills': {
       try {
         const list = await window.electronAPI?.skills?.list?.() || []
@@ -7707,6 +7789,28 @@ ${block}`
         }
       } catch (e) {
         return { success: false, message: `格式刷失败: ${e.message}` }
+      }
+    }
+
+    case 'save_text_file': {
+      try {
+        if (!window.electronAPI?.saveFile) return { success: false, message: '文件保存接口不可用（需在应用内运行）' }
+        const content = String(args.content ?? '')
+        if (!content) return { success: false, message: 'content 不能为空' }
+        const rawName = String(args.file_name || '').trim() || '未命名文件'
+        const ext = String(args.extension || 'html').replace(/^\./, '').toLowerCase() || 'html'
+        const safeName = rawName.slice(0, 80).replace(/[\\/:*?"<>|]/g, '_').trim() || '未命名文件'
+        const fileName = `${safeName}.${ext}`
+        const result = await window.electronAPI.saveFile(fileName, content, { overwrite: args.overwrite !== false })
+        if (!result?.success) return { success: false, message: `保存失败：${result?.error || '未知错误'}` }
+        return {
+          success: true,
+          message: `已保存文件：${result.filePath}`,
+          filePath: result.filePath,
+          fileName
+        }
+      } catch (e) {
+        return { success: false, message: `保存文本文件失败: ${e.message}` }
       }
     }
 

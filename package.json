@@ -44,7 +44,9 @@
     "productName": "my-mindmap agent",
     "files": [
       "dist/**/*",
-      "electron/**/*"
+      "electron/**/*",
+      "docs/**/*",
+      "custom-tools/**/*"
     ],
     "directories": {
       "output": "release"

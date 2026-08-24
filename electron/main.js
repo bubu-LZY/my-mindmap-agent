@@ -77,6 +77,7 @@ const wechatBotModule = require('./ipc/wechat')
 const httpServerModule = require('./ipc/httpServer')
 require('./ipc/mcpManager')
 require('./ipc/skillsManager')
+require('./ipc/customTools')
 
 // 在默认浏览器中打开 URL
 ipcMain.handle('open-external', async (event, url) => {
