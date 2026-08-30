@@ -1,5 +1,7 @@
 # my-mindmap agent
-
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bubu-LZY/my-mindmap-agent/main/docs/assets/icon.png" alt="欢迎页：My-mindmap 智能体 + 思维导图" width="96" />
+</p>
 > 基于思维导图（simple-mind-map）与大纲的 **AI 智能体桌面应用**。
 > 用 AI 生成、整理、扩展、复习你的知识图谱，并支持联网搜索、飞书/微信推送、定时任务、关联图、分屏对比与复习计划。
 
@@ -28,8 +30,6 @@
 ## 程序截图
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/bubu-LZY/my-mindmap-agent/main/docs/assets/icon.png" alt="欢迎页：My-mindmap 智能体 + 思维导图" width="96" />
-  &nbsp;&nbsp;&nbsp;&nbsp;
   <img src="https://raw.githubusercontent.com/bubu-LZY/my-mindmap-agent/main/docs/assets/screenshot-1-mindmap.png" alt="主界面：思维导图 + AI 助手" width="540" />
 </p>
 
