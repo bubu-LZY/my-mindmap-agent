@@ -3,7 +3,7 @@
 > 基于思维导图（simple-mind-map）与大纲的 **AI 智能体桌面应用**。
 > 用 AI 生成、整理、扩展、复习你的知识图谱，并支持联网搜索、飞书/微信推送、定时任务、关联图、分屏对比与复习计划。
 
-> 💙 **特别致谢**：本项目的思维导图内核由开源项目 **[Simple Mind Map（思绪思维导图）](https://github.com/wanglin2/mind-map)** 强力驱动，感谢作者 **wanglin2** 及所有贡献者的卓越工作，让一个轻量而强大的思维导图引擎得以自由生长。本项目在 MIT 协议下复用其内核并扩展出 AI 智能体能力。
+> 💙 **特别致谢**：本项目的思维导图内核由开源项目 **[Simple Mind Map（思绪思维导图）](https://github.com/wanglin2/mind-map)** 强力驱动，感谢作者 **wanglin2** 及所有贡献者的卓越工作，让一个轻量而强大的思维导图引擎得以自由生长。本项目在 MIT 协议下复用其内核并扩展出 AI 智能体能力。此外，本项目还广泛借用了众多优秀的开源项目（详见下方「致谢与开源依赖」），在此一并致谢。
 
 ![platform](https://img.shields.io/badge/platform-Windows-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -241,6 +241,51 @@ npm run electron:build
 
 ---
 
-## 八、许可证
+## 八、致谢与开源依赖
+
+本项目并非从零造轮子，而是站在众多优秀开源项目的肩膀上。除思维导图内核 **Simple Mind Map** 外，还广泛借用了以下开源项目（排名不分先后，按用途归类）：
+
+**核心框架与 UI**
+- **[Vue 3](https://github.com/vuejs/core)** / **[Pinia](https://github.com/vuejs/pinia)** —— 前端框架与状态管理
+- **[Element Plus](https://github.com/element-plus/element-plus)** / **[@element-plus/icons-vue](https://github.com/element-plus/element-plus)** —— Vue 3 组件库与图标
+- **[Vite](https://github.com/vitejs/vite)** / **[@vitejs/plugin-vue](https://github.com/vitejs/vite)** —— 构建与开发服务器
+- **[Electron](https://electronjs.org/)** / **[electron-builder](https://github.com/electron-userland/electron-builder)** —— 跨平台桌面封装与安装包构建
+- **[electron-store](https://github.com/sindresorhus/electron-store)** —— 本地配置存储
+
+**思维导图与图形**
+- **[Simple Mind Map（思绪思维导图）](https://github.com/wanglin2/mind-map)** —— 思维导图渲染内核（MIT）
+- **[force-graph](https://github.com/vasturiano/force-graph)** —— 关联图（Graph View）的力导向图渲染
+- **[SVG.js](https://github.com/svgdotjs/svg.js)** —— SVG 矢量绘制
+
+**文档 / 表格 / 文件解析**
+- **[PDF.js（pdfjs-dist）](https://github.com/mozilla/pdf.js)** —— PDF 渲染与解析（Mozilla，Apache-2.0）
+- **[Tesseract.js](https://github.com/naptha/tesseract.js)** —— OCR 文字识别（Apache-2.0）
+- **[JSZip](https://github.com/Stuk/jszip)** —— ZIP 压缩与解压
+- **[SheetJS（xlsx）](https://github.com/SheetJS/sheetjs)** —— Excel 读写
+- **[ExcelJS](https://github.com/exceljs/exceljs)** —— Excel 流式读写
+- **[mammoth](https://github.com/mwilliamson/mammoth.js)** —— Word（.docx）转 HTML
+- **[PapaParse](https://github.com/mholt/PapaParse)** —— CSV 解析
+- **[unpdf](https://github.com/undb-io/unpdf)** / **[pdfjs 相关工具链](https://github.com/mozilla/pdf.js)** —— PDF 文本抽取
+
+**数据 / 搜索 / 通信**
+- **[sql.js](https://github.com/sql-js/sql.js)** —— SQLite 编译为 WASM 的本地数据库
+- **[MiniSearch](https://github.com/lucaong/minisearch)** —— 轻量全文搜索引擎
+- **[ws](https://github.com/websockets/ws)** —— WebSocket 实时通信
+- **[Tribute.js](https://github.com/zurb/tribute)** —— @ 提及与自动补全
+- **[qrcode](https://github.com/soldair/node-qrcode)** —— 二维码生成
+- **[飞书开放平台 Node SDK（@larksuiteoapi/node-sdk）](https://github.com/larksuite/oapi-sdk-node)** —— 飞书集成
+
+**AI / 模型相关**
+- **[@huggingface/transformers](https://github.com/huggingface/transformers.js)** —— 本地 Transformer 推理（嵌入式向量等）
+
+**辅助工具链**
+- **[sharp](https://github.com/lovell/sharp)** / **[png-to-ico](https://github.com/kevva/png-to-ico)** —— 图像处理与图标生成
+- **[concurrently](https://github.com/open-cli-tools/concurrently)** / **[cross-env](https://github.com/kentcdodds/cross-env)** / **[wait-on](https://github.com/jeffbski/wait-on)** —— 开发脚本编排
+
+> 本项目以 MIT 协议开源，对所有上游开源作者与社区致以诚挚谢意。如有遗漏的开源依赖，欢迎在 Issues 中指出补充。
+
+---
+
+## 九、许可证
 
 本项目以 **MIT License** 开源，仅供学习与交流使用。

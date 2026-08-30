@@ -1022,11 +1022,29 @@ html, body {
   <!-- Footer -->
   <div class="footer" id="f-thanks">
     <div class="credit-block">
-      本项目以 MIT 协议开源。思维导图渲染引擎来自
+      本项目以 <strong>MIT 协议</strong> 开源，并非从零造轮子，而是广泛借用了众多优秀的开源项目：
+      <br/><br/>
+      思维导图渲染内核来自
       <a href="https://github.com/wanglin2/mind-map" target="_blank" rel="noopener">Simple Mind Map（思绪思维导图）</a>
       —— 感谢作者
       <a href="https://github.com/wanglin2" target="_blank" rel="noopener">@wanglin2</a>
-      的卓越工作和开源精神，让这个轻量而强大的引擎得以在 AI 智能体场景中继续生长。
+      的卓越工作和开源精神；关联图视图由
+      <a href="https://github.com/vasturiano/force-graph" target="_blank" rel="noopener">force-graph</a>
+      驱动；PDF 解析借助 Mozilla 的
+      <a href="https://github.com/mozilla/pdf.js" target="_blank" rel="noopener">PDF.js</a>，OCR 由
+      <a href="https://github.com/naptha/tesseract.js" target="_blank" rel="noopener">Tesseract.js</a>
+      提供；本地数据库基于
+      <a href="https://github.com/sql-js/sql.js" target="_blank" rel="noopener">sql.js</a>，全文检索用
+      <a href="https://github.com/lucaong/minisearch" target="_blank" rel="noopener">MiniSearch</a>；
+      前端框架为 <a href="https://github.com/vuejs/core" target="_blank" rel="noopener">Vue 3</a> +
+      <a href="https://github.com/element-plus/element-plus" target="_blank" rel="noopener">Element Plus</a> +
+      <a href="https://github.com/vuejs/pinia" target="_blank" rel="noopener">Pinia</a>，桌面封装用
+      <a href="https://electronjs.org/" target="_blank" rel="noopener">Electron</a> /
+      <a href="https://github.com/electron-userland/electron-builder" target="_blank" rel="noopener">electron-builder</a>，
+      构建工具 <a href="https://github.com/vitejs/vite" target="_blank" rel="noopener">Vite</a>。
+      此外还受益于 SVG.js、JSZip、SheetJS、ExcelJS、mammoth、PapaParse、ws、Tribute.js、qrcode、
+      @larksuiteoapi/node-sdk、@huggingface/transformers、sharp 等一众开源项目。
+      向所有上游作者与开源社区致以诚挚谢意。
     </div>
     <div class="links">
       <a href="https://github.com/bubu-LZY/my-mindmap-agent" target="_blank" rel="noopener">🐙 项目仓库</a>
