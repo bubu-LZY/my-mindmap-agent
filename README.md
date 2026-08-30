@@ -38,7 +38,7 @@
 </p>
 
 <p align="center">
-  <em>左：应用图标&nbsp;&nbsp;·&nbsp;&nbsp;右上：主界面（画布 + AI 助手同屏）&nbsp;&nbsp;·&nbsp;&nbsp;下：设置面板（飞书 / 微信三方链接）</em>
+ 
 </p>
 
 更多功能与详情请查看项目介绍页：
