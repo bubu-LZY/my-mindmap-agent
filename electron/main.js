@@ -769,6 +769,20 @@ function createWindow() {
   })
 }
 
+// 软重启：渲染层点击「保存并刷新界面」后调用。用主进程 webContents.reload 更可靠，
+// 避免 location.reload 在 beforeunload 被静默取消后表现为「点了没反应」。
+ipcMain.handle('app:reload-ui', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.reload()
+      return true
+    } catch (e) {
+      return false
+    }
+  }
+  return false
+})
+
 // ============ 单实例锁 ============
 // 防止定时任务（schtasks）触发时开出第二个窗口：
 // 拿不到锁的实例直接退出；由已运行的第一实例在 second-instance 事件中

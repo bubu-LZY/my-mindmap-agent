@@ -8,7 +8,7 @@ import pngToIco from 'png-to-ico';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const SRC = process.argv[2] || path.join(ROOT, 'public', 'icon.png');
+const SRC = ''; // TODO: 放置你的图标源图片（圆角矩形 PNG）绝对路径，留空则跳过图标生成
 const OUT_DIR = path.join(ROOT, 'electron', 'icons');
 
 const CANVAS = 256;               // 主图尺寸

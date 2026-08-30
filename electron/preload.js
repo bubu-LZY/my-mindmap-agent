@@ -20,6 +20,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 在默认浏览器中打开 URL
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
+  // 软重启界面（保存并刷新）
+  reloadUI: () => ipcRenderer.invoke('app:reload-ui'),
+
   // 文件管理（旧接口，保留兼容）
   saveFile: (filename, data, opts) => ipcRenderer.invoke('save-file', { filename, data, overwrite: !!(opts && opts.overwrite) }),
   saveBinaryFile: (filename, base64) => ipcRenderer.invoke('save-binary-file', { filename, base64 }),

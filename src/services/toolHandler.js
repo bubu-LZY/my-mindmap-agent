@@ -261,8 +261,10 @@ const toolCatalog = [
   { name: 'list_mcp_servers', category: 'MCP', desc: 'List configured MCP servers (id, name, transport, url/command, enabled)' },
   { name: 'list_mcp_tools', category: 'MCP', desc: 'List tools exposed by one MCP server' },
   { name: 'mcp_call_tool', category: 'MCP', desc: 'Call a tool on a configured MCP server' },
+  { name: 'update_mcp_server', category: 'MCP', desc: 'Update a configured MCP server (name/url/command/args/env/headers/enabled/transport)' },
   { name: 'list_custom_tools', category: 'Custom', desc: 'List custom tools placed in the custom-tools directory' },
   { name: 'call_custom_tool', category: 'Custom', desc: 'Call a custom tool by id' },
+  { name: 'update_custom_tool', category: 'Custom', desc: 'Update a custom tool (name/description/enabled/autoInvoke)' },
   { name: 'list_skills', category: 'Skills', desc: 'List saved skills (name, description, enabled, autoInvoke)' },
   { name: 'get_skill', category: 'Skills', desc: 'Get one saved skill including its full instructions' },
   { name: 'invoke_skill', category: 'Skills', desc: 'Invoke a saved skill by returning its full instructions for immediate execution' },
@@ -551,8 +553,10 @@ export const CORE_TOOL_NAMES = [
   'list_mcp_servers',
   'list_mcp_tools',
   'mcp_call_tool',
+  'update_mcp_server',
   'list_custom_tools',
   'call_custom_tool',
+  'update_custom_tool',
   'list_skills',
   'get_skill',
   'invoke_skill',
@@ -2361,6 +2365,27 @@ export const aiTools = [
   {
     type: 'function',
     function: {
+      name: 'update_mcp_server',
+      description: 'Update a configured MCP server (e.g. change its URL/port, command, args, headers, or enable/disable). Only provided fields are changed; others stay.',
+      parameters: {
+        type: 'object',
+        properties: {
+          serverId: { type: 'string', description: 'MCP server id from list_mcp_servers' },
+          name: { type: 'string', description: 'New display name (optional)' },
+          url: { type: 'string', description: 'New URL for http/sse transport (optional)' },
+          command: { type: 'string', description: 'New command for stdio transport (optional)' },
+          args: { type: 'array', items: { type: 'string' }, description: 'New args for stdio transport (optional)' },
+          env: { type: 'object', description: 'New env vars (optional)' },
+          headers: { type: 'object', description: 'New headers (optional)' },
+          enabled: { type: 'boolean', description: 'Enable or disable (optional)' }
+        },
+        required: ['serverId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'list_custom_tools',
       description: 'List custom tools from the custom-tools directory. Returns id, name, description, category, enabled, autoInvoke, parameters, hasScript.',
       parameters: { type: 'object', properties: {} }
@@ -2376,6 +2401,24 @@ export const aiTools = [
         properties: {
           toolId: { type: 'string', description: 'Custom tool id from list_custom_tools' },
           arguments: { type: 'object', description: 'Tool arguments object' }
+        },
+        required: ['toolId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_custom_tool',
+      description: 'Update a custom tool by id (name/description/enabled/autoInvoke). Only provided fields are changed. Use when the user asks to change a saved tool.',
+      parameters: {
+        type: 'object',
+        properties: {
+          toolId: { type: 'string', description: 'Custom tool id from list_custom_tools' },
+          name: { type: 'string', description: 'New display name (optional)' },
+          description: { type: 'string', description: 'New description (optional)' },
+          enabled: { type: 'boolean', description: 'Enable or disable (optional)' },
+          autoInvoke: { type: 'boolean', description: 'Auto-invoke flag (optional)' }
         },
         required: ['toolId']
       }
@@ -7254,6 +7297,20 @@ ${block}`
       } catch (e) { return { success: false, message: `MCP 调用失败: ${e.message}` } }
     }
 
+    case 'update_mcp_server': {
+      try {
+        if (!args.serverId) return { success: false, message: '请提供 serverId' }
+        if (!window.electronAPI?.mcp?.update) return { success: false, message: 'MCP 更新功能不可用' }
+        const patch = {}
+        for (const k of ['name', 'url', 'command', 'args', 'env', 'headers', 'enabled', 'transport']) {
+          if (args[k] !== undefined) patch[k] = args[k]
+        }
+        if (!Object.keys(patch).length) return { success: false, message: '没有提供任何要更新的字段' }
+        const server = await window.electronAPI.mcp.update(args.serverId, patch)
+        return { success: true, message: `已更新 MCP 服务「${server.name}」`, server }
+      } catch (e) { return { success: false, message: `更新 MCP 服务失败: ${e.message}` } }
+    }
+
     case 'list_custom_tools': {
       try {
         const list = await window.electronAPI?.customTools?.list?.() || []
@@ -7281,6 +7338,20 @@ ${block}`
         }
         return { success: true, message: result?.message || JSON.stringify(result), result }
       } catch (e) { return { success: false, message: `自定义工具调用失败: ${e.message}` } }
+    }
+
+    case 'update_custom_tool': {
+      try {
+        if (!args.toolId) return { success: false, message: '请提供 toolId' }
+        if (!window.electronAPI?.customTools?.update) return { success: false, message: '自定义工具更新功能不可用' }
+        const patch = {}
+        for (const k of ['name', 'description', 'enabled', 'autoInvoke']) {
+          if (args[k] !== undefined) patch[k] = args[k]
+        }
+        if (!Object.keys(patch).length) return { success: false, message: '没有提供任何要更新的字段' }
+        const tool = await window.electronAPI.customTools.update(args.toolId, patch)
+        return { success: true, message: `已更新自定义工具「${tool.name || tool.id}」`, tool }
+      } catch (e) { return { success: false, message: `更新自定义工具失败: ${e.message}` } }
     }
 
     case 'list_skills': {
@@ -7940,6 +8011,11 @@ ${block}`
       try {
         const filePath = String(args.file_path || args.filePath || '').trim()
         if (!filePath) return { success: false, message: '请提供 file_path（文件绝对路径）' }
+        // 安全防护：禁止读取应用自身的敏感配置文件（config.json 含 API 密钥、飞书 appSecret、微信/机器人 token 等）
+        const _base = filePath.split(/[/\\]/).pop().toLowerCase()
+        if (_base === 'config.json') {
+          return { success: false, message: '该文件是应用自身的敏感配置（含 API 密钥、机器人令牌等），禁止 AI 读取。如需修改模型/MCP/工具配置，请使用专用工具（list_mcp_servers / update_mcp_server / list_custom_tools / update_custom_tool）。' }
+        }
         // 模型容易把网页链接误传给“读本地文件”：自动改走网页正文读取，避免无意义失败。
         if (/^https?:\/\//i.test(filePath)) {
           const page = await readWebpage(filePath)
@@ -9025,11 +9101,21 @@ ${block}`
 
         const recursive = args.recursive === true
 
+        // 系统/缓存目录黑名单：递归遍历时跳过这些 Chromium/Electron 缓存目录，避免卡顿
+        const SKIP_DIRS = new Set([
+          'cache', 'code cache', 'gpucache', 'local storage', 'session storage',
+          'service worker', 'cachestorage', 'network', 'shared dictionary', 'webstorage',
+          'blob_storage', 'dawncache', 'dictionaries', 'leveldb', 'index-dir',
+          'mcp-runtime', 'databases', 'cache_data', 'js', 'wasm', 'snapshot_blob_storage'
+        ])
+
         // 递归列出某目录的条目。注意：fs:listDir 返回的是扁平数组（元素含 isDir 字段），不是 {dirs, files} 对象
         const walkDir = async (d, out, depth) => {
           const list = await fsApi.listDir(d)
           const entries = Array.isArray(list) ? list : []
           for (const e of entries) {
+            // 跳过系统缓存目录（顶层也不列出，避免污染目录树）
+            if (e.isDir && SKIP_DIRS.has((e.name || '').toLowerCase())) continue
             out.push({ ...e, path: e.path || `${d.replace(/[\\/]+$/, '')}/${e.name}`, depth })
             if (recursive && e.isDir && depth < 12) {
               await walkDir(e.path || `${d.replace(/[\\/]+$/, '')}/${e.name}`, out, depth + 1)

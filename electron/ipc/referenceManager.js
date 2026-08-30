@@ -310,18 +310,19 @@ ipcMain.handle('ref:scanNodes', async (event, rootPath) => {
  */
 ipcMain.handle('ref:readFile', async (event, filePath) => {
   try {
-    assertSafePath(filePath)
-    if (!isPathAllowed(filePath)) {
-      return { success: false, error: '文件不在允许的读取范围内：' + filePath }
+    // 用 normalize 后的路径做白名单校验与 fs 操作，兼容正斜杠分隔的路径
+    const safePath = assertSafePath(filePath)
+    if (!isPathAllowed(safePath)) {
+      return { success: false, error: '文件不在允许的读取范围内：' + safePath }
     }
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(safePath)) {
       return { success: false, error: '文件不存在' }
     }
-    const content = await fs.promises.readFile(filePath, 'utf-8')
+    const content = await fs.promises.readFile(safePath, 'utf-8')
     let data
     let type = 'json'
 
-    if (filePath.endsWith('.md')) {
+    if (safePath.endsWith('.md')) {
       type = 'markdown'
       data = content
     } else {
@@ -334,7 +335,7 @@ ipcMain.handle('ref:readFile', async (event, filePath) => {
       }
     }
 
-    return { success: true, data, type, fileName: path.basename(filePath) }
+    return { success: true, data, type, fileName: path.basename(safePath) }
   } catch (error) {
     return { success: false, error: error.message }
   }

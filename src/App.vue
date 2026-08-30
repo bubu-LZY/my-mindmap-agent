@@ -1421,6 +1421,10 @@ const saveLayoutTemplate = () => {
 const restoreLayoutTemplate = async (tpl) => {
   if (!tpl || !tpl.layout) return
   try {
+    // 恢复前：把布局中所有文件的所在目录注册到白名单。
+    // refReadFile 受路径白名单约束，而白名单是内存态（仅含当前活跃文件目录）；
+    // 历史布局可能横跨多个目录，若不预先注册，跨目录文件会被拒读、pane 被静默丢弃导致布局折叠。
+    await registerLayoutDirs(tpl.layout)
     const root = await buildPaneTree(tpl.layout)
     if (!root) {
       ElMessage.warning('布局中的文件已不存在，无法恢复')
@@ -1433,6 +1437,32 @@ const restoreLayoutTemplate = async (tpl) => {
   } catch (e) {
     console.error('恢复布局失败:', e)
     ElMessage.error('恢复布局失败: ' + (e?.message || e))
+  }
+}
+
+// 收集布局树中所有文件所在目录，注册到主进程 fsGuard 白名单（供 refReadFile 跨目录读取）
+const registerLayoutDirs = async (node) => {
+  try {
+    if (!window.electronAPI?.fsGuard?.addAllowed) return
+    const dirs = new Set()
+    const collect = (n) => {
+      if (!n) return
+      if (n.kind === 'pane') {
+        const fp = n.fileId || n.filePath
+        if (!fp) return
+        const dir = fp.replace(/[\\/][^\\/]*$/, '')
+        if (dir && dir !== fp) dirs.add(dir)
+        return
+      }
+      ;(n.children || []).forEach(collect)
+    }
+    collect(node)
+    const arr = [...dirs].filter(Boolean)
+    if (arr.length) {
+      await window.electronAPI.fsGuard.addAllowed(arr)
+    }
+  } catch (e) {
+    console.warn('注册布局目录白名单失败（将回退到默认白名单）:', e)
   }
 }
 
@@ -3150,7 +3180,14 @@ const refreshUI = async () => {
   // 此时数据刚保存过，放行刷新没有丢失风险。
   allowReload = true
   ElMessage.info('正在刷新界面…')
-  setTimeout(() => location.reload(), 400)
+  // 优先走主进程 webContents.reload（更可靠）；不可用时退回 location.reload
+  if (window.electronAPI && typeof window.electronAPI.reloadUI === 'function') {
+    setTimeout(() => {
+      try { window.electronAPI.reloadUI() } catch (e) { location.reload() }
+    }, 300)
+  } else {
+    setTimeout(() => location.reload(), 300)
+  }
 }
 
 /* ============================================================
