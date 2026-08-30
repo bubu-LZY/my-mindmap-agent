@@ -114,6 +114,7 @@
           </div>
         </el-form-item>
       </el-form>
+      <div v-else-if="configLoading" class="profile-empty">配置加载中...</div>
       <div v-else class="profile-empty">请先新增一个配置档</div>
 
       <div class="settings-actions">
@@ -149,6 +150,27 @@
       </div>
       <div class="settings-actions" style="margin-top: 8px;">
         <el-button type="primary" @click="saveTemperature">保存 temperature</el-button>
+      </div>
+    </div>
+
+    <!-- AI 请求超时设置 -->
+    <div id="sec-timeout" class="settings-section">
+      <h3>AI 请求超时设置</h3>
+      <p class="vision-desc">
+        部分模型（如推理型大模型）响应较慢，可在此调整 AI 请求的最长等待时间（秒）。默认 300 秒（5 分钟），范围 30~3600 秒。
+      </p>
+      <div class="temperature-row">
+        <el-input-number
+          v-model="aiTimeoutSeconds"
+          :min="30"
+          :max="3600"
+          :step="30"
+          style="flex: 1;"
+        />
+        <span class="temperature-value">秒</span>
+      </div>
+      <div class="settings-actions" style="margin-top: 8px;">
+        <el-button type="primary" @click="saveAiTimeout">保存超时</el-button>
       </div>
     </div>
 
@@ -253,6 +275,15 @@
             </div>
             <div v-else-if="!detectingVision && activeVisionProfile.baseURL" class="model-hint manual-hint">
               未检测模型列表时可直接输入模型名称（如 qwen-vl-max、glm-4v-plus、gpt-4o），输入后可点「测试识图」验证可用性
+            </div>
+          </el-form-item>
+          <el-form-item label="Files API 地址（文件上传端点）">
+            <el-input
+              v-model="activeVisionProfile.filesURL"
+              placeholder="留空则按厂商自动推导内置端点"
+            />
+            <div class="model-hint manual-hint">
+              用于把图片 / PDF 等文件上传到模型服务的 files 端点。留空走内置推导；内置不可用或上传失败时，可在此手动指定（如 https://api.openai.com/v1/files）。
             </div>
           </el-form-item>
         </el-form>
@@ -372,14 +403,23 @@
           />
         </div>
         <div v-if="httpServerStatus && httpServerStatus.running" class="http-server-info">
+          <div class="lan-access-row">
+            <span class="lan-access-label">允许局域网访问</span>
+            <el-switch
+              :model-value="httpServerStatus.lanAccess"
+              :loading="httpServerLoading"
+              @change="onHttpLanAccessChange"
+            />
+            <span class="lan-access-hint">默认仅本机(127.0.0.1)可访问；开启后局域网内其他设备可访问</span>
+          </div>
           <div v-for="addr in httpServerStatus.addresses" :key="addr" class="http-server-address">
             <span class="http-server-address-text">{{ addr }}</span>
             <el-button size="small" @click="copyText(addr)">复制地址</el-button>
           </div>
           <div class="http-server-token-row">
             <span class="http-server-token-label">Token</span>
-            <code class="http-server-token">{{ httpServerStatus.token }}</code>
-            <el-button size="small" @click="copyText(httpServerStatus.token)">复制 Token</el-button>
+            <code class="http-server-token">{{ maskToken(httpServerStatus.token) }}</code>
+            <el-button size="small" @click="copyTokenWithAuth(httpServerStatus.token)">复制 Token</el-button>
           </div>
           <div class="http-server-expire">
             Token 有效期至：{{ formatHttpTokenExpiry(httpServerStatus.tokenExpiresAt) }}
@@ -387,6 +427,108 @@
           <div class="http-server-skill-row">
             <el-button size="small" @click="copyHttpSkill">复制 Agent 调用 Skill（含 Token）</el-button>
           </div>
+          <div class="http-server-mcp-row">
+            <div class="http-server-mcp-info">
+              <div class="http-server-mcp-title">MCP 接口（外部 AI 客户端接入）</div>
+              <p class="http-server-mcp-desc">把下方 JSON 粘贴到 Trae / Claude Desktop / Cursor 等客户端的 MCP 配置中，即可让外部 AI 直接安装并调用本程序的全部工具（思维导图、文件、任务等）。</p>
+              <div class="http-server-mcp-url-row">
+                <span class="http-server-token-label">MCP 端点</span>
+                <code class="http-server-token">{{ mcpInstallInfo.mcpUrl }}</code>
+                <el-button size="small" @click="copyText(mcpInstallInfo.mcpUrl)">复制</el-button>
+              </div>
+            </div>
+            <el-button size="small" type="primary" @click="copyMcpInstallJson">复制 MCP 安装 JSON（含 Token）</el-button>
+          </div>
+        </div>
+      </div>
+
+      <div class="safety-block">
+        <div class="auto-launch-row">
+          <div class="auto-launch-info">
+            <div class="safety-block-title">屏幕共享（仅查看）</div>
+            <p class="safety-block-desc">开启后生成独立的只读访问地址，多人可通过浏览器查看当前屏幕画面，但不能进行任何操作；访问需要独立 Token 鉴权。</p>
+          </div>
+          <el-switch
+            v-model="httpViewOnlyEnabled"
+            :loading="httpViewOnlyLoading"
+            @change="onHttpViewOnlyChange"
+          />
+        </div>
+        <div v-if="httpViewOnlyStatus && httpViewOnlyStatus.running" class="http-server-info">
+          <div class="lan-access-row">
+            <span class="lan-access-label">允许局域网访问</span>
+            <el-switch
+              :model-value="httpViewOnlyStatus.lanAccess"
+              :loading="httpViewOnlyLoading"
+              @change="onHttpViewOnlyLanAccessChange"
+            />
+            <span class="lan-access-hint">默认仅本机(127.0.0.1)可访问；开启后局域网内其他设备可访问</span>
+          </div>
+          <div v-for="addr in httpViewOnlyStatus.addresses" :key="addr" class="http-server-address">
+            <span class="http-server-address-text">{{ addr }}</span>
+            <el-button size="small" @click="copyText(addr)">复制地址</el-button>
+          </div>
+          <div class="http-server-token-row">
+            <span class="http-server-token-label">Token</span>
+            <code class="http-server-token">{{ maskToken(httpViewOnlyStatus.token) }}</code>
+            <el-button size="small" @click="copyTokenWithAuth(httpViewOnlyStatus.token)">复制 Token</el-button>
+          </div>
+          <div class="http-server-expire">
+            Token 有效期至：{{ formatHttpTokenExpiry(httpViewOnlyStatus.tokenExpiresAt) }}
+          </div>
+          <div class="http-server-address">
+            <span class="http-server-address-text">分享地址（浏览器打开后输入 Token 即可查看）</span>
+            <el-button size="small" @click="copyText(viewOnlyShareLink)">复制链接</el-button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 全局 Token 管理 -->
+    <div id="sec-token" class="settings-section">
+      <h3>全局 Token 管理</h3>
+      <p class="vision-desc">集中管理所有 Token。Token 默认掩码显示，「查看」明文与「重置」需验证全局访问密码；「复制」仅复制掩码，绝不复制明文。</p>
+      <div v-if="!passwordGateEnabled" class="token-lock-hint">
+        请先在「全局管理访问密码」目录中设置密码，才能管理 Token。
+      </div>
+      <div v-else-if="!tokenUnlocked" class="token-lock-hint">
+        内容已锁定。请点击左侧目录「全局 Token 管理」验证访问密码后查看。
+      </div>
+      <div v-else-if="!tokenOverview.length" class="token-lock-hint">
+        暂无 Token。开启 HTTP 服务或创建 MCP 访问令牌后，此处会列出。
+      </div>
+      <div v-else class="token-overview-list">
+        <div v-for="item in tokenOverview" :key="item.key" class="token-overview-row" :class="{ disabled: item.enabled === false }">
+          <div class="token-overview-info">
+            <div class="token-overview-name">
+              {{ item.name }}
+              <el-tag size="small" :type="item.enabled ? 'success' : 'info'" style="margin-left: 6px">{{ item.enabled ? '启用中' : '已停用' }}</el-tag>
+            </div>
+            <code class="token-overview-value">{{ revealedTokens[item.key] || item.masked }}</code>
+          </div>
+          <div class="token-overview-actions">
+            <el-switch :model-value="item.enabled" @change="toggleTokenService(item)" />
+            <el-button size="small" :disabled="item.has === false" @click="revealTokenItem(item)">查看</el-button>
+            <el-button size="small" :disabled="item.has === false" @click="copyPlainToken(item)">复制</el-button>
+            <el-button size="small" type="danger" :disabled="item.has === false" @click="resetTokenItem(item)">重置</el-button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 全局管理访问密码 -->
+    <div id="sec-password" class="settings-section">
+      <h3>全局管理访问密码</h3>
+      <p class="vision-desc">设置全局管理访问密码后，才能查看明文、重置 Token 等敏感操作。修改密码需输入原密码。</p>
+      <div class="safety-block">
+        <div class="auto-launch-row">
+          <div class="auto-launch-info">
+            <div class="safety-block-title">访问密码</div>
+            <p class="safety-block-desc">{{ passwordGateDesc }}</p>
+          </div>
+          <el-button size="small" :type="passwordGateEnabled ? 'default' : 'primary'" @click="openPasswordDialog">
+            {{ passwordGateEnabled ? '修改密码' : '设置密码' }}
+          </el-button>
         </div>
       </div>
     </div>
@@ -424,7 +566,41 @@
         <el-switch v-model="s.enabled" size="small" />
         <el-button size="small" @click="saveMcp(s)">保存</el-button>
         <el-button size="small" @click="testMcp(s)">测试</el-button>
+        <el-button size="small" @click="testMcp(s, { overrideTimeoutMs: 60000 })">再试一次(60秒超时)</el-button>
         <el-button size="small" type="danger" @click="removeMcp(s.id)">删除</el-button>
+      </div>
+
+      <!-- MCP 访问令牌（多令牌 + 每令牌工具权限） -->
+      <div class="mcp-token-block">
+        <div class="mcp-token-head">
+          <div class="mcp-token-head-text">
+            <div class="mcp-token-title">访问令牌（每个令牌独立限定工具权限）</div>
+            <p class="mcp-token-desc">为外部 AI / MCP 客户端创建独立令牌，每个令牌只能调用勾选的工具；上方 HTTP 服务的主 Token 始终拥有全部权限，与这些令牌分开存放、互不影响。</p>
+          </div>
+          <el-button size="small" type="primary" @click="openTokenCreate">新增令牌</el-button>
+        </div>
+        <div v-if="!mcpTokens.length" class="mcp-token-empty">暂无访问令牌，点击「新增令牌」创建第一个受限权限令牌</div>
+        <div v-for="t in mcpTokens" :key="t.id" class="mcp-token-row" :class="{ disabled: t.enabled === false }">
+          <div class="mcp-token-main">
+            <div class="mcp-token-name-line">
+              <span class="mcp-token-name" :title="t.name">{{ t.name }}</span>
+              <el-tag size="small" :type="t.enabled === false ? 'info' : 'success'">{{ t.enabled === false ? '已停用' : '启用中' }}</el-tag>
+              <span class="mcp-token-tools" :title="tokenPermTooltip(t)">{{ tokenPermSummary(t) }}</span>
+            </div>
+            <div class="mcp-token-meta">
+              <code class="mcp-token-value" :title="revealedMcpTokens[t.id] || maskToken(t.token)">{{ revealedMcpTokens[t.id] || maskToken(t.token) }}</code>
+              <span class="mcp-token-time">{{ formatTokenTime(t.createdAt) }} 创建 · {{ t.lastUsedAt ? formatTokenTime(t.lastUsedAt) + ' 最近使用' : '从未使用' }}</span>
+            </div>
+          </div>
+          <div class="mcp-token-actions">
+            <el-button size="small" @click="revealMcpToken(t)">查看</el-button>
+            <el-button size="small" @click="copyTokenWithAuth(t.token)">复制</el-button>
+            <el-button size="small" @click="copyTokenInstallJson(t)">安装 JSON</el-button>
+            <el-button size="small" @click="openTokenEdit(t)">编辑</el-button>
+            <el-button size="small" @click="toggleTokenEnabled(t)">{{ t.enabled === false ? '启用' : '停用' }}</el-button>
+            <el-button size="small" type="danger" @click="removeToken(t)">删除</el-button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -434,6 +610,17 @@
       <p class="vision-desc">可维护多个技能。AI 可读取并执行技能指令；也可由 AI 根据对话沉淀为新技能。</p>
       <div class="profile-bar">
         <el-button size="small" @click="showSkillForm = !showSkillForm">{{ showSkillForm ? '收起新增' : '新增 Skill' }}</el-button>
+        <el-button size="small" type="primary" @click="downloadSkillCreationGuide" title="把 SKILL.md 形式的「AI 能力扩展引导」下载到本地，方便分享给其他 AI 或备份">下载 Skill 创建指南</el-button>
+        <el-button size="small" @click="openSkillDir">打开 Skill 目录</el-button>
+      </div>
+      <div
+        class="custom-tools-drop skill-drop"
+        @dragover.prevent="skillDragOver = true"
+        @dragleave.prevent="skillDragOver = false"
+        @drop.prevent="onSkillDrop"
+      >
+        <span>将 Skill 文件 / 文件夹拖到这里快速导入</span>
+        <span class="custom-tools-drop-hint">支持 .zip 压缩包、.md 文档，以及包含 SKILL.md 的文件夹</span>
       </div>
       <el-form v-if="showSkillForm" label-position="top" class="settings-form">
         <el-form-item label="名称"><el-input v-model="newSkill.name" /></el-form-item>
@@ -514,20 +701,106 @@
 
     <div id="sec-about" class="settings-section">
       <h3>关于</h3>
-      <p>my-mindmap agent v1.0.0</p>
+      <p>my-mindmap agent v2.0.0</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
         项目地址：
-        <a href="https://github.com/bubu-LZY/my-mindmap-agent" target="_blank" rel="noopener noreferrer">https://github.com/bubu-LZY/my-mindmap-agent</a>
+        <a
+          href="https://github.com/bubu-LZY/my-mindmap-agent"
+          class="about-link"
+          @click.prevent="openExternalLink('https://github.com/bubu-LZY/my-mindmap-agent')"
+        >https://github.com/bubu-LZY/my-mindmap-agent</a>
       </p>
       <p>
         项目介绍页：
-        <a href="https://bubu-lzy.github.io/my-mindmap-agent/" target="_blank" rel="noopener noreferrer">https://bubu-lzy.github.io/my-mindmap-agent/</a>
+        <a
+          href="https://bubu-lzy.github.io/my-mindmap-agent/"
+          class="about-link"
+          @click.prevent="openExternalLink('https://bubu-lzy.github.io/my-mindmap-agent/')"
+        >https://bubu-lzy.github.io/my-mindmap-agent/</a>
       </p>
     </div>
       </div><!-- .settings-content -->
     </div><!-- .settings-layout -->
+
+    <!-- MCP 访问令牌：新建/编辑弹窗 -->
+    <el-dialog v-model="tokenDialogVisible" :title="tokenDialog.isCreate ? '新增访问令牌' : '编辑访问令牌'" width="720px" append-to-body destroy-on-close>
+      <el-form label-position="top" class="token-form">
+        <el-form-item label="令牌名称">
+          <el-input v-model="tokenDialog.name" placeholder="如：Trae 客户端（只读）" maxlength="30" show-word-limit />
+        </el-form-item>
+        <el-form-item>
+          <div class="token-alltools-row">
+            <el-checkbox v-model="tokenDialog.allTools">全部工具（不限制，等同主 Token 权限）</el-checkbox>
+            <span v-if="!tokenDialog.isCreate" class="token-rotate-row">
+              <el-checkbox v-model="tokenDialog.rotate">重置令牌值（令牌疑似泄露时勾选）</el-checkbox>
+            </span>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="!tokenDialog.allTools" label="可用工具范围">
+          <div class="token-perm-groups">
+            <div class="token-perm-toolbar">
+              <el-button size="small" text type="primary" @click="setReadonlyPermTools">只读类别</el-button>
+              <el-button size="small" text type="primary" @click="setEditPermTools">编辑类别</el-button>
+              <el-button size="small" text @click="setAllPermTools(true)">全选</el-button>
+              <el-button size="small" text @click="setAllPermTools(false)">清空</el-button>
+              <span class="token-perm-count">已选 {{ tokenSelectedCount }} / {{ tokenTotalCount }} 个工具</span>
+            </div>
+            <div v-for="g in tokenDialog.groups" :key="g.category" class="token-perm-group">
+              <div class="token-perm-group-head">
+                <span class="token-perm-group-title">{{ cnCategory(g.category) }}</span>
+                <span class="token-perm-group-count">{{ checkedCountOfGroup(g) }}/{{ g.tools.length }}</span>
+                <el-button size="small" text @click="toggleGroup(g)">{{ isGroupAllChecked(g) ? '取消全选' : '全选' }}</el-button>
+              </div>
+              <el-checkbox-group v-model="tokenDialog.checked" class="token-perm-group-body">
+                <el-checkbox v-for="tool in g.tools" :key="tool.name" :value="tool.name" :title="tool.cnName ? tool.cnName + '（' + tool.name + '）' : tool.name">
+                  <span class="token-tool-cn">{{ tool.cnName || tool.name }}</span>
+                  <span v-if="tool.cnName" class="token-tool-en">{{ tool.name }}</span>
+                </el-checkbox>
+              </el-checkbox-group>
+            </div>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button size="small" @click="tokenDialogVisible = false">取消</el-button>
+        <el-button size="small" type="primary" :disabled="!tokenDialog.name.trim()" @click="saveTokenDialog">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 密码门禁设置对话框 -->
+    <el-dialog v-model="passwordDialogVisible" :title="passwordGateEnabled ? '修改密码' : '设置密码'" width="420px" append-to-body destroy-on-close @closed="resetPasswordForm">
+      <el-form label-position="top">
+        <el-form-item v-if="passwordGateEnabled" label="当前密码">
+          <el-input v-model="passwordForm.oldPassword" type="password" show-password placeholder="请输入当前密码" />
+        </el-form-item>
+        <el-form-item label="新密码">
+          <el-input v-model="passwordForm.newPassword" type="password" show-password placeholder="至少 6 位" />
+        </el-form-item>
+        <el-form-item label="确认新密码">
+          <el-input v-model="passwordForm.confirmPassword" type="password" show-password placeholder="再次输入新密码" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button size="small" @click="passwordDialogVisible = false">取消</el-button>
+        <el-button size="small" type="primary" :loading="passwordSaving" @click="savePassword">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 操作即验证弹窗（查看/重置 Token 前校验全局访问密码） -->
+    <el-dialog v-model="authDialogVisible" title="验证访问密码" width="380px" append-to-body destroy-on-close>
+      <el-form label-position="top">
+        <el-form-item label="请输入全局访问密码">
+          <el-input v-model="authPassword" type="password" show-password placeholder="访问密码" @keyup.enter="submitAuth" />
+        </el-form-item>
+      </el-form>
+      <div v-if="authError" class="auth-error-text">{{ authError }}</div>
+      <template #footer>
+        <el-button size="small" @click="authDialogVisible = false">取消</el-button>
+        <el-button size="small" type="primary" :loading="authVerifying" @click="submitAuth">验证</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -535,7 +808,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { aiService, providerPresets, autoCompleteURL, buildBaseURL, isVisionModel } from '../services/aiService'
-import { DANGEROUS_TOOLS } from '../services/toolHandler'
+import { DANGEROUS_TOOLS, getMcpToolPermissions } from '../services/toolHandler'
 import { isTrustMode, setTrustMode } from '../utils/trustMode'
 import FeishuPanel from './FeishuPanel.vue'
 import ThirdPartyPanel from './ThirdPartyPanel.vue'
@@ -597,7 +870,256 @@ const httpServerEnabled = ref(false)
 const httpServerLoading = ref(false)
 const httpServerStatus = ref(null)
 const httpServerQuality = ref('medium')
+// 仅查看端口（多人共享只读查看屏幕）
+const httpViewOnlyEnabled = ref(false)
+const httpViewOnlyLoading = ref(false)
+const httpViewOnlyStatus = ref(null)
 const saveDir = ref('')
+
+// ========== 密码门禁 ==========
+const passwordGateEnabled = ref(false)
+const passwordDialogVisible = ref(false)
+const passwordSaving = ref(false)
+const passwordForm = ref({ oldPassword: '', newPassword: '', confirmPassword: '' })
+const passwordGateDesc = computed(() => passwordGateEnabled.value
+  ? '已设置访问密码：启动需验证，30 分钟无操作后重新验证；连续 3 次输错锁定 5 分钟。'
+  : '未设置密码：可设置访问密码，防止他人未经授权使用本应用。')
+
+const loadPasswordGate = async () => {
+  try {
+    if (window.electronAPI?.passwordGate?.isEnabled) {
+      const r = await window.electronAPI.passwordGate.isEnabled()
+      passwordGateEnabled.value = !!r?.enabled
+    }
+  } catch (e) { /* 浏览器模式忽略 */ }
+  // 仅在已设置密码时加载 token 汇总（未设密码则 Token 管理处于锁定态，不读取明文）
+  if (passwordGateEnabled.value) {
+    loadTokenOverview()
+  }
+}
+
+const openPasswordDialog = () => {
+  passwordForm.value = { oldPassword: '', newPassword: '', confirmPassword: '' }
+  passwordDialogVisible.value = true
+}
+
+const resetPasswordForm = () => {
+  passwordForm.value = { oldPassword: '', newPassword: '', confirmPassword: '' }
+}
+
+const savePassword = async () => {
+  if (!(window.electronAPI?.passwordGate?.setPassword)) {
+    ElMessage.warning('当前环境不支持该功能')
+    return
+  }
+  const np = passwordForm.value.newPassword
+  const cp = passwordForm.value.confirmPassword
+  if (!np) { ElMessage.warning('请输入新密码'); return }
+  if (np.length < 6) { ElMessage.warning('密码长度至少 6 位'); return }
+  if (np !== cp) { ElMessage.warning('两次输入的新密码不一致'); return }
+  passwordSaving.value = true
+  try {
+    const r = await window.electronAPI.passwordGate.setPassword(passwordForm.value.oldPassword, np)
+    if (r?.success) {
+      passwordGateEnabled.value = true
+      passwordDialogVisible.value = false
+      ElMessage.success('密码已设置')
+      loadTokenOverview()
+    } else {
+      ElMessage.error(r?.error || '设置失败')
+    }
+  } catch (e) {
+    ElMessage.error('设置失败：' + (e.message || e))
+  } finally {
+    passwordSaving.value = false
+  }
+}
+
+// ========== 全局 Token 管理 ==========
+// 操作即验证：查看/重置等敏感操作前弹密码校验
+const authDialogVisible = ref(false)
+const authPassword = ref('')
+const authError = ref('')
+const authVerifying = ref(false)
+let authOnSuccess = null
+// 已临时展示明文的 token（key -> 明文），10 秒后自动恢复掩码
+const revealedTokens = ref({})
+// Token 汇总列表
+const tokenOverview = ref([])
+// 本次设置会话内是否已解锁「全局 Token 管理」（退出设置重新进入后重置，需重新验证密码）
+const tokenUnlocked = ref(false)
+
+const requireAuth = (onSuccess) => {
+  authOnSuccess = onSuccess
+  authPassword.value = ''
+  authError.value = ''
+  authDialogVisible.value = true
+}
+
+const submitAuth = async () => {
+  const pwd = authPassword.value
+  if (!pwd) { authError.value = '请输入访问密码'; return }
+  if (!(window.electronAPI?.passwordGate?.verifyPassword)) {
+    authDialogVisible.value = false
+    ElMessage.warning('当前环境不支持密码验证')
+    return
+  }
+  authVerifying.value = true
+  authError.value = ''
+  try {
+    const r = await window.electronAPI.passwordGate.verifyPassword(pwd)
+    if (r?.success) {
+      authDialogVisible.value = false
+      authPassword.value = ''
+      const cb = authOnSuccess
+      authOnSuccess = null
+      cb?.()
+    } else {
+      authError.value = r?.locked ? '尝试次数过多，已锁定 5 分钟' : (r?.error || '密码错误')
+      authPassword.value = ''
+    }
+  } catch (e) {
+    authError.value = '验证失败：' + (e.message || e)
+  } finally {
+    authVerifying.value = false
+  }
+}
+
+// 汇总所有 token（仅掩码显示；明文不常驻前端，仅在"查看"验证密码后临时获取）
+const loadTokenOverview = async () => {
+  const list = []
+  // HTTP 主 token（始终显示，含启用/停用状态）
+  try {
+    if (window.electronAPI?.httpServer?.getStatus) {
+      const s = await window.electronAPI.httpServer.getStatus()
+      const has = !!s?.token
+      list.push({ key: 'http', name: 'HTTP 远程服务 Token', masked: has ? maskToken(s.token) : '未生成', enabled: !!s?.enabled, toggleType: 'http', has })
+    }
+  } catch (e) {}
+  // 屏幕共享（仅查看）token
+  try {
+    if (window.electronAPI?.httpViewOnly?.getStatus) {
+      const s = await window.electronAPI.httpViewOnly.getStatus()
+      const has = !!s?.token
+      list.push({ key: 'viewOnly', name: '屏幕共享（仅查看）Token', masked: has ? maskToken(s.token) : '未生成', enabled: !!s?.enabled, toggleType: 'viewOnly', has })
+    }
+  } catch (e) {}
+  // MCP 访问令牌
+  try {
+    if (window.electronAPI?.mcpTokens?.list) {
+      const r = await window.electronAPI.mcpTokens.list()
+      for (const t of (r?.tokens || [])) {
+        list.push({ key: 'mcp:' + t.id, name: `MCP 访问令牌：${t.name || '未命名'}`, masked: maskToken(t.token), mcpId: t.id, enabled: t.enabled !== false, toggleType: 'mcp' })
+      }
+    }
+  } catch (e) {}
+  tokenOverview.value = list
+}
+
+// 通过接口临时获取明文 token（不常驻内存）
+const fetchPlainToken = async (item) => {
+  try {
+    if (item.key === 'http') {
+      const s = await window.electronAPI.httpServer.getStatus()
+      return s?.token || ''
+    } else if (item.key === 'viewOnly') {
+      const s = await window.electronAPI.httpViewOnly.getStatus()
+      return s?.token || ''
+    } else if (item.mcpId) {
+      const r = await window.electronAPI.mcpTokens.list()
+      return (r?.tokens || []).find(t => t.id === item.mcpId)?.token || ''
+    }
+  } catch (e) {}
+  return ''
+}
+
+// 查看明文：验证密码后临时获取明文并短暂展示，10 秒后恢复掩码
+const revealTokenItem = (item) => {
+  requireAuth(async () => {
+    const plain = await fetchPlainToken(item)
+    if (!plain) { ElMessage.error('获取明文失败'); return }
+    revealedTokens.value = { ...revealedTokens.value, [item.key]: plain }
+    setTimeout(() => {
+      const next = { ...revealedTokens.value }
+      delete next[item.key]
+      revealedTokens.value = next
+    }, 10000)
+  })
+}
+
+// 复制明文 token：进入「全局 Token 管理」已通过密码验证（解锁），直接复制明文，无需重复验证
+const copyPlainToken = async (item) => {
+  const plain = await fetchPlainToken(item)
+  if (!plain) { ElMessage.error('获取 token 失败'); return }
+  copyText(plain)
+}
+
+// 复制明文 token：需密码验证通过后才复制（用于 HTTP/屏幕共享/MCP 等处的「复制 Token」按钮）
+const copyTokenWithAuth = (token) => {
+  if (!token) return
+  requireAuth(() => {
+    copyText(token)
+  })
+}
+
+// 重置 token：验证密码后立即失效旧 token
+const resetTokenItem = (item) => {
+  requireAuth(async () => {
+    try {
+      if (item.key === 'http') {
+        if (window.electronAPI?.httpServer?.resetToken) {
+          const s = await window.electronAPI.httpServer.resetToken()
+          ElMessage.success('HTTP Token 已重置')
+        }
+      } else if (item.key === 'viewOnly') {
+        if (window.electronAPI?.httpViewOnly?.resetToken) {
+          await window.electronAPI.httpViewOnly.resetToken()
+          ElMessage.success('仅查看 Token 已重置')
+        }
+      } else if (item.mcpId) {
+        if (window.electronAPI?.mcpTokens?.update) {
+          await window.electronAPI.mcpTokens.update(item.mcpId, { rotate: true })
+          ElMessage.success('MCP Token 已重置')
+        }
+      }
+      await loadTokenOverview()
+    } catch (e) {
+      ElMessage.error('重置失败：' + (e.message || e))
+    }
+  })
+}
+
+// 启用/停用 token：HTTP/仅查看联动服务开关，MCP 联动令牌 enabled
+const toggleTokenService = async (item) => {
+  const enabling = !item.enabled
+  try {
+    if (item.toggleType === 'http') {
+      if (enabling && !passwordGateEnabled.value) {
+        ElMessage.warning('请先在「全局管理访问密码」中设置密码，才能开启本地 HTTP 服务')
+        return
+      }
+      if (!(window.electronAPI?.httpServer?.setEnabled)) return
+      const s = await window.electronAPI.httpServer.setEnabled(enabling)
+      item.enabled = !!s?.enabled
+    } else if (item.toggleType === 'viewOnly') {
+      if (enabling && !passwordGateEnabled.value) {
+        ElMessage.warning('请先在「全局管理访问密码」中设置密码，才能开启屏幕共享')
+        return
+      }
+      if (!(window.electronAPI?.httpViewOnly?.setEnabled)) return
+      const s = await window.electronAPI.httpViewOnly.setEnabled(enabling)
+      item.enabled = !!s?.enabled
+    } else if (item.toggleType === 'mcp') {
+      if (!(window.electronAPI?.mcpTokens?.update)) return
+      const res = await window.electronAPI.mcpTokens.update(item.mcpId, { enabled: enabling })
+      if (!res?.success) { ElMessage.error(res?.error || '操作失败'); return }
+      item.enabled = enabling
+    }
+    await loadTokenOverview()
+  } catch (e) {
+    ElMessage.error('操作失败：' + (e.message || e))
+  }
+}
 
 const loadAutoLaunch = async () => {
   try {
@@ -626,8 +1148,354 @@ const loadHttpServer = async () => {
     httpServerStatus.value = status
     httpServerEnabled.value = !!status.enabled
     httpServerQuality.value = status.quality || 'medium'
+    if (status.running) loadMcpInstallInfo()
   } catch (e) {
     console.warn('读取 HTTP 服务状态失败:', e)
+  }
+}
+
+const loadHttpViewOnly = async () => {
+  if (!(window.electronAPI?.httpViewOnly?.getStatus)) return
+  try {
+    const status = await window.electronAPI.httpViewOnly.getStatus()
+    httpViewOnlyStatus.value = status
+    httpViewOnlyEnabled.value = !!status.enabled
+  } catch (e) {
+    console.warn('读取仅查看端口状态失败:', e)
+  }
+}
+
+const viewOnlyShareLink = computed(() => {
+  const status = httpViewOnlyStatus.value
+  if (!status || !status.running) return ''
+  const base = status.addresses && status.addresses[0] ? status.addresses[0] : ''
+  return base || ''
+})
+
+const onHttpViewOnlyChange = async (enabled) => {
+  // 开启本地 token 相关功能前必须先设置全局管理访问密码
+  if (enabled && !passwordGateEnabled.value) {
+    httpViewOnlyEnabled.value = false
+    ElMessage.warning('请先在「全局管理访问密码」中设置密码，才能开启屏幕共享')
+    return
+  }
+  if (!(window.electronAPI?.httpViewOnly?.setEnabled)) {
+    httpViewOnlyEnabled.value = !enabled
+    ElMessage.warning('当前环境不支持该功能')
+    return
+  }
+  httpViewOnlyLoading.value = true
+  try {
+    const status = await window.electronAPI.httpViewOnly.setEnabled(enabled)
+    httpViewOnlyStatus.value = status
+    httpViewOnlyEnabled.value = !!status.enabled
+    if (status.enabled) ElMessage.success('屏幕共享（仅查看）已开启')
+    else ElMessage.success('屏幕共享（仅查看）已关闭')
+  } catch (e) {
+    httpViewOnlyEnabled.value = !enabled
+    ElMessage.error('操作失败：' + (e.message || e))
+  } finally {
+    httpViewOnlyLoading.value = false
+  }
+}
+
+// 仅查看端口允许局域网访问开关
+const onHttpViewOnlyLanAccessChange = async (lanAccess) => {
+  if (!(window.electronAPI?.httpViewOnly?.setLanAccess)) {
+    ElMessage.warning('当前环境不支持该功能')
+    return
+  }
+  httpViewOnlyLoading.value = true
+  try {
+    const status = await window.electronAPI.httpViewOnly.setLanAccess(lanAccess)
+    httpViewOnlyStatus.value = status
+    ElMessage.success(lanAccess ? '已开启局域网访问' : '已关闭局域网访问，仅本机可访问')
+  } catch (e) {
+    ElMessage.error('操作失败：' + (e.message || e))
+  } finally {
+    httpViewOnlyLoading.value = false
+  }
+}
+
+// MCP 安装配置（外部 AI 客户端接入本程序工具）
+const mcpInstallInfo = ref({ running: false, mcpUrl: '', installConfig: null, lanUrls: [] })
+const loadMcpInstallInfo = async () => {
+  if (!(window.electronAPI?.mcpServer?.getInstallConfig)) return
+  try {
+    const info = await window.electronAPI.mcpServer.getInstallConfig()
+    mcpInstallInfo.value = info || { running: false, mcpUrl: '', installConfig: null, lanUrls: [] }
+  } catch (e) {
+    console.warn('读取 MCP 安装配置失败:', e)
+  }
+}
+
+const copyMcpInstallJson = async () => {
+  const info = mcpInstallInfo.value
+  if (!info.running || !info.installConfig) {
+    ElMessage.warning('请先开启本地 HTTP 服务')
+    return
+  }
+  const json = JSON.stringify(info.installConfig, null, 2)
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(json)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = json
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    ElMessage.success('已复制 MCP 安装 JSON（含 Token），粘贴到外部 AI 客户端的 MCP 配置即可')
+  } catch (e) {
+    ElMessage.error('复制失败')
+  }
+}
+
+// ========== MCP 访问令牌管理（多令牌 + 每令牌工具权限） ==========
+const mcpTokens = ref([])
+const tokenDialogVisible = ref(false)
+const tokenDialog = ref({ isCreate: true, id: '', name: '', allTools: false, rotate: false, groups: [], checked: [] })
+
+const tokenPermGroupsRaw = (() => {
+  try {
+    const groups = getMcpToolPermissions()
+    const out = []
+    for (const [category, tools] of groups) out.push({ category, tools })
+    return out
+  } catch (e) {
+    console.warn('读取 MCP 工具权限清单失败:', e)
+    return []
+  }
+})()
+const tokenTotalCount = tokenPermGroupsRaw.reduce((n, g) => n + g.tools.length, 0)
+
+const tokenSelectedCount = computed(() => tokenDialog.value.checked.length)
+
+const loadMcpTokens = async () => {
+  if (!(window.electronAPI?.mcpTokens?.list)) return
+  try {
+    const res = await window.electronAPI.mcpTokens.list()
+    mcpTokens.value = (res?.tokens || []).map(t => ({ ...t }))
+  } catch (e) {
+    console.warn('读取 MCP 访问令牌失败:', e)
+  }
+}
+
+const formatTokenTime = (ts) => {
+  if (!ts) return '-'
+  try {
+    const d = new Date(ts)
+    const p = (x) => String(x).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  } catch {
+    return '-'
+  }
+}
+
+const tokenPermSummary = (t) => {
+  const allowed = t.allowedTools
+  if (!Array.isArray(allowed) || !allowed.length) return '无可用工具'
+  if (allowed.includes('*')) return '全部工具'
+  return `${allowed.length} 个工具`
+}
+
+const tokenPermTooltip = (t) => {
+  const allowed = t.allowedTools
+  if (!Array.isArray(allowed) || !allowed.length) return '该令牌未勾选任何工具，调用任何工具都会被拒绝'
+  if (allowed.includes('*')) return '该令牌可调用全部工具'
+  return '可调用：' + allowed.join('、')
+}
+
+// 工具类目 → 中文（令牌权限勾选界面用）
+const CATEGORY_CN = {
+  AI: 'AI 智能', Assoc: '关联', Context: '上下文', Custom: '自定义', Discovery: '探索',
+  Edit: '编辑', Export: '导出', Feishu: '飞书', File: '文件', KB: '知识库', MCP: 'MCP',
+  Memory: '记忆', Meta: '元信息', Mindmap: '思维导图', 'Node Ops': '节点操作', Push: '推送',
+  Query: '查询', Refs: '引用', Research: '研究', Scheduler: '定时任务', Skills: '技能',
+  Study: '学习', Style: '样式', View: '视图', Web: '网络', Other: '其他'
+}
+const cnCategory = (cat) => CATEGORY_CN[cat] || String(cat || '其他')
+
+const buildTokenDialog = (isCreate, entry) => {
+  const allowed = Array.isArray(entry?.allowedTools) ? entry.allowedTools : []
+  const allTools = allowed.includes('*')
+  const checked = allTools ? [] : allowed.filter(x => x !== '*')
+  const known = new Set()
+  for (const g of tokenPermGroupsRaw) for (const t of g.tools) known.add(t.name)
+  const groups = tokenPermGroupsRaw.map(g => ({ category: g.category, tools: g.tools.map(t => ({ ...t })) }))
+  const unknown = checked.filter(n => !known.has(n))
+  tokenDialog.value = {
+    isCreate,
+    id: entry?.id || '',
+    name: entry?.name || '',
+    allTools,
+    rotate: false,
+    groups,
+    checked: unknown.length ? [...checked] : checked
+  }
+  if (unknown.length) {
+    // 旧数据里勾选的工具在当前清单中不存在（版本间工具变动），归入 Other 组展示，避免静默丢失
+    tokenDialog.value.groups.push({
+      category: 'Other（历史勾选）',
+      tools: unknown.map(n => ({ name: n, desc: '' }))
+    })
+  }
+  tokenDialogVisible.value = true
+}
+
+const openTokenCreate = () => buildTokenDialog(true, null)
+const openTokenEdit = (t) => buildTokenDialog(false, t)
+
+const checkedCountOfGroup = (g) => g.tools.reduce((n, tool) => n + (tokenDialog.value.checked.includes(tool.name) ? 1 : 0), 0)
+const isGroupAllChecked = (g) => g.tools.length > 0 && g.tools.every(tool => tokenDialog.value.checked.includes(tool.name))
+
+const toggleGroup = (g) => {
+  const set = new Set(tokenDialog.value.checked)
+  if (isGroupAllChecked(g)) g.tools.forEach(tool => set.delete(tool.name))
+  else g.tools.forEach(tool => set.add(tool.name))
+  tokenDialog.value.checked = [...set]
+}
+
+const setAllPermTools = (on) => {
+  if (on) {
+    const all = []
+    for (const g of tokenDialog.value.groups) g.tools.forEach(tool => all.push(tool.name))
+    tokenDialog.value.checked = all
+  } else {
+    tokenDialog.value.checked = []
+  }
+}
+
+// 只读工具：查询/读取/查看，不修改任何数据（按工具名前缀判断）
+const READONLY_TOOL_PREFIXES = ['get_', 'query_', 'search_', 'list_', 'read_', 'retrieve_', 'audit_', 'find_']
+// find_replace_text 为编辑（替换文本），虽以 find_ 开头但需排除
+const READONLY_TOOL_EXCLUDE = ['find_replace_text']
+const isReadonlyTool = (name) => {
+  if (READONLY_TOOL_EXCLUDE.includes(name)) return false
+  return READONLY_TOOL_PREFIXES.some(p => name.startsWith(p))
+}
+
+// 快捷勾选只读类工具
+const setReadonlyPermTools = () => {
+  const names = tokenPermGroupsRaw.flatMap(g => g.tools.map(t => t.name)).filter(isReadonlyTool)
+  tokenDialog.value.checked = [...names]
+}
+
+// 快捷勾选编辑类工具（非只读）
+const setEditPermTools = () => {
+  const names = tokenPermGroupsRaw.flatMap(g => g.tools.map(t => t.name)).filter(n => !isReadonlyTool(n))
+  tokenDialog.value.checked = [...names]
+}
+
+const saveTokenDialog = async () => {
+  // 创建/管理本地访问令牌前必须先设置全局管理访问密码
+  if (!passwordGateEnabled.value) {
+    ElMessage.warning('请先在「全局管理访问密码」中设置密码，才能创建/管理访问令牌')
+    return
+  }
+  const api = window.electronAPI?.mcpTokens
+  if (!api) { ElMessage.error('当前环境不支持令牌管理'); return }
+  const d = tokenDialog.value
+  const name = d.name.trim()
+  if (!name) { ElMessage.warning('请填写令牌名称'); return }
+  const allowedTools = d.allTools ? ['*'] : [...new Set(d.checked)]
+  if (!d.allTools && !allowedTools.length) {
+    ElMessage.warning('未勾选任何工具，该令牌将无法调用任何工具；如需全部权限请勾选「全部工具」')
+    return
+  }
+  try {
+    let res
+    if (d.isCreate) {
+      res = await api.create({ name, allowedTools })
+    } else {
+      const patch = { name, allowedTools }
+      if (d.rotate) patch.rotate = true
+      res = await api.update(d.id, patch)
+    }
+    if (!res?.success) { ElMessage.error(res?.error || '保存失败'); return }
+    tokenDialogVisible.value = false
+    let copied = false
+    if (d.isCreate && res.token?.token) copied = await silentCopyText(res.token.token)
+    await loadMcpTokens()
+    loadTokenOverview() // 同步刷新「全局 Token 管理」汇总
+    ElMessage.success(d.isCreate ? (copied ? '令牌已创建，令牌值已复制到剪切板' : '令牌已创建，请手动复制令牌值') : '令牌已更新')
+  } catch (e) {
+    ElMessage.error('保存失败: ' + (e.message || '未知错误'))
+  }
+}
+
+// 已临时展示明文的 MCP 令牌（id -> 明文），10 秒后恢复掩码
+const revealedMcpTokens = ref({})
+
+// 查看 MCP 令牌明文：验证密码后短暂展示，10 秒后恢复掩码
+const revealMcpToken = (t) => {
+  requireAuth(() => {
+    revealedMcpTokens.value = { ...revealedMcpTokens.value, [t.id]: t.token }
+    setTimeout(() => {
+      const next = { ...revealedMcpTokens.value }
+      delete next[t.id]
+      revealedMcpTokens.value = next
+    }, 10000)
+  })
+}
+
+const toggleTokenEnabled = async (t) => {
+  const api = window.electronAPI?.mcpTokens
+  if (!api) return
+  try {
+    const next = t.enabled === false
+    const res = await api.update(t.id, { enabled: next })
+    if (!res?.success) { ElMessage.error(res?.error || '操作失败'); return }
+    t.enabled = next
+    ElMessage.success(next ? `「${t.name}」已启用` : `「${t.name}」已停用`)
+  } catch (e) {
+    ElMessage.error('操作失败: ' + (e.message || '未知错误'))
+  }
+}
+
+const removeToken = async (t) => {
+  const api = window.electronAPI?.mcpTokens
+  if (!api) return
+  try {
+    const { ElMessageBox } = await import('element-plus')
+    await ElMessageBox.confirm(`确定删除令牌「${t.name}」？使用该令牌的外部客户端将立即失去访问权限。`, '删除令牌', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+  } catch { return }
+  try {
+    const res = await api.remove(t.id)
+    if (!res?.success) { ElMessage.error(res?.error || '删除失败'); return }
+    await loadMcpTokens()
+    loadTokenOverview()
+    ElMessage.success(`令牌「${t.name}」已删除`)
+  } catch (e) {
+    ElMessage.error('删除失败: ' + (e.message || '未知错误'))
+  }
+}
+
+const copyTokenInstallJson = async (t) => {
+  const api = window.electronAPI?.mcpTokens
+  if (!api?.installConfig) return
+  try {
+    const res = await api.installConfig(t.id)
+    if (!res?.success || !res.installConfig) {
+      ElMessage.warning(res?.running === false || !res?.port ? '请先开启本地 HTTP 服务' : (res?.error || '生成安装配置失败'))
+      return
+    }
+    const json = JSON.stringify(res.installConfig, null, 2)
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(json)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = json
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    ElMessage.success(`已复制「${t.name}」的 MCP 安装 JSON（仅含该令牌勾选的工具权限）`)
+  } catch (e) {
+    ElMessage.error('复制失败: ' + (e.message || '未知错误'))
   }
 }
 
@@ -645,6 +1513,12 @@ const onHttpServerQualityChange = async (quality) => {
 }
 
 const onHttpServerChange = async (enabled) => {
+  // 开启本地 token 相关功能前必须先设置全局管理访问密码
+  if (enabled && !passwordGateEnabled.value) {
+    httpServerEnabled.value = false
+    ElMessage.warning('请先在「全局管理访问密码」中设置密码，才能开启本地 HTTP 服务')
+    return
+  }
   if (!(window.electronAPI?.httpServer?.setEnabled)) {
     httpServerEnabled.value = !enabled
     return
@@ -654,6 +1528,11 @@ const onHttpServerChange = async (enabled) => {
     const status = await window.electronAPI.httpServer.setEnabled(enabled)
     httpServerStatus.value = status
     httpServerEnabled.value = !!status.enabled
+    if (enabled) {
+      await loadMcpInstallInfo()
+    } else {
+      mcpInstallInfo.value = { running: false, mcpUrl: '', installConfig: null, lanUrls: [] }
+    }
     ElMessage.success(enabled ? '本地 HTTP 服务已开启' : '本地 HTTP 服务已关闭')
   } catch (e) {
     httpServerEnabled.value = !enabled
@@ -661,6 +1540,32 @@ const onHttpServerChange = async (enabled) => {
   } finally {
     httpServerLoading.value = false
   }
+}
+
+// 允许局域网访问开关（修改后主进程会重启服务以应用新监听地址）
+const onHttpLanAccessChange = async (lanAccess) => {
+  if (!(window.electronAPI?.httpServer?.setLanAccess)) {
+    ElMessage.warning('当前环境不支持该功能')
+    return
+  }
+  httpServerLoading.value = true
+  try {
+    const status = await window.electronAPI.httpServer.setLanAccess(lanAccess)
+    httpServerStatus.value = status
+    await loadMcpInstallInfo()
+    ElMessage.success(lanAccess ? '已开启局域网访问' : '已关闭局域网访问，仅本机可访问')
+  } catch (e) {
+    ElMessage.error(`局域网访问设置失败: ${e.message || '未知错误'}`)
+  } finally {
+    httpServerLoading.value = false
+  }
+}
+
+// 掩码显示敏感令牌：显示前 4 位 + **** + 后 4 位
+const maskToken = (token) => {
+  if (!token || typeof token !== 'string') return ''
+  if (token.length <= 8) return '****'
+  return token.slice(0, 4) + '****' + token.slice(-4)
 }
 
 const copyText = async (text) => {
@@ -679,6 +1584,26 @@ const copyText = async (text) => {
     ElMessage.success('已复制')
   } catch (e) {
     ElMessage.error('复制失败')
+  }
+}
+
+// 静默复制（不弹提示）：用于创建令牌后自动复制令牌值，避免与后续成功提示叠加
+const silentCopyText = async (text) => {
+  if (!text) return false
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(String(text))
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = String(text)
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -774,6 +1699,20 @@ const applySaveDir = async () => {
   }
 }
 
+// 在默认浏览器中打开外部链接（关于页面的项目地址/项目介绍页）
+const openExternalLink = async (url) => {
+  if (!url) return
+  try {
+    if (window.electronAPI && typeof window.electronAPI.openExternal === 'function') {
+      await window.electronAPI.openExternal(url)
+    } else if (typeof window !== 'undefined') {
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+  } catch (e) {
+    console.error('打开外部链接失败:', e)
+  }
+}
+
 const onAutoLaunchChange = async (enabled) => {
   if (!(window.electronAPI?.autoLaunch?.set)) {
     ElMessage.warning('当前为浏览器模式，无法设置开机自启动（请使用桌面应用）')
@@ -841,6 +1780,8 @@ const config = ref({
   activeProfileId: '',
   temperature: 0.7
 })
+// 配置是否已从主进程加载完成（加载中避免误显示「请先新增一个配置档」）
+const configLoading = ref(true)
 
 // 当前活跃的配置档（computed）
 const activeProfileId = computed({
@@ -852,6 +1793,9 @@ const temperature = computed({
   get: () => Number(config.value.temperature ?? 0.7),
   set: (v) => { config.value.temperature = Number(v) }
 })
+
+// AI 请求超时时长（秒，默认 300 = 5 分钟）
+const aiTimeoutSeconds = ref(300)
 // 基础配置档列表（AI 对话用，不含多模态档）
 const baseProfiles = computed(() =>
   config.value.profiles.filter(p => p.type !== 'vision')
@@ -915,6 +1859,8 @@ const testCurrentVisionModel = async () => {
   const baseP = activeProfile.value
   const baseURL = (profile.baseURL || baseP?.baseURL || '').trim()
   const apiKey = (profile.apiKey || baseP?.apiKey || '').trim()
+  // 掩码 key 的归属档：多模态档自身有 key 用自身 id，否则回退基础档 id（供主进程查真实 key）
+  const profileId = profile.apiKey ? profile.id : baseP?.id || ''
   const model = (profile.model || '').trim()
   const autoComplete = profile.baseURL
     ? profile.autoComplete !== false
@@ -929,7 +1875,7 @@ const testCurrentVisionModel = async () => {
   }
   testingVision.value = true
   try {
-    const result = await window.electronAPI.testVisionModel(baseURL, apiKey, model, autoComplete)
+    const result = await window.electronAPI.testVisionModel(baseURL, apiKey, model, autoComplete, profileId)
     if (result && result.success) {
       ElMessage.success(result.message || '该模型可用于图片识别')
     } else {
@@ -965,6 +1911,10 @@ const loadConfig = async () => {
     if (window.electronAPI && window.electronAPI.getAIConfig) {
       const saved = await window.electronAPI.getAIConfig()
       config.value.temperature = Number.isFinite(Number(saved.temperature)) ? Number(saved.temperature) : 0.7
+      if (window.electronAPI.getAiTimeout) {
+        const t = Number(await window.electronAPI.getAiTimeout())
+        aiTimeoutSeconds.value = Number.isFinite(t) && t > 0 ? t : 300
+      }
       // 主进程已迁移为统一 profiles 结构（含 type 字段）
       if (saved.profiles && Array.isArray(saved.profiles) && saved.profiles.length > 0) {
         config.value.profiles = saved.profiles.map(p => ({
@@ -1020,6 +1970,8 @@ const loadConfig = async () => {
     }
   } catch (e) {
     console.error('加载配置失败:', e)
+  } finally {
+    configLoading.value = false
   }
 }
 
@@ -1054,7 +2006,7 @@ const onVisionBaseURLBlur = () => {
 
 const addVisionProfile = () => {
   const id = genProfileId()
-  config.value.profiles.push({ id, name: '', baseURL: '', apiKey: '', model: '', type: 'vision', autoComplete: true })
+  config.value.profiles.push({ id, name: '', baseURL: '', apiKey: '', model: '', type: 'vision', autoComplete: true, filesURL: '' })
   visionConfig.value.activeProfileId = id
   visionFetchedModels.value = []
   visionMatchedCount.value = 0
@@ -1121,7 +2073,8 @@ const fetchModels = async () => {
     if (window.electronAPI && window.electronAPI.fetchModels) {
       const result = await window.electronAPI.fetchModels(
         activeProfile.value.baseURL,
-        activeProfile.value.apiKey
+        activeProfile.value.apiKey,
+        activeProfile.value.id
       )
       if (result && result.success && result.models) {
         fetchedModels.value = result.models
@@ -1196,14 +2149,16 @@ const testConnection = async () => {
   testResult.value = null
 
   try {
-    // 临时设置配置用于测试（不持久化）
+    // 临时设置配置用于测试（不持久化）；apiKey 由主进程按 profileId 注入，前端只传档 id
     aiService.setConfig({
       baseURL: activeProfile.value.baseURL,
-      apiKey: activeProfile.value.apiKey,
+      profileId: activeProfile.value.id,
       model: activeProfile.value.model,
       autoComplete: activeProfile.value.autoComplete !== false
     })
-    const result = await aiService.testConnection()
+    // 用户刚填的明文 key（非掩码）直接用于测试；掩码则走主进程按 profileId 注入
+    const rawKey = activeProfile.value.apiKey || ''
+    const result = await aiService.testConnection(rawKey.includes('****') ? '' : rawKey)
     testResult.value = result
     // 测试完毕后重置，使下次真实对话重新从已保存配置初始化
     aiService.resetConfig()
@@ -1245,6 +2200,8 @@ const detectVisionModels = async (silent = false) => {
   const baseP = activeProfile.value
   const baseURL = (profile.baseURL || baseP?.baseURL || '').trim()
   const apiKey = (profile.apiKey || baseP?.apiKey || '').trim()
+  // 掩码 key 的归属档：多模态档自身有 key 用自身 id，否则回退基础档 id
+  const profileId = profile.apiKey ? profile.id : baseP?.id || ''
   if (!baseURL) {
     if (!silent) ElMessage.warning('请先填写 API 地址（或留空沿用基础模型地址）')
     return
@@ -1261,7 +2218,7 @@ const detectVisionModels = async (silent = false) => {
   if (detectingVision.value) return
   detectingVision.value = true
   try {
-    const result = await window.electronAPI.fetchModels(baseURL, apiKey)
+    const result = await window.electronAPI.fetchModels(baseURL, apiKey, profileId)
     if (result && result.success && Array.isArray(result.models)) {
       const all = result.models
       // 接口元数据（modalities/status）存入映射，供标签与排序使用
@@ -1403,6 +2360,21 @@ const saveTemperature = async () => {
   }
 }
 
+const saveAiTimeout = async () => {
+  if (!(window.electronAPI && window.electronAPI.setAiTimeout)) {
+    ElMessage.warning('当前为浏览器模式，无法保存 AI 超时配置（请使用桌面应用）')
+    return
+  }
+  try {
+    const s = Math.min(Math.max(Number(aiTimeoutSeconds.value) || 300, 30), 3600)
+    aiTimeoutSeconds.value = s
+    await window.electronAPI.setAiTimeout(s)
+    ElMessage.success(`AI 请求超时已保存（${s} 秒）`)
+  } catch (e) {
+    ElMessage.error('保存失败: ' + e.message)
+  }
+}
+
 const saveVisionConfig = () => saveConfig('vision')
 
 // ========== MCP 管理 ==========
@@ -1489,12 +2461,33 @@ const removeMcp = async (id) => {
   try { await window.electronAPI.mcp.remove(id); await loadMcp(); ElMessage.success('MCP 服务已删除') } catch (e) { ElMessage.error('删除失败: ' + e.message) }
 }
 
-const testMcp = async (server) => {
+// 测试单条 MCP 服务：首次拉取失败（主进程内部已自动按 60 秒重试一次）若仍失败，
+// 在界面上提供"再试一次（60 秒超时）"按钮方便用户手动重试。
+const testMcp = async (server, opts = {}) => {
   if (!window.electronAPI?.mcp?.listTools) return
+  const overrideTimeoutMs = Number(opts.overrideTimeoutMs)
   try {
-    const tools = await window.electronAPI.mcp.listTools(server.id)
-    ElMessage.success(`连接成功，发现 ${tools.length} 个工具`)
-  } catch (e) { ElMessage.error('连接失败: ' + e.message) }
+    const tools = await window.electronAPI.mcp.listTools(server.id, Number.isFinite(overrideTimeoutMs) && overrideTimeoutMs > 0 ? overrideTimeoutMs : 0)
+    if (Number.isFinite(overrideTimeoutMs) && overrideTimeoutMs > 0) {
+      ElMessage.success(`重试连接成功，发现 ${tools.length} 个工具（已临时使用 ${Math.round(overrideTimeoutMs / 1000)} 秒超时）`)
+    } else {
+      ElMessage.success(`连接成功，发现 ${tools.length} 个工具`)
+    }
+  } catch (e) {
+    const msg = (e && e.message) ? e.message : '未知错误'
+    // 区分：超时错误展示详细提示 + 重试按钮；其他错误直接显示
+    const isTimeout = /超时|timeout/i.test(msg) || (e && e.code === 'MCP_TIMEOUT')
+    if (isTimeout) {
+      ElMessage({
+        type: 'error',
+        message: msg + '\n\n可点「再试一次（60 秒超时）」继续拉取',
+        duration: 12000,
+        dangerouslyUseHTMLString: false
+      })
+    } else {
+      ElMessage.error('连接失败: ' + msg)
+    }
+  }
 }
 
 // ========== Skills 管理 ==========
@@ -1510,7 +2503,7 @@ const loadSkills = async () => {
 const addSkill = async () => {
   if (!window.electronAPI?.skills?.create) return
   try {
-    await window.electronAPI.skills.create(newSkill.value)
+    await window.electronAPI.skills.create({ ...newSkill.value })
     newSkill.value = { name: '', description: '', instructions: '', enabled: true, autoInvoke: false, source: 'manual' }
     showSkillForm.value = false
     await loadSkills()
@@ -1520,12 +2513,137 @@ const addSkill = async () => {
 
 const saveSkill = async (skill) => {
   if (!window.electronAPI?.skills?.update) return
-  try { await window.electronAPI.skills.update(skill.id, skill); ElMessage.success('Skill 已保存') } catch (e) { ElMessage.error('保存失败: ' + e.message) }
+  try { await window.electronAPI.skills.update(skill.id, { ...skill }); ElMessage.success('Skill 已保存') } catch (e) { ElMessage.error('保存失败: ' + e.message) }
 }
 
 const removeSkill = async (id) => {
   if (!window.electronAPI?.skills?.remove) return
   try { await window.electronAPI.skills.remove(id); await loadSkills(); ElMessage.success('Skill 已删除') } catch (e) { ElMessage.error('删除失败: ' + e.message) }
+}
+
+const skillDragOver = ref(false)
+
+const openSkillDir = async () => {
+  if (!window.electronAPI?.skills?.openDir) return
+  try {
+    const res = await window.electronAPI.skills.openDir()
+    if (res && !res.ok) ElMessage.error(`打开目录失败：${res.error || '未知错误'}`)
+  } catch (e) { ElMessage.error('打开 Skill 目录失败') }
+}
+
+// 下载「AI 能力扩展引导」Skill 的 SKILL.md 到用户选定的位置（用于分享给其他 AI 或备份）
+const downloadSkillCreationGuide = async () => {
+  if (!window.electronAPI?.skills?.getBuiltinGuideContent || !window.electronAPI?.dialog?.showSaveDialog) {
+    ElMessage.error('当前环境不支持导出 Skill 文档')
+    return
+  }
+  try {
+    const r = await window.electronAPI.skills.getBuiltinGuideContent()
+    if (!r || !r.ok) { ElMessage.error('读取内置指南失败：' + (r && r.error || '未知错误')); return }
+    const target = await window.electronAPI.dialog.showSaveDialog({
+      title: '保存 Skill 创建指南',
+      defaultPath: 'SKILL.md',
+      filters: [{ name: 'Markdown', extensions: ['md'] }]
+    })
+    if (!target || target.canceled || !target.filePath) return
+    const content = String(r.content || '')
+    // 复用 save-file：传绝对路径即可写到任意位置
+    if (window.electronAPI.saveFile) {
+      const res = await window.electronAPI.saveFile(target.filePath, content, { overwrite: true })
+      if (res && res.success) {
+        ElMessage.success(`已下载到：${res.filePath || target.filePath}`)
+        return
+      }
+      ElMessage.error('保存失败：' + (res && res.error || '未知错误'))
+      return
+    }
+    // 兜底：fetch + showSaveDialog 已经在主进程给了路径，但前端没原生 fs；用 fs:writeFile
+    if (window.electronAPI.fs && window.electronAPI.fs.writeFile) {
+      const ok = await window.electronAPI.fs.writeFile(target.filePath, content)
+      if (ok) ElMessage.success(`已下载到：${target.filePath}`)
+      else ElMessage.error('保存失败')
+      return
+    }
+    ElMessage.error('当前环境不支持保存文件')
+  } catch (e) {
+    ElMessage.error('下载失败：' + (e.message || '未知错误'))
+  }
+}
+
+const readFileAsBase64 = (file) => new Promise((res, rej) => {
+  const fr = new FileReader()
+  fr.onload = () => res(String(fr.result || '').split(',')[1] || '')
+  fr.onerror = rej
+  fr.readAsDataURL(file)
+})
+
+// 递归读取目录 entry，产出 [{ name, relativePath, base64 }]
+const readSkillEntry = (dirEntry, parentPath = '') => new Promise((resolve, reject) => {
+  const reader = dirEntry.createReader()
+  const all = []
+  const readBatch = () => {
+    reader.readEntries(async (entries) => {
+      if (!entries.length) {
+        const out = []
+        for (const e of all) {
+          if (e.isFile) {
+            const file = await new Promise((res, rej) => e.file((f) => res(f), rej))
+            const base64 = await readFileAsBase64(file)
+            out.push({ name: e.name, relativePath: parentPath ? `${parentPath}/${e.name}` : e.name, base64 })
+          } else if (e.isDirectory) {
+            const sub = await readSkillEntry(e, parentPath ? `${parentPath}/${e.name}` : e.name)
+            out.push(...sub)
+          }
+        }
+        resolve(out)
+        return
+      }
+      all.push(...entries)
+      readBatch()
+    }, reject)
+  }
+  readBatch()
+})
+
+const onSkillDrop = async (event) => {
+  skillDragOver.value = false
+  if (!window.electronAPI?.skills?.import) { ElMessage.error('当前环境不支持 Skill 导入'); return }
+  const collected = []
+  try {
+    const items = Array.from(event.dataTransfer?.items || [])
+    const entries = items
+      .filter(it => it.kind === 'file')
+      .map(it => (typeof it.webkitGetAsEntry === 'function' ? it.webkitGetAsEntry() : null))
+      .filter(Boolean)
+    if (entries.length) {
+      for (const entry of entries) {
+        if (entry.isFile) {
+          const file = await new Promise((res, rej) => entry.file((f) => res(f), rej))
+          collected.push({ name: entry.name, relativePath: entry.name, base64: await readFileAsBase64(file) })
+        } else if (entry.isDirectory) {
+          const sub = await readSkillEntry(entry, entry.name)
+          collected.push(...sub)
+        }
+      }
+    } else {
+      for (const file of Array.from(event.dataTransfer?.files || [])) {
+        collected.push({ name: file.name, relativePath: file.name, base64: await readFileAsBase64(file) })
+      }
+    }
+    if (!collected.length) { ElMessage.warning('未识别到可导入的文件'); return }
+    const hasMd = collected.some(f => /\.md$/i.test(f.name))
+    const hasZip = collected.some(f => /\.zip$/i.test(f.name))
+    if (!hasMd && !hasZip) {
+      ElMessage.warning('未发现 .md 或 .zip 文件，请拖入 Skill 文档、压缩包或包含 SKILL.md 的文件夹')
+      return
+    }
+    const res = await window.electronAPI.skills.import(collected)
+    if (!res?.ok) throw new Error(res?.error || '导入失败')
+    ElMessage.success(`成功导入 ${res.count || 0} 个 Skill`)
+    await loadSkills()
+  } catch (e) {
+    ElMessage.error(`导入 Skill 失败：${e.message || '未知错误'}`)
+  }
 }
 
 // ========== 自定义工具目录管理 ==========
@@ -1638,6 +2756,8 @@ const tocSections = [
   { id: 'sec-vision', label: '多模态识别' },
   { id: 'sec-safety', label: 'AI 安全与记忆' },
   { id: 'sec-system', label: '系统' },
+  { id: 'sec-token', label: '全局 Token 管理' },
+  { id: 'sec-password', label: '全局管理访问密码' },
   { id: 'sec-mcp', label: 'MCP 服务' },
   { id: 'sec-skills', label: 'Skills' },
   { id: 'sec-custom-tools', label: '工具目录' },
@@ -1648,11 +2768,28 @@ const tocSections = [
 const activeSection = ref('sec-ai-config')
 
 const scrollToSection = (id) => {
-  const el = document.getElementById(id)
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    activeSection.value = id
+  const doScroll = () => {
+    const el = document.getElementById(id)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      activeSection.value = id
+    }
   }
+  // 进入「全局 Token 管理」目录：未设密码直接滚动（显示锁定提示）；
+  // 已设密码但未解锁 → 先验证密码，验证通过后解锁并加载；已解锁 → 直接滚动（不再重复验证）
+  if (id === 'sec-token') {
+    if (!passwordGateEnabled.value) {
+      doScroll()
+      return
+    }
+    if (tokenUnlocked.value) {
+      doScroll()
+      return
+    }
+    requireAuth(() => { loadTokenOverview(); tokenUnlocked.value = true; doScroll() })
+    return
+  }
+  doScroll()
 }
 
 let tocObserver = null
@@ -1678,9 +2815,12 @@ onMounted(() => {
   loadWhitelist()
   loadMemoryFacts()
   loadAutoLaunch()
+  loadPasswordGate()
   loadSaveDir()
   loadHttpServer()
+  loadHttpViewOnly()
   loadMcp()
+  loadMcpTokens()
   loadSkills()
   loadCustomTools()
   setupTocObserver()
@@ -1712,9 +2852,17 @@ onBeforeUnmount(() => {
   height: auto;
   max-height: 70vh;
   overflow-y: auto;
+  /* 性能：开启 GPU 合成层，让滚动只在合成线程跑，不触发主线程 reflow */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   padding: 0;
   background: linear-gradient(180deg, #f5f5f7 0%, #ffffff 100%);
+  /* 自定义滚动条：更细，不抢视觉 */
+  scrollbar-gutter: stable;
 }
+.settings-view::-webkit-scrollbar { width: 8px; }
+.settings-view::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border-radius: 4px; }
+.settings-view::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.32); }
 
 .settings-layout {
   display: flex;
@@ -1724,13 +2872,17 @@ onBeforeUnmount(() => {
 /* ---------- 侧边粘性目录 ---------- */
 .settings-toc {
   position: sticky;
-  top: 24px;
+  top: 12px;
   width: 150px;
   min-width: 150px;
+  align-self: flex-start;
   height: fit-content;
+  max-height: calc(100vh - 24px);
   padding: 12px 0;
-  margin: 24px 0 0 24px;
+  margin: 12px 0 0 16px;
   background: transparent;
+  /* contain: paint 让 sticky 元素只在自己的合成层重绘 */
+  contain: layout paint;
 }
 
 .settings-toc ul {
@@ -1748,7 +2900,7 @@ onBeforeUnmount(() => {
   color: #86868b;
   cursor: pointer;
   border-radius: 8px;
-  transition: all 0.2s ease;
+  transition: background-color 0.2s, color 0.2s, border-color 0.2s, background-position 0.2s;
   line-height: 1.4;
   border-left: 2px solid transparent;
 }
@@ -1774,14 +2926,16 @@ onBeforeUnmount(() => {
 
 /* ---------- 设置区块 ---------- */
 .settings-section {
-  background: rgba(255, 255, 255, 0.72);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 16px;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
   padding: 24px;
-  margin-bottom: 20px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  margin-bottom: 16px;
+  /* 关键性能优化：contain 隔离每节渲染区域，避免 14 节叠加触发全页重绘 */
+  contain: layout style paint;
+  /* 提前合成层（仅在 GPU 内存允许时生效），避免 scroll 时逐帧重绘 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 600px;
 }
 
 .settings-section h3 {
@@ -1954,6 +3108,79 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.lan-access-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.lan-access-label {
+  font-size: 13px;
+  color: var(--text-primary, #1d1d1f);
+  font-weight: 500;
+}
+.lan-access-hint {
+  font-size: 12px;
+  color: var(--text-tertiary, #a1a1a6);
+}
+
+.token-lock-hint {
+  padding: 14px 16px;
+  background: #fff7e6;
+  border: 1px solid #ffe4b3;
+  border-radius: 8px;
+  color: #b87700;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.token-overview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.token-overview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-color, #e4e4e9);
+  border-radius: 8px;
+}
+.token-overview-row.disabled {
+  opacity: 0.6;
+}
+.token-overview-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.token-overview-name {
+  font-size: 13px;
+  color: var(--text-primary, #1d1d1f);
+  font-weight: 500;
+}
+.token-overview-value {
+  font-size: 12px;
+  color: var(--text-secondary, #6e6e73);
+  word-break: break-all;
+  background: #f5f5f7;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+.token-overview-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+}
+.auth-error-text {
+  color: #ff3b30;
+  font-size: 12.5px;
+  margin-top: 8px;
 }
 
 .http-server-address {
@@ -2243,7 +3470,7 @@ onBeforeUnmount(() => {
   padding: 10px 24px;
   font-size: 14px;
   font-weight: 500;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 0.2s, color 0.2s, border-color 0.2s, box-shadow 0.2s;
 }
 
 .settings-actions :deep(.el-button:not(.el-button--primary)) {
@@ -2306,6 +3533,18 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
+/* 关于区块的可点击链接 */
+.about-link {
+  color: #007aff;
+  cursor: pointer;
+  text-decoration: underline;
+  word-break: break-all;
+}
+.about-link:hover {
+  color: #0066d6;
+  text-decoration: none;
+}
+
 .mcp-skill-row,
 .skill-row {
   display: flex;
@@ -2353,6 +3592,228 @@ onBeforeUnmount(() => {
   width: 150px;
   flex: 0 0 auto;
 }
+
+/* ========== MCP 访问令牌管理 ========== */
+.mcp-token-block {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.mcp-token-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.mcp-token-head-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mcp-token-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--text-primary, #1d1d1f);
+}
+
+.mcp-token-desc {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.mcp-token-empty {
+  padding: 14px;
+  border: 1px dashed rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  color: var(--text-tertiary, #a1a1a6);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.mcp-token-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.mcp-token-row.disabled {
+  opacity: 0.55;
+}
+
+.mcp-token-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mcp-token-name-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mcp-token-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary, #1d1d1f);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-token-tools {
+  font-size: 11.5px;
+  color: var(--text-secondary, #6e6e73);
+  background: rgba(0, 122, 255, 0.08);
+  padding: 1px 7px;
+  border-radius: 10px;
+  cursor: default;
+}
+
+.mcp-token-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.mcp-token-value {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-secondary, #6e6e73);
+  background: rgba(0, 0, 0, 0.04);
+  padding: 2px 6px;
+  border-radius: 4px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-token-time {
+  font-size: 11px;
+  color: var(--text-tertiary, #a1a1a6);
+}
+
+.mcp-token-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* 令牌弹窗 */
+.token-form {
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.token-alltools-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.token-rotate-row {
+  display: inline-flex;
+  align-items: center;
+}
+
+.token-perm-groups {
+  width: 100%;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  padding: 8px;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+
+.token-perm-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  margin-bottom: 6px;
+}
+
+.token-perm-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.token-perm-group {
+  padding: 6px 0;
+  border-bottom: 1px dashed rgba(0, 0, 0, 0.05);
+}
+
+.token-perm-group:last-child {
+  border-bottom: none;
+}
+
+.token-perm-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.token-perm-group-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text-primary, #1d1d1f);
+}
+
+.token-perm-group-count {
+  font-size: 11px;
+  color: var(--text-tertiary, #a1a1a6);
+}
+
+.token-perm-group-head .el-button {
+  margin-left: auto;
+}
+
+.token-perm-group-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.token-perm-group-body .el-checkbox {
+  margin-right: 0;
+  font-size: 12px;
+}
+
+.token-perm-group-body .el-checkbox__label {
+  font-size: 12px;
+  padding-left: 5px;
+}
+
+.token-tool-cn {
+  font-size: 12px;
+  color: var(--text-primary, #1d1d1f);
+}
+
+.token-tool-en {
+  font-size: 10.5px;
+  color: var(--text-tertiary, #a1a1a6);
+  margin-left: 5px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
 
 .skill-row .grow {
   flex: 1 1 auto;

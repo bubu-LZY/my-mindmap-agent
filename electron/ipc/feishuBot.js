@@ -5,6 +5,7 @@
  */
 const { ipcMain, BrowserWindow } = require('electron')
 const store = require('../utils/store')
+const { decryptFields } = require('../utils/secureStore')
 
 let wsClient = null
 let larkClient = null
@@ -19,12 +20,14 @@ const processedMessageIds = new Set()
 const PROCESSED_ID_TTL = 5 * 60 * 1000 // 5分钟后清理
 
 const FEISHU_CONFIG_KEY = 'feishu_config'
+const FEISHU_SENSITIVE_FIELDS = ['appSecret']
 const AI_CONFIG_KEY = 'aiConfig'
 // 长连接期望状态持久化：true = 上次用户启动了长连接，应用重启后自动恢复
 const BOT_AUTO_START_KEY = 'feishu_bot_auto_start'
 
 function getFeishuConfig() {
-  return store.get(FEISHU_CONFIG_KEY) || {}
+  // 从 store 读取密文配置，解密 appSecret 后返回
+  return decryptFields(store.get(FEISHU_CONFIG_KEY) || { appId: '', appSecret: '', enabled: false, domain: '', defaultChatId: '' }, FEISHU_SENSITIVE_FIELDS)
 }
 
 function getAIConfig() {
@@ -72,13 +75,14 @@ async function processViaRenderer(text, chatId, senderName) {
 
   const replyPromise = new Promise((resolve, reject) => {
     pendingMessages.set(msgId, { resolve, reject })
-    // 120 秒超时
+    // 超时时长可配置（默认 5 分钟）
+    const timeoutMs = store.getAiTimeoutMs()
     setTimeout(() => {
       if (pendingMessages.has(msgId)) {
         pendingMessages.delete(msgId)
-        reject(new Error('AI 处理超时（120秒）'))
+        reject(new Error(`AI 处理超时（${Math.round(timeoutMs / 1000)}秒）`))
       }
-    }, 120000)
+    }, timeoutMs)
   })
 
   // 发送到渲染进程

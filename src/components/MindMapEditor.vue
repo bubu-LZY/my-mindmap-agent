@@ -7,23 +7,8 @@
   >
     <div ref="containerRef" class="mind-map-container"></div>
 
-    <!-- 固定工具栏：悬浮于思维导图画布之上（顶部文件名下方） -->
-    <FixedToolbar v-if="!isFullscreen" :mindMap="mindMap" :activeNodes="fixedToolbarNodes" @node-note="onNodeNote" />
-
-    <!-- 全屏展示：整个界面只保留导图，ESC 或再次点击退出 -->
-    <button
-      class="fullscreen-btn"
-      :class="{ 'is-fullscreen': isFullscreen }"
-      :title="isFullscreen ? '退出全屏 (ESC)' : '全屏展示导图 (ESC 退出)'"
-      @click="toggleFullscreen"
-    >
-      <svg v-if="!isFullscreen" viewBox="0 0 24 24" width="15" height="15">
-        <path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" />
-      </svg>
-      <svg v-else viewBox="0 0 24 24" width="15" height="15">
-        <path fill="currentColor" d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z" />
-      </svg>
-    </button>
+    <!-- 全屏展示：按钮已移至全局右下角按钮组，此处保留 ESC 快捷键逻辑 -->
+    <!-- （全屏样式仍由 is-fullscreen class 控制） -->
 
     <TextToolbar
       :visible="textToolbarVisible"
@@ -47,10 +32,12 @@
       @ai-rewrite="onAiRewrite"
       @ai-cloze="onAiCloze"
       @ai-cloze-full-map="onAiClozeFullMap"
+      @ai-rewrite-full-map="onAiRewriteFullMap"
       @reorganize-mindmap="onReorganizeMindmap"
       @ai-quiz="onAiQuiz"
       @ai-add-to-chat="onAiAddToChat"
       @add-review="onAddReview"
+      @add-tag="onAddTag"
       @toggle-cloze="onToggleCloze"
       @toggle-cloze-all="onToggleClozeAll"
       @clear-all-cloze="onClearAllCloze"
@@ -123,7 +110,16 @@
         v-if="nodeImageHintVisible"
         class="node-img-hint"
         :style="{ left: nodeImageHintPos.x + 'px', top: nodeImageHintPos.y + 'px' }"
-      >双击打开图片</div>
+      >点击查看大图</div>
+      <!-- 富文本内嵌图片右下角缩放把手（仅渲染态显示） -->
+      <div
+        v-if="nodeImgResizeVisible"
+        class="node-img-resize-handle"
+        :style="{ left: nodeImgResizePos.x + 'px', top: nodeImgResizePos.y + 'px' }"
+        @mousedown="onRichImgResizeMousedown"
+        @mouseenter="onRichImgHandleEnter"
+        @mouseleave="onRichImgHandleLeave"
+      ></div>
     </Teleport>
   </div>
 </template>
@@ -153,13 +149,264 @@ import TouchEvent from 'simple-mind-map/src/plugins/TouchEvent.js'
 import TextToolbar from './TextToolbar.vue'
 import Contextmenu from './Contextmenu.vue'
 import NoteDialog from './NoteDialog.vue'
-import FixedToolbar from './FixedToolbar.vue'
 import ReferencePopup from './ReferencePopup.vue'
 import PreviewOverlay from './PreviewOverlay.vue'
 import { parseReferenceLink, isReferenceLink } from '../services/referenceService'
 import { useMindMapStore } from '../stores/mindMapStore'
-import { initCloze, destroyCloze, applyClozeStyles, toggleAllCloze, isClozeHiddenAll, toggleSelectionCloze, clozeWholeNode, encodeClozeInHtml, setupClozeClickHandler, nodeHasCloze, clearAllCloze, resetClozeState, saveClozeState } from '../utils/cloze'
+import { initCloze, destroyCloze, applyClozeStyles, toggleAllCloze, isClozeHiddenAll, toggleSelectionCloze, clozeWholeNode, encodeClozeInHtml, setupClozeClickHandler, nodeHasCloze, clearAllCloze, resetClozeState, saveClozeState, syncMindMapRef } from '../utils/cloze'
 import { normalizeHtmlForQuill } from '../utils/textStyle'
+import MindMapNode from 'simple-mind-map/src/core/render/node/MindMapNode.js'
+import MindMapLayout from 'simple-mind-map/src/layouts/MindMap.js'
+import LogicalStructureLayout from 'simple-mind-map/src/layouts/LogicalStructure.js'
+import { walk } from 'simple-mind-map/src/utils'
+import { CONSTANTS } from 'simple-mind-map/src/constants/constant'
+
+// Patch：含图片的节点禁止拖拽调整左右宽度。
+// 图片放大后节点宽度应跟随图片内容同步缩放，否则固定宽度会裁切图片。
+// hasCustomWidth 内部也调用 checkEnableDragModifyNodeWidth，返回 false 后
+// 历史 customTextWidth 会被忽略，节点宽度完全由内容（图片）决定。
+;(() => {
+  const orig = MindMapNode.prototype.checkEnableDragModifyNodeWidth
+  MindMapNode.prototype.nodeTextHasImage = function () {
+    const text = this.getData('text')
+    return typeof text === 'string' && /<img[\s>]/i.test(text)
+  }
+  MindMapNode.prototype.checkEnableDragModifyNodeWidth = function () {
+    if (this.getData('image') || this.nodeTextHasImage()) {
+      return false
+    }
+    return orig.call(this)
+  }
+})()
+
+// Patch：外框避让。simple-mind-map 的外框（OuterFrame 插件）是纯视觉层，
+// 绘制在节点层下方，且布局的 getMarginX/getMarginY 完全未预留外框的
+// outerFramePaddingY 与 strokeWidth，导致外框会被相邻兄弟节点覆盖。
+// 这里在 MindMap / LogicalStructure 两种布局的 computedBaseValue 里，
+// 为“被外框框选的连续兄弟节点组”额外累计垂直空间，并在 computedTopValue
+// 摆放时于组首尾各插入一半，使外框与相邻节点拉开、不再被覆盖。
+;(() => {
+  const OF_PAD_Y_DEFAULT = 10
+  const OF_STROKE_WIDTH_DEFAULT = 2
+
+  // 节点的外框组标识；没有 groupId 但有 outerFrame 时用 uid 兜底，避免误合并
+  function getNodeOuterFrameGroupId(node) {
+    if (!node || typeof node.getData !== 'function') return null
+    const of = node.getData('outerFrame')
+    if (!of) return null
+    return of.groupId || `single-${node.uid || ''}`
+  }
+
+  // 单个外框组需要额外预留的垂直高度（上下各一半）：paddingY*2 + 描边宽度
+  function getFrameGroupExtra(layout, firstNode) {
+    const opt = (layout && layout.mindMap && layout.mindMap.opt) || {}
+    const padY =
+      typeof opt.outerFramePaddingY === 'number'
+        ? opt.outerFramePaddingY
+        : OF_PAD_Y_DEFAULT
+    const of = firstNode && firstNode.getData && firstNode.getData('outerFrame')
+    const sw =
+      of && typeof of.strokeWidth === 'number'
+        ? of.strokeWidth
+        : OF_STROKE_WIDTH_DEFAULT
+    return padY * 2 + sw
+  }
+
+  // 按“连续相同的 groupId”把有序节点列表分成组
+  function splitFrameGroups(list) {
+    const groups = []
+    let cur = null
+    ;(list || []).forEach((node, i) => {
+      const gid = getNodeOuterFrameGroupId(node)
+      if (cur && cur.groupId !== null && gid === cur.groupId) {
+        cur.end = i
+        cur.count++
+      } else {
+        cur = { groupId: gid, start: i, end: i, count: 1 }
+        groups.push(cur)
+      }
+    })
+    return groups
+  }
+
+  // 统计列表中所有外框组需要额外累计的垂直高度之和
+  function computeFrameExtra(list, layout) {
+    return splitFrameGroups(list).reduce((sum, g) => {
+      if (g.groupId === null) return sum
+      return sum + getFrameGroupExtra(layout, list[g.start])
+    }, 0)
+  }
+
+  // 摆放子节点：外框组首尾各插入 extra/2，保证与 areaHeight 公式一致
+  function placeChildrenWithFrames(list, startTop, marginY, layout) {
+    let totalTop = startTop
+    splitFrameGroups(list).forEach(g => {
+      const isFrame = g.groupId !== null
+      const extra = isFrame ? getFrameGroupExtra(layout, list[g.start]) : 0
+      if (isFrame) totalTop += extra / 2
+      for (let i = g.start; i <= g.end; i++) {
+        const node = list[i]
+        node.top = totalTop
+        totalTop += node.height + marginY
+      }
+      if (isFrame) totalTop += extra / 2
+    })
+    return totalTop
+  }
+
+  // —— MindMap（思维导图，分左右方向）——
+  MindMapLayout.prototype.computedBaseValue = function () {
+    walk(
+      this.renderer.renderTree,
+      null,
+      (cur, parent, isRoot, layerIndex, index, ancestors) => {
+        let newNode = this.createNode(cur, parent, isRoot, layerIndex, index, ancestors)
+        if (isRoot) {
+          this.setNodeCenter(newNode)
+        } else {
+          if (parent._node.dir) {
+            newNode.dir = parent._node.dir
+          } else {
+            newNode.dir =
+              newNode.getData('dir') ||
+              (index % 2 === 0
+                ? CONSTANTS.LAYOUT_GROW_DIR.RIGHT
+                : CONSTANTS.LAYOUT_GROW_DIR.LEFT)
+          }
+          newNode.left =
+            newNode.dir === CONSTANTS.LAYOUT_GROW_DIR.RIGHT
+              ? parent._node.left + parent._node.width + this.getMarginX(layerIndex)
+              : parent._node.left - this.getMarginX(layerIndex) - newNode.width
+        }
+        if (!cur.data.expand) {
+          return true
+        }
+      },
+      (cur, parent, isRoot, layerIndex) => {
+        if (!cur.data.expand) {
+          cur._node.leftChildrenAreaHeight = 0
+          cur._node.rightChildrenAreaHeight = 0
+          return
+        }
+        let leftLen = 0
+        let rightLen = 0
+        let leftChildrenAreaHeight = 0
+        let rightChildrenAreaHeight = 0
+        const leftList = []
+        const rightList = []
+        cur._node.children.forEach(item => {
+          if (item.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT) {
+            leftLen++
+            leftChildrenAreaHeight += item.height
+            leftList.push(item)
+          } else {
+            rightLen++
+            rightChildrenAreaHeight += item.height
+            rightList.push(item)
+          }
+        })
+        const marginY = this.getMarginY(layerIndex + 1)
+        cur._node.leftChildrenAreaHeight =
+          leftChildrenAreaHeight + (leftLen + 1) * marginY + computeFrameExtra(leftList, this)
+        cur._node.rightChildrenAreaHeight =
+          rightChildrenAreaHeight + (rightLen + 1) * marginY + computeFrameExtra(rightList, this)
+        let generalizationNodeHeight = cur._node.checkHasGeneralization()
+          ? cur._node._generalizationNodeHeight + marginY
+          : 0
+        cur._node.leftChildrenAreaHeight2 = Math.max(
+          cur._node.leftChildrenAreaHeight,
+          generalizationNodeHeight
+        )
+        cur._node.rightChildrenAreaHeight2 = Math.max(
+          cur._node.rightChildrenAreaHeight,
+          generalizationNodeHeight
+        )
+      },
+      true,
+      0
+    )
+  }
+
+  MindMapLayout.prototype.computedTopValue = function () {
+    walk(
+      this.root,
+      null,
+      (node, parent, isRoot, layerIndex) => {
+        if (node.getData('expand') && node.children && node.children.length) {
+          let marginY = this.getMarginY(layerIndex + 1)
+          let baseTop = node.top + node.height / 2 + marginY
+          const leftList = node.children.filter(c => c.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT)
+          const rightList = node.children.filter(c => c.dir === CONSTANTS.LAYOUT_GROW_DIR.RIGHT)
+          placeChildrenWithFrames(leftList, baseTop - node.leftChildrenAreaHeight / 2, marginY, this)
+          placeChildrenWithFrames(rightList, baseTop - node.rightChildrenAreaHeight / 2, marginY, this)
+        }
+      },
+      null,
+      true
+    )
+  }
+
+  // —— LogicalStructure（逻辑结构图，单方向）——
+  LogicalStructureLayout.prototype.computedBaseValue = function () {
+    let sortIndex = 0
+    walk(
+      this.renderer.renderTree,
+      null,
+      (cur, parent, isRoot, layerIndex, index, ancestors) => {
+        let newNode = this.createNode(cur, parent, isRoot, layerIndex, index, ancestors)
+        newNode.sortIndex = sortIndex
+        sortIndex++
+        if (isRoot) {
+          this.setNodeCenter(newNode)
+        } else {
+          if (this.isUseLeft) {
+            newNode.left = parent._node.left - newNode.width - this.getMarginX(layerIndex)
+          } else {
+            newNode.left = parent._node.left + parent._node.width + this.getMarginX(layerIndex)
+          }
+        }
+        if (!cur.data.expand) {
+          return true
+        }
+      },
+      (cur, parent, isRoot, layerIndex) => {
+        const children = cur._node.children || []
+        const len = cur.data.expand === false ? 0 : children.length
+        const marginY = this.getMarginY(layerIndex + 1)
+        cur._node.childrenAreaHeight = len
+          ? children.reduce((h, item) => h + item.height, 0) +
+            (len + 1) * marginY +
+            computeFrameExtra(children, this)
+          : 0
+        let generalizationNodeHeight = cur._node.checkHasGeneralization()
+          ? cur._node._generalizationNodeHeight + marginY
+          : 0
+        cur._node.childrenAreaHeight2 = Math.max(
+          cur._node.childrenAreaHeight,
+          generalizationNodeHeight
+        )
+      },
+      true,
+      0
+    )
+  }
+
+  LogicalStructureLayout.prototype.computedTopValue = function () {
+    walk(
+      this.root,
+      null,
+      (node, parent, isRoot, layerIndex) => {
+        if (node.getData('expand') && node.children && node.children.length) {
+          let marginY = this.getMarginY(layerIndex + 1)
+          let top = node.top + node.height / 2 - node.childrenAreaHeight / 2
+          placeChildrenWithFrames(node.children, top + marginY, marginY, this)
+        }
+      },
+      null,
+      true
+    )
+  }
+})()
 
 function normalizeNodeData(node) {
   if (!node) return null
@@ -192,6 +439,11 @@ const props = defineProps({
   fileId: {
     type: String,
     default: ''
+  },
+  // 全屏状态（由父组件控制，分屏模式下全局共用全屏按钮）
+  fullscreen: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -204,10 +456,12 @@ const emit = defineEmits([
   'ai-rewrite',
   'ai-cloze',
   'ai-cloze-full-map',
+  'ai-rewrite-full-map',
   'reorganize-mindmap',
   'ai-quiz',
   'ai-add-to-chat',
   'add-review',
+  'add-tag',
   'open-reference-file',
   'fullscreen-change'
 ])
@@ -243,6 +497,13 @@ const setFullscreen = (v) => {
   emit('fullscreen-change', next)
   syncAfterFullscreenChange()
 }
+
+// 监听父组件传入的 fullscreen prop（分屏模式下由全局按钮控制）
+watch(() => props.fullscreen, (v) => {
+  if (v !== isFullscreen.value) {
+    setFullscreen(v)
+  }
+}, { immediate: true })
 const onFullscreenKeydown = (e) => {
   if (e.key === 'Escape' && isFullscreen.value) {
     e.stopPropagation()
@@ -324,6 +585,10 @@ const nodeImageViewerVisible = ref(false)
 const nodeImageViewerSrc = ref('')
 const nodeImageHintVisible = ref(false)
 const nodeImageHintPos = ref({ x: 0, y: 0 })
+// 富文本内嵌图片（CTRL+V 粘贴进节点的 <img>）交互状态
+const nodeImgResizeVisible = ref(false)
+const nodeImgResizePos = ref({ x: 0, y: 0 })
+let richImgResizeState = null // 当前拖拽缩放中的 { img, node, wrap, startX, startY, startW, startH }
 
 // ============ 预览统一自动隐藏：鼠标位置驱动 ============
 // 规则：鼠标在悬浮窗/引用搜索列表/引用链接上，或悬浮窗内拖动中、画布平移中 → 保持显示；
@@ -876,14 +1141,21 @@ const initMindMap = () => {
     isDisableDrag: true,
     // 节点量大时开启性能模式：只渲染视口及四周少量节点，拖动/缩放不会全量重绘。
     // AI 工具读取数据仍走 mindMap.getData()，不受懒渲染影响。
+    // 注意：removeNodeWhenOutCanvas 必须为 false。若为 true，移出画布的节点会被从
+    // DOM 移除，图片节点（SVGImage 异步加载）在“移除→重新插入”循环中会丢失，表现为
+    // 滚轮缩放画布时图片消失、图片拖拽缩放/悬浮提示/双击全屏交互失效。
     openPerformance: true,
     performanceConfig: {
       time: 120,
       padding: 120,
-      removeNodeWhenOutCanvas: true
+      removeNodeWhenOutCanvas: false
     },
     // 编辑时实时在节点上渲染文字，编辑框透明无阴影贴合节点，而非独立悬浮窗
     openRealtimeRenderOnNodeTextEdit: true,
+    // 编辑框挂载在 document.body，默认 z-index 3000 低于全屏层（5000），
+    // 全屏模式下双击编辑时输入框连同光标/选中态会被全屏容器整体遮挡，文字"看不见"。
+    // 调高到 7000（高于全屏层 5000 与悬浮 AI 对话 6000），保证任何模式下编辑框可见
+    nodeTextEditZIndex: 7000,
     // 节点图片缩放/删除按钮更紧凑
     imgResizeBtnSize: 18,
     // 进入编辑前把旧版内联 font-weight/font-style 等归一化为 Quill 语义标签，
@@ -1049,10 +1321,23 @@ const initMindMap = () => {
     console.warn('[MindMapEditor] 概要线样式补丁失败:', e)
   }
 
+  // 图片缩放（SET_NODE_IMAGE）后，openPerformance 懒渲染下节点边框可能不随图片尺寸更新，
+  // 用防抖 render 强制刷新节点形状尺寸（文本编辑进行中时跳过，避免干扰输入框）
+  let imgResizeRenderTimer = null
+
   // 监听数据变化 —— 仅在用户编辑时回传，程序性 setData 时不回传
   mindMap.on('data_change', (data) => {
     if (isSettingData) return
-    emit('data-change', data)
+    // 带上 fileId，App 层按文件独立跟踪脏标记（多窗口各自保存）
+    emit('data-change', data, props.fileId)
+    clearTimeout(imgResizeRenderTimer)
+    imgResizeRenderTimer = setTimeout(() => {
+      imgResizeRenderTimer = null
+      const editing = mindMap && mindMap.richText && mindMap.richText.node
+      if (mindMap && props.visible && !editing) {
+        try { mindMap.render() } catch (e) { /* 忽略 */ }
+      }
+    }, 300)
   })
 
   // 监听节点激活
@@ -1109,12 +1394,32 @@ const initMindMap = () => {
     })
   })
 
-  // 双击节点图片：全屏查看（NodeImgAdjust 负责拖拽缩放）
+  // 双击节点图片：全屏查看（NodeImgAdjust 负责右下角拖拽缩放）
   mindMap.on('node_img_dblclick', (node) => {
     openNodeImageViewer(node)
   })
 
-  // 节点图片悬浮：中心显示“双击打开图片”提示
+  // 单击节点图片：全屏查看。通过 node_click 判断点击目标是 SVG <image> 元素
+  // （img.on('click') 在 simple-mind-map 节点事件体系下不稳定，改用 node_click 更可靠）
+  // 单击节点备注图标：直接打开备注编辑
+  mindMap.on('node_click', (node, e) => {
+    try {
+      const target = e?.target
+      const isImage = target?.tagName?.toLowerCase?.() === 'image' || !!(target?.closest && target.closest('image'))
+      if (isImage && node?.getData?.('image')) {
+        openNodeImageViewer(node)
+        return
+      }
+      // 点击备注图标：直接打开备注编辑
+      const isNote = target?.closest && target.closest('.smm-node-note')
+      if (isNote && node) {
+        e?.stopPropagation?.()
+        onNodeNote([node])
+      }
+    } catch (err) {}
+  })
+
+  // 节点图片悬浮：中心显示“点击查看大图”提示
   mindMap.on('node_img_mouseenter', (node, img) => {
     try {
       const rect = img?.rbox?.() || img?.node?.getBoundingClientRect?.()
@@ -1361,6 +1666,10 @@ const initMindMap = () => {
   try {
     mindMap.keyCommand.removeShortcut('Control+Enter')
   } catch (e) { /* 旧版本库无此方法时忽略 */ }
+  // 库默认 Control+i = 适应画布缩放，与 App.vue 的「Ctrl+I 斜体」冲突，移除库内置绑定
+  try {
+    mindMap.keyCommand.removeShortcut('Control+i')
+  } catch (e) { /* 忽略 */ }
 }
 
 /**
@@ -1871,6 +2180,33 @@ const deleteEmptyNodeAndEditPrevious = (node) => {
 const handleBackspaceInQuill = (e) => {
   const rt = mindMap?.richText
   if (!rt || !rt.showTextEdit || !rt.quill || !rt.node) return
+
+  // 节点带图片时：文字为空、或光标在文字最前面，Backspace 优先删除图片（而非文字/节点）
+  const hasImage = !!(rt.node.getData && rt.node.getData('image'))
+  if (hasImage) {
+    let atStart = false
+    try {
+      const sel = rt.quill.getSelection()
+      atStart = !sel || sel.index <= 0
+    } catch (err) {
+      atStart = false
+    }
+    if (isQuillNodeEmpty() || atStart) {
+      e.preventDefault()
+      e.stopPropagation()
+      // 长按重复的 Backspace 只删一次图片，不连续删除
+      if (e.repeat) return
+      try {
+        mindMap.execCommand('SET_NODE_IMAGE', rt.node, { url: null })
+      } catch (err) {
+        console.warn('[MindMapEditor] Backspace 删除节点图片失败:', err)
+      }
+      return
+    }
+    // 光标不在文字开头：交给 Quill 默认删除文字
+    return
+  }
+
   if (!isQuillNodeEmpty()) return // 还有文字时交给 Quill 默认删除
 
   e.preventDefault()
@@ -1945,8 +2281,206 @@ const setupLinkInteraction = () => {
   document.addEventListener('mouseout', onLinkLeave, true)
   // 点击弹窗外非编辑器区域：关闭引用弹窗
   document.addEventListener('mousedown', onRefPopupExternalMousedown, true)
+  // 点击预览悬浮窗外区域：关闭预览悬浮窗
+  document.addEventListener('mousedown', onPreviewExternalMousedown, true)
   // Quill 输入检测：@/# 触发引用弹窗
   document.addEventListener('input', onQuillInputCapture, true)
+  // 富文本内嵌图片：hover 提示 / 单击全屏 / 缩放把手
+  setupRichImageInteraction()
+}
+
+/* ============================================================
+ * 富文本内嵌图片交互（CTRL+V 粘贴进节点的 <img>）
+ * NodeImgAdjust 插件与 node_img_* 事件只作用于节点级图片（SVG <image>，
+ * 通过 SET_NODE_IMAGE 插入），对富文本内嵌 <img> 无效，故用 document 级
+ * 事件委托单独实现：hover 提示、单击全屏、右下角拖拽缩放。
+ * ============================================================ */
+
+// 判断事件目标是否命中富文本内嵌图片（渲染态 .smm-richtext-node-wrap img /
+// 编辑态 .ql-editor img），排除全屏查看器与预览窗内的图片
+const getRichImgTarget = (target) => {
+  if (!target || !target.closest) return null
+  const img =
+    target.closest('.smm-richtext-node-wrap img') ||
+    target.closest('.ql-editor img')
+  if (!img) return null
+  if (img.closest('.node-img-viewer-mask')) return null
+  if (img.closest('.preview-overlay')) return null
+  return img
+}
+
+let richImgCurrent = null // 当前 hover 的富文本图片元素
+let richImgHideTimer = null
+
+const hideRichImgOverlay = () => {
+  nodeImageHintVisible.value = false
+  nodeImgResizeVisible.value = false
+  richImgCurrent = null
+}
+
+// 从 DOM 元素反查所属节点实例（遍历渲染树，比较节点 group 的原生 DOM 是否包含该元素）
+const findNodeByDomEl = (el) => {
+  if (!mindMap?.renderer?.root) return null
+  const walk = (node) => {
+    if (!node) return null
+    try {
+      if (node.group && node.group.node && node.group.node.contains(el)) {
+        return node
+      }
+    } catch (e) {}
+    if (node.children) {
+      for (const c of node.children) {
+        const r = walk(c)
+        if (r) return r
+      }
+    }
+    if (node._generalizationList) {
+      for (const g of node._generalizationList) {
+        const r = walk(g.generalizationNode)
+        if (r) return r
+      }
+    }
+    return null
+  }
+  return walk(mindMap.renderer.root)
+}
+
+const onRichImgOver = (e) => {
+  if (!props.visible) return
+  const img = getRichImgTarget(e.target)
+  if (!img) return
+  if (richImgHideTimer) {
+    clearTimeout(richImgHideTimer)
+    richImgHideTimer = null
+  }
+  richImgCurrent = img
+  const rect = img.getBoundingClientRect()
+  nodeImageHintPos.value = {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2
+  }
+  nodeImageHintVisible.value = true
+  // 仅渲染态显示右下角缩放把手；编辑态图片由 Quill 管理，不提供缩放
+  if (img.closest('.smm-richtext-node-wrap')) {
+    nodeImgResizePos.value = { x: rect.right, y: rect.bottom }
+    nodeImgResizeVisible.value = true
+  }
+}
+
+const onRichImgOut = (e) => {
+  const img = getRichImgTarget(e.target)
+  if (!img) return
+  // 延时隐藏，给鼠标从图片移到缩放把手的间隙留时间
+  richImgHideTimer = setTimeout(() => {
+    hideRichImgOverlay()
+  }, 150)
+}
+
+const onRichImgClick = (e) => {
+  if (!props.visible) return
+  const img = getRichImgTarget(e.target)
+  if (!img) return
+  const src = img.getAttribute('src') || ''
+  if (!src) return
+  e.preventDefault()
+  e.stopPropagation()
+  nodeImageViewerSrc.value = src
+  // 延迟打开，避免双击/连续点击时第二次 click 立即关闭刚打开的查看器
+  setTimeout(() => {
+    nodeImageViewerVisible.value = true
+  }, 250)
+}
+
+// 缩放把手 hover 时保持把手显示
+const onRichImgHandleEnter = () => {
+  if (richImgHideTimer) {
+    clearTimeout(richImgHideTimer)
+    richImgHideTimer = null
+  }
+  nodeImgResizeVisible.value = true
+}
+
+const onRichImgHandleLeave = () => {
+  hideRichImgOverlay()
+}
+
+const onRichImgResizeMousedown = (e) => {
+  if (!richImgCurrent) return
+  e.preventDefault()
+  e.stopPropagation()
+  const img = richImgCurrent
+  const rect = img.getBoundingClientRect()
+  const fo = img.closest('foreignObject')
+  const group = img.closest('.smm-node')
+  const shape = group ? group.querySelector('.smm-node-shape') : null
+  richImgResizeState = {
+    img,
+    node: findNodeByDomEl(img),
+    fo,
+    shape,
+    foW: fo ? parseFloat(fo.getAttribute('width') || rect.width) : rect.width,
+    foH: fo ? parseFloat(fo.getAttribute('height') || rect.height) : rect.height,
+    shapeW: shape ? parseFloat(shape.getAttribute('width') || 0) : 0,
+    shapeH: shape ? parseFloat(shape.getAttribute('height') || 0) : 0,
+    startX: e.clientX,
+    startY: e.clientY,
+    startW: rect.width,
+    startH: rect.height
+  }
+  document.addEventListener('mousemove', onRichImgResizeMove, true)
+  document.addEventListener('mouseup', onRichImgResizeUp, true)
+}
+
+const onRichImgResizeMove = (e) => {
+  const s = richImgResizeState
+  if (!s) return
+  e.preventDefault()
+  const w = Math.max(20, s.startW + (e.clientX - s.startX))
+  const h = Math.max(20, s.startH + (e.clientY - s.startY))
+  const dw = w - s.startW
+  const dh = h - s.startH
+  // 内联样式覆盖 CSS 的 max-width/max-height（180/120px），允许放大
+  s.img.style.width = `${w}px`
+  s.img.style.height = `${h}px`
+  s.img.style.maxWidth = `${w}px`
+  s.img.style.maxHeight = `${h}px`
+  // 实时更新 foreignObject 尺寸，避免图片被裁剪，节点内容随之扩展
+  if (s.fo) {
+    s.fo.setAttribute('width', s.foW + dw)
+    s.fo.setAttribute('height', s.foH + dh)
+  }
+  // 实时更新节点形状（边框）尺寸，仅 rect 类形状；其余松手后重渲染校准
+  if (s.shape && s.shape.tagName.toLowerCase() === 'rect') {
+    s.shape.setAttribute('width', s.shapeW + dw)
+    s.shape.setAttribute('height', s.shapeH + dh)
+  }
+  const rect = s.img.getBoundingClientRect()
+  nodeImgResizePos.value = { x: rect.right, y: rect.bottom }
+}
+
+const onRichImgResizeUp = () => {
+  document.removeEventListener('mousemove', onRichImgResizeMove, true)
+  document.removeEventListener('mouseup', onRichImgResizeUp, true)
+  const s = richImgResizeState
+  richImgResizeState = null
+  if (!s) return
+  // 把缩放后的尺寸持久化回节点文本 HTML，触发完整重渲染让边框正确跟随
+  try {
+    const node = s.node || findNodeByDomEl(s.img)
+    const wrap = s.img.closest('.smm-richtext-node-wrap')
+    if (node && wrap && mindMap) {
+      // wrap 的 innerHTML 即节点 text 内容（createRichTextNode 用 text 渲染）
+      mindMap.execCommand('SET_NODE_TEXT', node, wrap.innerHTML, true, false)
+    }
+  } catch (err) {
+    console.warn('[MindMapEditor] 图片尺寸持久化失败:', err)
+  }
+}
+
+const setupRichImageInteraction = () => {
+  document.addEventListener('mouseover', onRichImgOver, true)
+  document.addEventListener('mouseout', onRichImgOut, true)
+  document.addEventListener('click', onRichImgClick, true)
 }
 
 /**
@@ -1961,6 +2495,21 @@ const onRefPopupExternalMousedown = (e) => {
   // 在预览悬浮窗内拖动导图属于挑选引用的一部分，不关闭搜索列表
   if (target.closest?.('.preview-overlay')) return
   closeRefPopup()
+}
+
+/**
+ * 引用预览悬浮窗外部 mousedown：点击悬浮窗以外区域即关闭。
+ * 排除：悬浮窗自身、引用搜索弹窗、引用链接（交给 click 阶段的 onLinkClick 重新定位/刷新）。
+ */
+const onPreviewExternalMousedown = (e) => {
+  if (!previewVisible.value) return
+  const target = e.target
+  if (!target?.closest) return
+  if (target.closest('.preview-overlay')) return
+  if (target.closest('.ref-popup')) return
+  const a = target.closest('a[href]')
+  if (a && isReferenceLink(a.getAttribute('href') || '')) return
+  closePreviewNow()
 }
 
 /**
@@ -2139,6 +2688,10 @@ const onAiClozeFullMap = () => {
   emit('ai-cloze-full-map')
 }
 
+const onAiRewriteFullMap = () => {
+  emit('ai-rewrite-full-map')
+}
+
 const onReorganizeMindmap = () => {
   emit('reorganize-mindmap')
 }
@@ -2154,6 +2707,10 @@ const onAiAddToChat = (nodes) => {
 
 const onAddReview = (nodes) => {
   emit('add-review', nodes)
+}
+
+const onAddTag = (nodes) => {
+  emit('add-tag', nodes)
 }
 
 /* ============ 节点备注（思维导图模式） ============ */
@@ -2281,11 +2838,16 @@ const openNodeImageViewer = (node) => {
   const src = node?.getData?.('image')
   if (!src) return
   nodeImageViewerSrc.value = src
-  nodeImageViewerVisible.value = true
+  // 延迟打开：双击图片时第二次 click 会立即落在刚打开的遮罩上，把查看器“打开又关闭”，
+  // 表现为需要点两次才能关闭；延迟到 click 序列结束后再打开即可避免
+  setTimeout(() => {
+    nodeImageViewerVisible.value = true
+  }, 250)
 }
 
 const onToggleCloze = () => {
   // 与 Ctrl+H 语义一致：只添加/移除挖空标记，显隐由鼠标左键单击挖空文字切换
+  syncMindMapRef(mindMap)
   const result = clozeWholeNode()
   if (result === 'added' || result === 'removed' || result === 'mixed') {
     setTimeout(() => applyClozeStyles(), 50)
@@ -2295,6 +2857,7 @@ const onToggleCloze = () => {
 
 const onToggleClozeAll = () => {
   // 画布右键菜单：全局切换所有挖空的显隐
+  syncMindMapRef(mindMap)
   toggleAllCloze()
   setTimeout(() => applyClozeStyles(), 50)
   setTimeout(() => applyClozeStyles(), 200)
@@ -2302,6 +2865,7 @@ const onToggleClozeAll = () => {
 
 const onClearAllCloze = () => {
   // 画布右键菜单：移除全图所有挖空标记
+  syncMindMapRef(mindMap)
   const count = clearAllCloze()
   resetClozeState()
   saveClozeState()
@@ -2327,6 +2891,9 @@ watch(
   () => props.visible,
   (visible) => {
     if (visible) {
+      // 视图切回：同步挖空模块的 mindMapRef 到当前实例（多实例/切 Tab 后可能指向旧实例，
+      // 否则 applyClozeStyles 会作用到旧实例，点击挖空文字切换显隐失效）
+      syncMindMapRef(mindMap)
       nextTick(() => {
         if (mindMap) {
           if (renderedWhileHidden) {
@@ -2437,6 +3004,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   // 清理画布平移相关的 window 级监听器（防止组件卸载后残留）
   if (canvasPanCleanup) { canvasPanCleanup(); canvasPanCleanup = null }
+  if (imgResizeRenderTimer) { clearTimeout(imgResizeRenderTimer); imgResizeRenderTimer = null }
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null
@@ -2461,7 +3029,17 @@ onBeforeUnmount(() => {
   document.removeEventListener('mouseover', onLinkHover, true)
   document.removeEventListener('mouseout', onLinkLeave, true)
   document.removeEventListener('mousedown', onRefPopupExternalMousedown, true)
+  document.removeEventListener('mousedown', onPreviewExternalMousedown, true)
   document.removeEventListener('input', onQuillInputCapture, true)
+  // 清理富文本内嵌图片交互监听
+  document.removeEventListener('mouseover', onRichImgOver, true)
+  document.removeEventListener('mouseout', onRichImgOut, true)
+  document.removeEventListener('click', onRichImgClick, true)
+  document.removeEventListener('mousemove', onRichImgResizeMove, true)
+  document.removeEventListener('mouseup', onRichImgResizeUp, true)
+  if (richImgHideTimer) {
+    clearTimeout(richImgHideTimer)
+  }
   if (previewHideTimer) {
     clearTimeout(previewHideTimer)
   }
@@ -2474,6 +3052,7 @@ onBeforeUnmount(() => {
 defineExpose({
   getMindMap: () => mindMap,
   setFullscreen,
+  onNodeNote,
   // 提交进行中的文本编辑（导图 quill 编辑框）：hideEditTextBox 会把编辑内容写回节点数据。
   // 供关窗保护/切换文件前调用，避免编辑中的文本未入库即丢失
   commitEditing: () => {
@@ -2549,18 +3128,21 @@ defineExpose({
     }
   },
   toggleCloze: () => {
+    syncMindMapRef(mindMap)
     return toggleAllCloze()
   },
   isClozeHidden: () => {
     return isClozeHiddenAll()
   },
   applyCloze: () => {
+    syncMindMapRef(mindMap)
     applyClozeStyles()
   },
   insertNodeImage: (nodes) => {
     onInsertNodeImage(nodes)
   },
   createCloze: () => {
+    syncMindMapRef(mindMap)
     const result = clozeWholeNode()
     if (result === 'added' || result === 'removed' || result === 'mixed') {
       setTimeout(() => applyClozeStyles(), 50)
@@ -2570,6 +3152,7 @@ defineExpose({
     return result
   },
   toggleSelectionCloze: () => {
+    syncMindMapRef(mindMap)
     const result = toggleSelectionCloze()
     if (result === 'added') {
       setTimeout(() => applyClozeStyles(), 50)
@@ -2745,6 +3328,25 @@ defineExpose({
   pointer-events: none;
   transform: translate(-50%, -50%);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* 富文本内嵌图片右下角缩放把手 */
+.node-img-resize-handle {
+  position: fixed;
+  z-index: 6001;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: #ffffff;
+  border: 2px solid var(--apple-blue, #007aff);
+  cursor: nwse-resize;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  transition: background 0.12s;
+}
+
+.node-img-resize-handle:hover {
+  background: var(--apple-blue, #007aff);
 }
 
 .node-img-viewer-enter-active,

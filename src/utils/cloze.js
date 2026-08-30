@@ -246,6 +246,9 @@ export const applyClozeStyles = () => {
           }
         })
       }
+      // 改写标记角标：被 AI 改写过的节点显示「改」角标，点击一键还原原文
+      const isRewritten = !!(typeof node.getData === 'function' && node.getData('clozeRewrite'))
+      ensureRewriteBadge(node, el, isRewritten)
     }
     if (node.children) {
       node.children.forEach(walk)
@@ -278,6 +281,83 @@ export const applyClozeStyles = () => {
       }
     })
   }
+}
+
+/* ==================== 改写标记 + 一键还原 ==================== */
+
+const escapePlainText = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+})[c])
+
+const wrapClozesInPlainText = (text, clozes) => {
+  let plainText = String(text ?? '')
+  ;(clozes || []).forEach(cloze => {
+    plainText = plainText.split(cloze).join('<span class="smm-cloze">' + escapePlainText(cloze) + '</span>')
+  })
+  return '<p>' + plainText + '</p>'
+}
+
+// 在节点 <g> 上维护「改」角标（改写标记）；show=false 时移除
+const ensureRewriteBadge = (node, el, show) => {
+  let badge = el.querySelector('.smm-rewrite-badge')
+  if (!show) {
+    if (badge) badge.remove()
+    return
+  }
+  const ns = 'http://www.w3.org/2000/svg'
+  if (!badge) {
+    badge = document.createElementNS(ns, 'g')
+    badge.setAttribute('class', 'smm-rewrite-badge')
+    badge.setAttribute('data-uid', node.uid)
+    badge.style.cursor = 'pointer'
+    const circle = document.createElementNS(ns, 'circle')
+    circle.setAttribute('r', '8')
+    circle.setAttribute('fill', '#f59e0b')
+    circle.setAttribute('stroke', '#ffffff')
+    circle.setAttribute('stroke-width', '1.5')
+    const text = document.createElementNS(ns, 'text')
+    text.setAttribute('font-size', '10')
+    text.setAttribute('fill', '#ffffff')
+    text.setAttribute('text-anchor', 'middle')
+    text.setAttribute('dominant-baseline', 'central')
+    text.textContent = '改'
+    badge.appendChild(circle)
+    badge.appendChild(text)
+    el.appendChild(badge)
+  }
+  try {
+    const bbox = el.getBBox()
+    const x = bbox.x + bbox.width + 6
+    const y = bbox.y - 6
+    badge.setAttribute('transform', `translate(${x}, ${y})`)
+  } catch (e) { /* 忽略 */ }
+}
+
+// 一键还原：从备注恢复原文并重新挖空，撤销改写（保留备注作为备份）
+export const restoreRewrite = (node) => {
+  if (!node) return false
+  const original = (typeof node.getData === 'function' ? node.getData('note') : node.note) || ''
+  if (!original) return false
+  const clozes = (typeof node.getData === 'function' ? node.getData('clozeRewriteClozes') : null) || []
+  const originalPlain = String(original).replace(/<[^>]+>/g, '').trim()
+  let newText = ''
+  if (Array.isArray(clozes) && clozes.length > 0) {
+    newText = wrapClozesInPlainText(originalPlain, clozes)
+  } else {
+    newText = '<p>' + escapePlainText(originalPlain) + '</p>'
+  }
+  if (typeof node.setText === 'function') {
+    node.setText(newText, true)
+  } else if (typeof node.setData === 'function') {
+    node.setData({ text: newText, richText: true })
+  }
+  // 清除改写标记（保留备注原文作为备份）
+  if (typeof node.setData === 'function') {
+    try { node.setData({ clozeRewrite: false, clozeRewriteClozes: [] }) } catch (e) {}
+  }
+  requestAnimationFrame(() => applyClozeStyles())
+  setTimeout(() => applyClozeStyles(), 100)
+  return true
 }
 
 /* ==================== 切换挖空显隐 ==================== */
@@ -341,6 +421,16 @@ export const setupClozeClickHandler = (mindMap) => {
         rt.textEditNode.contains(e.target)) {
       return
     }
+    // 改写角标点击 → 一键还原原文
+    const badgeEl = e.target && typeof e.target.closest === 'function' ? e.target.closest('.smm-rewrite-badge') : null
+    if (badgeEl) {
+      e.preventDefault()
+      e.stopPropagation()
+      const uid = badgeEl.getAttribute('data-uid') || ''
+      const node = uid ? findNodeByUid(mindMap.renderer.root, uid) : null
+      if (node) restoreRewrite(node)
+      return
+    }
     const clozeEl = findClozeTarget(e)
     if (!clozeEl) return
 
@@ -380,6 +470,8 @@ export const setupClozeClickHandler = (mindMap) => {
           if (typeof r.emitNodeActiveEvent === 'function') r.emitNodeActiveEvent()
         }
       } catch (e) {}
+      // 同步模块级 mindMapRef 到当前容器实例，避免多实例/切 Tab 后 applyClozeStyles 作用到旧实例
+      syncMindMapRef(mindMap)
       toggleNodeCloze(node)
     } else {
       console.warn('[cloze] click handler: node not found for uid', uid)
@@ -496,7 +588,9 @@ export const toggleSelectionCloze = () => {
 
   let range = quill.getSelection(true)
   if (!range || range.length === 0) {
-    range = rt.range || null
+    // 焦点短暂丢失时（按 Ctrl/Ctrl+H 会令编辑框失焦）quill.getSelection() 返回 null，
+    // 兜底读插件保存的 range/lastRange：lastRange 是 selection-change 时缓存的上一次有效选区
+    range = rt.range || rt.lastRange || null
   }
   if (!range || range.length === 0) return null
 
@@ -777,6 +871,12 @@ export const revertOutlineClozeSyntax = (text) => {
 /* ==================== 获取当前思维导图引用 ==================== */
 
 export const getMindMapRef = () => mindMapRef
+
+// 同步 mindMap 引用（多实例/切 Tab/重建导图后，模块级 mindMapRef 可能指向旧实例）。
+// 轻量：仅更新引用，不重绑事件（对比 initCloze 会 destroyCloze 再重建，开销大且会闪样式）
+export const syncMindMapRef = (mindMap) => {
+  if (mindMap) mindMapRef = mindMap
+}
 
 /* ==================== 挖空版本管理 ==================== */
 

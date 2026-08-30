@@ -1,5 +1,8 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
+// 深克隆：Vue 响应式 Proxy 无法被 IPC 结构化克隆，会抛 "An object could not be cloned"
+const clonePlain = (obj) => JSON.parse(JSON.stringify(obj == null ? {} : obj))
+
 // 通过 contextBridge 安全地暴露 IPC 方法给渲染进程
 contextBridge.exposeInMainWorld('electronAPI', {
   // 获取拖入文件的本地路径（Electron 安全替代 File.path）
@@ -25,6 +28,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   selectFile: () => ipcRenderer.invoke('select-file'),
   listFiles: () => ipcRenderer.invoke('list-files'),
 
+  // 双击 .smm 文件拉起应用时，主进程转发文件路径到渲染进程（返回注销函数）
+  onOpenFile: (callback) => {
+    const handler = (_event, filePath) => callback(filePath)
+    ipcRenderer.on('app:openFile', handler)
+    return () => ipcRenderer.removeListener('app:openFile', handler)
+  },
+
   // 知识库检索
   searchKnowledgeBase: (query) => ipcRenderer.invoke('search-knowledge-base', query),
 
@@ -42,14 +52,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 统一深克隆：调用方可能传入 Vue 响应式 Proxy，IPC 结构化克隆会抛
   // "An object could not be cloned"；配置均为字符串/布尔，JSON 往返无损失
   setAIConfig: (config) => ipcRenderer.invoke('set-ai-config', JSON.parse(JSON.stringify(config || {}))),
-  fetchModels: (baseURL, apiKey) => ipcRenderer.invoke('ai:fetchModels', { baseURL, apiKey }),
+  // AI 请求超时时长（秒，默认 300 = 5 分钟）
+  getAiTimeout: () => ipcRenderer.invoke('get-ai-timeout'),
+  setAiTimeout: (seconds) => ipcRenderer.invoke('set-ai-timeout', seconds),
+  fetchModels: (baseURL, apiKey, profileId) => ipcRenderer.invoke('ai:fetchModels', { baseURL, apiKey, profileId }),
   // 实测探测多模态模型可用性（发真实小图验证）
-  testVisionModel: (baseURL, apiKey, model, autoComplete) => ipcRenderer.invoke('ai:testVisionModel', { baseURL, apiKey, model, autoComplete }),
+  testVisionModel: (baseURL, apiKey, model, autoComplete, profileId) => ipcRenderer.invoke('ai:testVisionModel', { baseURL, apiKey, model, autoComplete, profileId }),
   getVisionConfig: () => ipcRenderer.invoke('ai:getVisionConfig'),
 
-  // AI 对话请求（通过主进程代理，避免 CORS）
-  aiChat: (url, headers, body) => ipcRenderer.invoke('ai:chat', { url, headers, body }),
-  aiChatStream: (url, headers, body, onData, onDone, onError) => {
+  // AI 对话请求（通过主进程代理，避免 CORS；apiKey 由主进程按 profileId 注入，渲染进程不持有明文）
+  aiChat: (url, headers, body, profileId) => ipcRenderer.invoke('ai:chat', { url, headers, body, profileId }),
+  // 文件上传（files API，multipart 走主进程代理）
+  aiUploadFile: (payload) => ipcRenderer.invoke('ai:uploadFile', payload || {}),
+  aiChatStream: (url, headers, body, onData, onDone, onError, profileId) => {
     const id = `stream_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`
 
     const chunkHandler = (_event, data) => {
@@ -74,7 +89,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on(`ai:chat:done:${id}`, doneHandler)
     ipcRenderer.on(`ai:chat:error:${id}`, errorHandler)
 
-    ipcRenderer.send('ai:chatStream', { id, url, headers, body })
+    ipcRenderer.send('ai:chatStream', { id, url, headers, body, profileId })
 
     return {
       cancel: () => {
@@ -88,6 +103,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDefaultSaveDir: () => ipcRenderer.invoke('get-default-save-dir'),
   setSaveDir: (dirPath) => ipcRenderer.invoke('set-save-dir', dirPath),
 
+  // 版本快照（覆盖保存自动备份，可列出/恢复）
+  listFileVersions: (filePath) => ipcRenderer.invoke('list-file-versions', filePath),
+  restoreFileVersion: (filePath, versionPath) => ipcRenderer.invoke('restore-file-version', filePath, versionPath),
+
   // 开机自启动（注册表 Run 键）
   autoLaunch: {
     get: () => ipcRenderer.invoke('auto-launch:get'),
@@ -98,7 +117,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   httpServer: {
     getStatus: () => ipcRenderer.invoke('http-server:getStatus'),
     setEnabled: (enabled) => ipcRenderer.invoke('http-server:setEnabled', !!enabled),
-    setQuality: (quality) => ipcRenderer.invoke('http-server:setQuality', quality)
+    setQuality: (quality) => ipcRenderer.invoke('http-server:setQuality', quality),
+    setLanAccess: (lanAccess) => ipcRenderer.invoke('http-server:setLanAccess', !!lanAccess),
+    resetToken: () => ipcRenderer.invoke('http-server:resetToken')
+  },
+
+  // 仅查看端口（多人共享只读查看屏幕，独立端口 + 独立 token，不支持操作）
+  httpViewOnly: {
+    getStatus: () => ipcRenderer.invoke('http-viewonly:getStatus'),
+    setEnabled: (enabled) => ipcRenderer.invoke('http-viewonly:setEnabled', !!enabled),
+    setLanAccess: (lanAccess) => ipcRenderer.invoke('http-viewonly:setLanAccess', !!lanAccess),
+    resetToken: () => ipcRenderer.invoke('http-viewonly:resetToken')
   },
 
   agentApi: {
@@ -112,22 +141,86 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
+  // MCP 服务端桥接（外部 AI 客户端通过 /mcp 端点调用本程序工具）
+  mcpServer: {
+    onRequest: (callback) => {
+      const handler = (_event, payload) => callback(payload)
+      ipcRenderer.on('mcp-server:request', handler)
+      return () => ipcRenderer.removeListener('mcp-server:request', handler)
+    },
+    sendResponse: (id, payload) => {
+      ipcRenderer.send('mcp-server:response', { id, ...(payload || {}) })
+    },
+    getInstallConfig: () => ipcRenderer.invoke('mcp-server:getInstallConfig')
+  },
+
+  // MCP 访问令牌管理（多令牌，每令牌独立工具权限范围）
+  mcpTokens: {
+    list: () => ipcRenderer.invoke('mcp-tokens:list'),
+    create: (opts) => ipcRenderer.invoke('mcp-tokens:create', opts || {}),
+    update: (id, patch) => ipcRenderer.invoke('mcp-tokens:update', { id, patch: patch || {} }),
+    remove: (id) => ipcRenderer.invoke('mcp-tokens:remove', { id }),
+    installConfig: (id) => ipcRenderer.invoke('mcp-tokens:installConfig', { id })
+  },
+
+  // 密码门禁
+  passwordGate: {
+    isEnabled: () => ipcRenderer.invoke('password:isEnabled'),
+    setPassword: (oldPassword, newPassword) => ipcRenderer.invoke('password:set', { oldPassword, newPassword }),
+    verifyPassword: (password) => ipcRenderer.invoke('password:verify', { password }),
+    validateSession: (token) => ipcRenderer.invoke('password:validateSession', { token }),
+    logout: () => ipcRenderer.invoke('password:logout'),
+    getLockStatus: () => ipcRenderer.invoke('password:getLockStatus')
+  },
+
   // MCP 多服务管理
+  fsGuard: {
+    // 渲染层在"打开 .smm 文件/用户选文件"时调用，把所属目录加入主进程白名单（review C.1）
+    setActiveFileDir: (dir) => ipcRenderer.invoke('fsGuard:setActiveFileDir', dir),
+    addAllowed: (dirs) => ipcRenderer.invoke('fsGuard:addAllowed', dirs),
+    reset: () => ipcRenderer.invoke('fsGuard:reset')
+  },
+
+  network: {
+    // 当前状态（主进程缓存）
+    getState: () => ipcRenderer.invoke('network:getState'),
+    // 主动探测一次（用于 UI 上的"重试"按钮）
+    checkNow: () => ipcRenderer.invoke('network:checkNow'),
+    // 订阅主进程推送（online/offline 变化 + 心跳）；返回 unsubscribe 函数
+    onStatusChange: (cb) => {
+      const handler = (_event, payload) => { try { if (typeof cb === 'function') cb(payload) } catch (e) {} }
+      ipcRenderer.on('network:status', handler)
+      return () => { try { ipcRenderer.removeListener('network:status', handler) } catch (e) {} }
+    }
+  },
   mcp: {
     list: () => ipcRenderer.invoke('mcp:list'),
     create: (server) => ipcRenderer.invoke('mcp:create', server),
     update: (id, patch) => ipcRenderer.invoke('mcp:update', id, patch),
     remove: (id) => ipcRenderer.invoke('mcp:delete', id),
-    listTools: (id) => ipcRenderer.invoke('mcp:listTools', id),
-    callTool: (id, toolName, args) => ipcRenderer.invoke('mcp:callTool', id, toolName, args)
+    listTools: (id, overrideTimeoutMs) => ipcRenderer.invoke('mcp:listTools', id, overrideTimeoutMs),
+    callTool: (id, toolName, args) => ipcRenderer.invoke('mcp:callTool', id, toolName, args),
+    // 主进程主动推送 MCP 服务状态变化（进程退出/启动失败）。订阅返回取消订阅函数。
+    onStatusChange: (cb) => {
+      const handler = (_event, payload) => { try { if (typeof cb === 'function') cb(payload) } catch (e) {} }
+      ipcRenderer.on('mcp:status', handler)
+      return () => { try { ipcRenderer.removeListener('mcp:status', handler) } catch (e) {} }
+    }
   },
 
   // Skills 多技能管理
   skills: {
     list: () => ipcRenderer.invoke('skills:list'),
-    create: (skill) => ipcRenderer.invoke('skills:create', skill),
-    update: (id, patch) => ipcRenderer.invoke('skills:update', id, patch),
-    remove: (id) => ipcRenderer.invoke('skills:delete', id)
+    create: (skill) => ipcRenderer.invoke('skills:create', clonePlain(skill)),
+    update: (id, patch) => ipcRenderer.invoke('skills:update', id, clonePlain(patch)),
+    remove: (id) => ipcRenderer.invoke('skills:delete', id),
+    // 拖拽导入：files 为 [{ name, relativePath, base64 }]，支持 .md / .zip / 含 SKILL.md 的文件夹
+    import: (files) => ipcRenderer.invoke('skills:import', {
+      files: (files || []).map((f) => ({ name: f.name, relativePath: f.relativePath, base64: f.base64 }))
+    }),
+    openDir: () => ipcRenderer.invoke('skills:openDir'),
+    // 获取内置「AI 能力扩展引导」Skill 的 SKILL.md 原文（用于「下载 Skill 创建指南」按钮）
+    getBuiltinGuideContent: () => ipcRenderer.invoke('skills:getBuiltinGuideContent')
   },
 
   // 自定义工具（userData/custom-tools + 项目 custom-tools）
@@ -138,7 +231,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openDir: () => ipcRenderer.invoke('customTools:openDir'),
     getSpec: () => ipcRenderer.invoke('customTools:getSpec'),
     saveSpec: () => ipcRenderer.invoke('customTools:saveSpec'),
-    importFolder: (folderName, files) => ipcRenderer.invoke('customTools:importFolder', { folderName, files })
+    importFolder: (folderName, files) => ipcRenderer.invoke('customTools:importFolder', { folderName, files }),
+    onStatusChange: (cb) => {
+      const handler = (_event, payload) => { try { if (typeof cb === 'function') cb(payload) } catch (e) {} }
+      ipcRenderer.on('customTools:status', handler)
+      return () => { try { ipcRenderer.removeListener('customTools:status', handler) } catch (e) {} }
+    }
   },
 
   // OCR 识别
@@ -146,6 +244,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ocrBase64: (base64Data, lang) => ipcRenderer.invoke('ocr-base64', base64Data, lang),
   ocrToMindmap: (base64Data, lang) => ipcRenderer.invoke('ocr-to-mindmap', base64Data, lang),
   ocrSmart: (base64Data, lang) => ipcRenderer.invoke('ocr-smart', base64Data, lang),
+  // 捕获主窗口画面（OCR 截图识别用）
+  captureWindow: () => ipcRenderer.invoke('ocr-capture-window'),
 
   // OCR 进度监听
   onOcrProgress: (callback) => {
@@ -179,6 +279,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     createFile: (filePath, content) => ipcRenderer.invoke('fs:createFile', filePath, content),
     move: (src, destDir) => ipcRenderer.invoke('fs:move', src, destDir),
     exists: (filePath) => ipcRenderer.invoke('fs:exists', filePath),
+    stat: (filePath) => ipcRenderer.invoke('fs:stat', filePath),
     absPath: (rawPath) => ipcRenderer.invoke('fs:absPath', rawPath),
     findFile: (opts) => ipcRenderer.invoke('fs:findFile', opts)
   },
@@ -302,14 +403,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     showOpenDialog: (options) => ipcRenderer.invoke('dialog:showOpenDialog', options)
   },
 
-  // 知识库检索（SQLite + FTS5）
+  // 知识库检索（SQLite + MiniSearch BM25）
   database: {
     search: (query) => ipcRenderer.invoke('db:search', query),
-    indexFile: (filePath, fileName, treeData) =>
-      ipcRenderer.invoke('db:indexFile', { filePath, fileName, treeData }),
+    indexFile: (filePath, fileName, treeData, mtime) =>
+      ipcRenderer.invoke('db:indexFile', { filePath, fileName, treeData, mtime }),
+    indexDocument: (opts) => ipcRenderer.invoke('db:indexDocument', opts),
     removeFile: (filePath) => ipcRenderer.invoke('db:removeFile', { filePath }),
     getStats: () => ipcRenderer.invoke('db:getStats'),
     listFiles: () => ipcRenderer.invoke('db:listFiles')
+  },
+
+  // 文档向量库（本地语义检索，模型在渲染进程推理）
+  vector: {
+    indexDocument: (opts) => ipcRenderer.invoke('vector:indexDocument', opts),
+    remove: (filePath) => ipcRenderer.invoke('vector:remove', { filePath }),
+    search: (queryVector, topK) => ipcRenderer.invoke('vector:search', { queryVector, topK }),
+    getStats: () => ipcRenderer.invoke('vector:getStats')
   },
 
   // 飞书机器人长连接（WebSocket）

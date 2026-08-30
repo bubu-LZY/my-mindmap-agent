@@ -75,8 +75,31 @@ export function isReferenceLink(href) {
 // ============ 文件扫描 ============
 
 /**
+ * 收集引用扫描的根目录列表：
+ * 目录树挂载的所有根文件夹 + 保存目录（自动根目录），与文件树展示范围一致。
+ * 从 localStorage 读取，避免依赖组件间传参。
+ */
+function collectScanRoots(rootPath) {
+  const dirs = []
+  if (Array.isArray(rootPath)) {
+    dirs.push(...rootPath)
+  } else if (typeof rootPath === 'string' && rootPath) {
+    dirs.push(rootPath)
+  }
+  try {
+    const roots = JSON.parse(localStorage.getItem('MINDMAP_FOLDER_ROOTS') || '[]')
+    if (Array.isArray(roots)) dirs.push(...roots)
+  } catch {}
+  try {
+    const auto = localStorage.getItem('MINDMAP_AUTO_ROOT')
+    if (auto) dirs.push(auto)
+  } catch {}
+  return [...new Set(dirs.filter(d => typeof d === 'string' && d))]
+}
+
+/**
  * 扫描文件列表
- * @param {string} rootPath 根目录路径（可选，默认使用保存目录）
+ * @param {string|string[]} rootPath 根目录路径（可选，默认扫描目录树所有根文件夹 + 保存目录）
  * @returns {Promise<Array<{name, path, parentName}>>}
  */
 export async function scanFiles(rootPath) {
@@ -84,7 +107,7 @@ export async function scanFiles(rootPath) {
     console.warn('引用文件扫描 IPC 不可用')
     return []
   }
-  const result = await window.electronAPI.refScanFiles(rootPath)
+  const result = await window.electronAPI.refScanFiles(collectScanRoots(rootPath))
   if (!result.success) {
     console.error('文件扫描失败:', result.error)
     return []
@@ -94,7 +117,7 @@ export async function scanFiles(rootPath) {
 
 /**
  * 扫描所有文件的节点
- * @param {string} rootPath 根目录路径（可选）
+ * @param {string|string[]} rootPath 根目录路径（可选）
  * @returns {Promise<Array<{name, fullPath, filePath, fileName, nodeUid, isNode}>>}
  */
 export async function scanNodes(rootPath) {
@@ -102,7 +125,7 @@ export async function scanNodes(rootPath) {
     console.warn('引用节点扫描 IPC 不可用')
     return []
   }
-  const result = await window.electronAPI.refScanNodes(rootPath)
+  const result = await window.electronAPI.refScanNodes(collectScanRoots(rootPath))
   if (!result.success) {
     console.error('节点扫描失败:', result.error)
     return []

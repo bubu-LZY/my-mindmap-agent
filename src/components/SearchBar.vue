@@ -41,12 +41,16 @@
             {{ semanticSearching ? '语义检索中...' : (semanticTimeout ? '语义检索超时（模型响应慢），关键词结果不受影响' : '暂无语义匹配结果') }}
           </div>
           <div
-            v-for="item in tabItems"
+            v-for="item in safeTabItems"
             :key="item.filePath + '::' + item.nodeUid"
             class="search-result-item"
             @mousedown.prevent="openResult(item)"
           >
             <div class="result-file-name">
+              <span
+                v-if="item.isTag"
+                class="tag-atomic"
+              >标签</span>
               <span class="result-file-name-text">{{ item.fileName }}</span>
               <span class="result-file-name-tags">
                 <span
@@ -57,7 +61,7 @@
                 <span v-if="item.similarity != null" class="similarity-badge" title="近似匹配值">{{ item.similarity }}%</span>
               </span>
             </div>
-            <div class="result-snippet" v-html="item.snippet"></div>
+            <div class="result-snippet" v-html="item.safeSnippet"></div>
           </div>
         </template>
         <div v-else-if="searching" class="search-status">关键词搜索中...</div>
@@ -72,6 +76,8 @@
 import { ref, computed, nextTick } from 'vue'
 import { searchService } from '../services/searchService'
 import { aiService } from '../services/aiService'
+import { getTags } from '../utils/tagStore'
+import { sanitizeSafeHtml } from '../utils/sanitizeHtml'
 
 const emit = defineEmits(['open-file'])
 
@@ -96,9 +102,58 @@ const semanticItems = computed(() =>
 )
 const tabItems = computed(() => activeTab.value === 'keyword' ? keywordItems.value : semanticItems.value)
 
+// 安全消毒后的搜索结果（避免 XSS）
+const safeTabItems = computed(() =>
+  tabItems.value.map(item => ({
+    ...item,
+    safeSnippet: sanitizeSafeHtml(item.snippet || '')
+  }))
+)
+
 const runKeywordSearch = async (q) => {
   const res = await searchService.search(q)
   return (res && res.results) || []
+}
+
+// 标签搜索：匹配标签名 + 备注，结果项带 isTag 标记（渲染层显示「标签」原子标识）
+const searchTags = (q) => {
+  try {
+    const tags = getTags()
+    if (!tags || !tags.length) return []
+    const ql = q.toLowerCase()
+    const results = []
+    for (const tag of tags) {
+      const name = String(tag.tag || '').toLowerCase()
+      const note = String(tag.note || '').toLowerCase()
+      const hitName = name.includes(ql)
+      const hitNote = note.includes(ql)
+      if (!hitName && !hitNote) continue
+      // 命中词高亮：优先展示备注命中，否则标签名
+      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      const mark = (s) => {
+        const e = esc(s)
+        const eq = esc(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        return e.replace(new RegExp(eq, 'gi'), (m) => `<mark>${m}</mark>`)
+      }
+      const snippet = hitNote
+        ? (hitName ? `标签「${mark(tag.tag)}」 备注：${mark(tag.note)}` : `标签「${esc(tag.tag)}」 备注：${mark(tag.note)}`)
+        : `标签「${mark(tag.tag)}」`
+      results.push({
+        filePath: tag.filePath,
+        fileName: tag.fileName,
+        nodeUid: tag.nodeUid || '',
+        fileType: 'tag',
+        snippet,
+        isTag: true,
+        tagId: tag.id,
+        tagText: tag.tag,
+        tagNote: tag.note,
+        page: tag.page,
+        scrollTop: tag.scrollTop
+      })
+    }
+    return results
+  } catch { return [] }
 }
 
 // 语义检索：让 AI 将查询扩展为带相关度分数的关键词，再对扩展词做本地检索
@@ -189,7 +244,9 @@ const doSearch = async () => {
     const keywordResults = await runKeywordSearch(q)
     // 防过期：查询期间输入可能已变化
     if (query.value.trim() !== q) return
-    results.value = keywordResults
+    // 标签结果（标签名 + 备注命中）排在关键词结果前面
+    const tagResults = searchTags(q)
+    results.value = [...tagResults, ...keywordResults]
   } catch (err) {
     console.error('[搜索] 失败:', err)
     results.value = []
@@ -225,7 +282,14 @@ const onEnter = () => {
 }
 
 const openResult = (item) => {
-  emit('open-file', { filePath: item.filePath, nodeUid: item.nodeUid })
+  emit('open-file', {
+    filePath: item.filePath,
+    nodeUid: item.nodeUid,
+    fileType: item.fileType,
+    isTag: item.isTag,
+    page: item.page,
+    scrollTop: item.scrollTop
+  })
   showResults.value = false
 }
 
@@ -445,6 +509,17 @@ defineExpose({ focus })
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+}
+.tag-atomic {
+  display: inline-block;
+  flex-shrink: 0;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
+  border-radius: 4px;
+  color: #409eff;
+  background: rgba(64, 158, 255, 0.12);
 }
 
 .result-file-name-tags {

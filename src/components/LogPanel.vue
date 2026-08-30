@@ -34,13 +34,41 @@
       </div>
     </div>
 
-    <!-- 日志统计 -->
+    <!-- 日志统计（点击徽章筛选对应类型，再次点击取消筛选） -->
     <div class="log-stats" v-if="logs.length > 0">
-      <span class="stat-badge send">发送 {{ sendCount }}</span>
-      <span class="stat-badge receive">返回 {{ receiveCount }}</span>
-      <span class="stat-badge tool" v-if="toolCallCount > 0">工具 {{ toolCallCount }}</span>
-      <span class="stat-badge error" v-if="errorCount > 0">错误 {{ errorCount }}</span>
+      <button
+        class="stat-badge send"
+        :class="{ active: activeFilter === 'send' }"
+        @click="toggleFilter('send')"
+        title="点击只看发送的消息，再次点击取消筛选"
+      >发送 {{ sendCount }}</button>
+      <button
+        class="stat-badge receive"
+        :class="{ active: activeFilter === 'receive' }"
+        @click="toggleFilter('receive')"
+        title="点击只看返回的消息，再次点击取消筛选"
+      >返回 {{ receiveCount }}</button>
+      <button
+        class="stat-badge tool"
+        v-if="toolCallCount > 0 || activeFilter === 'tool'"
+        :class="{ active: activeFilter === 'tool' }"
+        @click="toggleFilter('tool')"
+        title="点击只看工具调用/返回/报错日志，再次点击取消筛选"
+      >工具 {{ toolCallCount }}</button>
+      <button
+        class="stat-badge error"
+        v-if="errorCount > 0 || activeFilter === 'error'"
+        :class="{ active: activeFilter === 'error' }"
+        @click="toggleFilter('error')"
+        title="点击只看错误日志（含工具报错），再次点击取消筛选"
+      >错误 {{ errorCount }}</button>
       <span class="stat-badge auto-clear">30天自动清除</span>
+      <button
+        class="stat-badge download-trace"
+        v-if="logs.length > 0"
+        @click="downloadTraceJsonl"
+        title="下载本次会话的全部日志为 .jsonl 文件（review #16 行为回放）"
+      >下载回放 .jsonl</button>
     </div>
 
     <!-- 日志列表 -->
@@ -48,14 +76,19 @@
       <div v-if="logs.length === 0" class="log-empty">
         暂无日志记录
       </div>
+      <div v-else-if="filteredLogs.length === 0" class="log-empty">
+        「{{ filterLabel(activeFilter) }}」类型下暂无日志
+      </div>
       <div
-        v-for="log in logs"
+        v-for="log in filteredLogs"
         :key="log.id"
         class="log-entry"
         :class="log.type"
       >
         <div class="log-entry-header">
           <span class="log-type-tag" :class="log.type">{{ typeLabel(log.type) }}</span>
+          <span v-if="log.level && log.level !== 'info'" class="log-level-tag" :class="'level-' + log.level">{{ log.level }}</span>
+          <span v-if="log.event" class="log-event-tag" :title="log.event">{{ log.event }}</span>
           <span class="log-time">{{ formatLogTime(log.timestamp) }}</span>
           <span class="log-duration" v-if="log.durationMs !== undefined">{{ log.durationMs }}ms</span>
           <span class="log-model" v-if="log.model">{{ log.model }}</span>
@@ -97,10 +130,35 @@ const emit = defineEmits(['close'])
 const logs = ref([])
 const logListRef = ref(null)
 
+// 当前筛选类型：null（全部）| 'send' | 'receive' | 'tool' | 'error'
+const activeFilter = ref(null)
+
 const sendCount = computed(() => logs.value.filter(l => l.type === 'send').length)
 const receiveCount = computed(() => logs.value.filter(l => l.type === 'receive').length)
-const errorCount = computed(() => logs.value.filter(l => l.type === 'error').length)
-const toolCallCount = computed(() => logs.value.filter(l => l.type === 'tool_call' || l.type === 'tool_result' || l.type === 'tool_error').length)
+const errorCount = computed(() => logs.value.filter(l => l.type === 'error' || l.type === 'tool_error').length)
+const toolCallCount = computed(() => logs.value.filter(l => l.type === 'tool_call' || l.type === 'tool_result' || l.type === 'tool_error' || l.type === 'tool_rejected').length)
+
+// 点击徽章切换筛选；再点一次同类型则取消
+const toggleFilter = (filter) => {
+  activeFilter.value = activeFilter.value === filter ? null : filter
+}
+
+const filterLabel = (f) => {
+  const map = { send: '发送', receive: '返回', tool: '工具', error: '错误' }
+  return map[f] || f
+}
+
+const filteredLogs = computed(() => {
+  const f = activeFilter.value
+  if (!f) return logs.value
+  if (f === 'tool') {
+    return logs.value.filter(l => l.type === 'tool_call' || l.type === 'tool_result' || l.type === 'tool_error' || l.type === 'tool_rejected')
+  }
+  if (f === 'error') {
+    return logs.value.filter(l => l.type === 'error' || l.type === 'tool_error')
+  }
+  return logs.value.filter(l => l.type === f)
+})
 
 const typeLabel = (type) => {
   switch (type) {
@@ -111,7 +169,14 @@ const typeLabel = (type) => {
     case 'tool_call': return '工具调用'
     case 'tool_result': return '工具返回'
     case 'tool_error': return '工具错误'
+    case 'tool_rejected': return '工具取消'
     case 'abort': return '停止'
+    case 'compress': return '压缩'
+    case 'ocr': return 'OCR'
+    case 'plan': return '计划'
+    case 'plan_step': return '计划步骤'
+    case 'worker': return '子Agent'
+    case 'metrics': return '指标'
     default: return type
   }
 }
@@ -305,6 +370,14 @@ onMounted(() => {
   padding: 2px 8px;
   border-radius: 10px;
   font-weight: 500;
+  font-family: inherit;
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s, box-shadow 0.15s;
+}
+
+.stat-badge:not(.auto-clear):hover {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
 }
 
 .stat-badge.send {
@@ -312,9 +385,19 @@ onMounted(() => {
   color: #007aff;
 }
 
+.stat-badge.send.active {
+  background: #007aff;
+  color: #fff;
+}
+
 .stat-badge.receive {
   background: rgba(52, 199, 89, 0.1);
   color: #34c759;
+}
+
+.stat-badge.receive.active {
+  background: #34c759;
+  color: #fff;
 }
 
 .stat-badge.error {
@@ -322,21 +405,53 @@ onMounted(() => {
   color: #ff3b30;
 }
 
+.stat-badge.error.active {
+  background: #ff3b30;
+  color: #fff;
+}
+
 .stat-badge.tool {
   background: rgba(255, 149, 0, 0.1);
   color: #ff9500;
+}
+
+.stat-badge.tool.active {
+  background: #ff9500;
+  color: #fff;
 }
 
 .stat-badge.auto-clear {
   background: rgba(120, 120, 128, 0.08);
   color: #86868b;
   margin-left: auto;
+  cursor: default;
 }
 
 .log-list {
   flex: 1;
   overflow-y: auto;
   padding: 8px 12px;
+}
+
+.log-level-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 4px;
+  text-transform: uppercase;
+}
+.log-level-tag.level-error { background: #fef0f0; color: #f56c6c; border: 1px solid #fbc4c4; }
+.log-level-tag.level-warn { background: #fdf6ec; color: #e6a23c; border: 1px solid #f5dab1; }
+.log-level-tag.level-debug { background: #f0f9ff; color: #909399; border: 1px solid #dcdfe6; }
+.log-event-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 4px;
+  background: rgba(64, 158, 255, 0.1);
+  color: #409eff;
+  border: 1px solid rgba(64, 158, 255, 0.3);
+  font-family: monospace;
 }
 
 .log-empty {
@@ -395,6 +510,21 @@ onMounted(() => {
   background: rgba(255, 59, 48, 0.03);
 }
 
+.log-entry.tool_rejected {
+  border-left-color: #8e8e93;
+  background: rgba(142, 142, 147, 0.03);
+}
+
+.log-entry.compress,
+.log-entry.ocr,
+.log-entry.plan,
+.log-entry.plan_step,
+.log-entry.worker,
+.log-entry.metrics {
+  border-left-color: #5856d6;
+  background: rgba(88, 86, 214, 0.03);
+}
+
 .log-entry-header {
   display: flex;
   align-items: center;
@@ -443,6 +573,21 @@ onMounted(() => {
 .log-type-tag.tool_error {
   background: rgba(255, 59, 48, 0.15);
   color: #d70015;
+}
+
+.log-type-tag.tool_rejected {
+  background: rgba(142, 142, 147, 0.15);
+  color: #8e8e93;
+}
+
+.log-type-tag.compress,
+.log-type-tag.ocr,
+.log-type-tag.plan,
+.log-type-tag.plan_step,
+.log-type-tag.worker,
+.log-type-tag.metrics {
+  background: rgba(88, 86, 214, 0.15);
+  color: #5856d6;
 }
 
 .log-time {

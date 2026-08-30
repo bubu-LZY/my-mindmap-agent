@@ -262,25 +262,41 @@ export async function removeOrphanReviewItems() {
   // 无文件系统能力时跳过检测（避免误删）
   if (typeof exists !== 'function') return []
 
-  const orphans = []
-  const remaining = []
+  // 逐项异步检查文件是否存在，记录「判定为不存在」的项的稳定标识（nodeUid 优先）+ 当时旧路径
+  const missing = new Map()
   for (const item of list) {
     const fp = item.filePath || ''
-    // 没有 filePath 的项（临时导图）不检测
-    if (!fp) {
-      remaining.push(item)
-      continue
-    }
+    if (!fp) continue
     let ok = true
     try {
       ok = await exists(fp)
     } catch (e) {
       ok = false
     }
-    if (ok) {
+    if (!ok) {
+      const key = item.nodeUid || normalizePath(fp).toLowerCase()
+      missing.set(key, normalizePath(fp).toLowerCase())
+    }
+  }
+  if (missing.size === 0) return []
+
+  // 写回前重读最新数据：若某项 filePath 已与判定时的旧路径不同（说明在异步窗口内被 remap 过），
+  // 则视为文件被移动/重命名而非删除，保留之，避免竞态覆盖导致复习计划被误删。
+  const latest = getReviewPlan()
+  const orphans = []
+  const remaining = []
+  for (const item of latest) {
+    const fp = item.filePath || ''
+    if (!fp) {
       remaining.push(item)
-    } else {
+      continue
+    }
+    const key = item.nodeUid || normalizePath(fp).toLowerCase()
+    const stale = missing.get(key)
+    if (stale && normalizePath(fp).toLowerCase() === stale) {
       orphans.push(item)
+    } else {
+      remaining.push(item)
     }
   }
 

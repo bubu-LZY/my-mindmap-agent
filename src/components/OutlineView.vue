@@ -17,20 +17,8 @@
       />
     </div>
 
-    <!-- 全屏展示：整个界面只保留大纲，ESC 或再次点击退出（与思维导图模式一致） -->
-    <button
-      class="fullscreen-btn"
-      :class="{ 'is-fullscreen': isFullscreen }"
-      :title="isFullscreen ? '退出全屏 (ESC)' : '全屏展示大纲 (ESC 退出)'"
-      @click="toggleFullscreen"
-    >
-      <svg v-if="!isFullscreen" viewBox="0 0 24 24" width="15" height="15">
-        <path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" />
-      </svg>
-      <svg v-else viewBox="0 0 24 24" width="15" height="15">
-        <path fill="currentColor" d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z" />
-      </svg>
-    </button>
+    <!-- 全屏展示：按钮已移至全局右下角按钮组，此处保留 ESC 快捷键逻辑 -->
+    <!-- （全屏样式仍由 is-fullscreen class 控制） -->
 
     <!-- 文字编辑工具栏 -->
     <TextToolbar
@@ -83,6 +71,13 @@
               @keydown.backspace="onBackspace($event, data)"
               v-html="data.label"
             ></span>
+            <img
+              v-if="data.image"
+              :src="data.image"
+              class="node-image"
+              :title="data.imageTitle || '节点图片'"
+              @click.stop="onNodeImageDblclick(data, $event)"
+            />
             <span
               v-if="data.assocTo && data.assocTo.length"
               class="node-assoc-badge"
@@ -109,6 +104,13 @@
             >
               <span class="ng-brace">}</span>
               <span class="ng-text">{{ data.generalizations[0].text || '概括' }}</span>
+              <img
+                v-if="data.generalizations[0].image"
+                :src="data.generalizations[0].image"
+                class="node-gen-image"
+                :title="data.generalizations[0].imageTitle || '概括图片'"
+                @click.stop="onNodeImageDblclick({ image: data.generalizations[0].image, imageTitle: data.generalizations[0].imageTitle }, $event)"
+              />
             </span>
           </span>
         </template>
@@ -135,6 +137,7 @@
       @ai-quiz="onAiQuiz"
       @ai-add-to-chat="onAiAddToChat"
       @add-review="onAddReview"
+      @add-tag="onAddTag"
       @toggle-cloze="onToggleCloze"
       @toggle-cloze-all="onToggleClozeAll"
       @clear-all-cloze="onClearAllCloze"
@@ -181,6 +184,16 @@
         @interacting="onOutlinePreviewInteracting"
       />
     </Teleport>
+
+    <!-- 节点图片全屏查看（大纲模式） -->
+    <Teleport to="body">
+      <Transition name="outline-img-viewer">
+        <div v-if="imageViewerVisible" class="outline-img-viewer-mask" @click="imageViewerVisible = false">
+          <img :src="imageViewerSrc" :alt="imageViewerTitle" class="outline-img-viewer-img" @click.stop />
+          <button class="outline-img-viewer-close" title="关闭" @click="imageViewerVisible = false">✕</button>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -217,6 +230,9 @@ import {
   saveClozeState
 } from '../utils/cloze'
 import { sanitizeSafeHtml } from '../utils/sanitizeHtml'
+import { buildTriModeHtml } from '../utils/triModeExport'
+import { buildGraphDataFromRaw, downloadGraphHtml } from '../utils/graphExport'
+import { safeExportSvg } from '../utils/safeExportSvg'
 
 /**
  * 将大纲 contenteditable 的 innerHTML 转换为思维导图富文本格式
@@ -296,6 +312,11 @@ const props = defineProps({
   mindMapData: {
     type: Object,
     default: null
+  },
+  // 全屏状态（由父组件控制，分屏模式下全局共用全屏按钮）
+  fullscreen: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -309,6 +330,7 @@ const emit = defineEmits([
   'ai-quiz',
   'ai-add-to-chat',
   'add-review',
+  'add-tag',
   'open-reference-file',
   'fullscreen-change'
 ])
@@ -326,6 +348,13 @@ const setFullscreen = (v) => {
   isFullscreen.value = next
   emit('fullscreen-change', next)
 }
+
+// 监听父组件传入的 fullscreen prop（分屏模式下由全局按钮控制）
+watch(() => props.fullscreen, (v) => {
+  if (v !== isFullscreen.value) {
+    setFullscreen(v)
+  }
+}, { immediate: true })
 const onFullscreenKeydown = (e) => {
   if (e.key === 'Escape' && isFullscreen.value) {
     e.stopPropagation()
@@ -545,7 +574,11 @@ const editingUid = ref(null)    // 正在编辑的节点 uid
 const selectedUid = ref(null)   // 选中但未编辑的节点 uid（新增节点）
 const pendingSelectUid = ref(null)  // 刷新后需要选中的节点
 const pendingEditUid = ref(null)    // 刷新后需要恢复编辑状态的节点（Tab/Shift+Tab 操作）
+const pendingEditCaretAtEnd = ref(false) // 恢复编辑时光标置于末尾（而非全选），用于删除空节点后的聚焦
 let isPerformingTabOp = false        // Tab/Shift+Tab 操作进行中，阻止 onNodeBlur 干扰
+// Backspace 长按保护锁：删除空节点后置 true，退格键松开（keyup）前阻止一切删除动作，
+// 防止焦点跳到上一节点后继续长按清空其文字（"穿透删除"）
+let backspaceHoldLock = false
 
 // 标志位：避免自身操作触发的 data_change 导致重复刷新
 let notHandleDataChange = false
@@ -663,13 +696,30 @@ const transformData = (node) => {
     // 大纲中使用 [==text==] 语法显示挖空
     label: sanitizeSafeHtml(revertOutlineClozeSyntax(nodeData.text || '')),
     children: [],
+    // 保留思维导图的折叠状态（expand=false 表示已折叠），refresh 后据此恢复 el-tree 折叠
+    expand: nodeData.expand === false ? false : true,
     note: nodeData.note || '',
     outerFrame: nodeData.outerFrame || null,
     assocTargets: Array.isArray(nodeData.associativeLineTargets) ? nodeData.associativeLineTargets : [],
-    generalizations: rawGens.map((g) => ({
-      text: (getTextFromHtml(g?.text || '') || String(g?.text || '').replace(/<[^>]+>/g, '')).trim(),
-      hasRange: !!(g?.range && g.range.length > 0)
-    }))
+    // 节点图片：大纲模式同样以缩略图显示（与思维导图模式的 SET_NODE_IMAGE 对应）
+    image: nodeData.image || '',
+    imageTitle: nodeData.imageTitle || '',
+    generalizations: rawGens.map((g) => {
+      const textHtml = String(g?.text || '')
+      const plainText = (getTextFromHtml(textHtml) || textHtml.replace(/<[^>]+>/g, '')).trim()
+      // 概括图片：优先概括节点自身 image 字段，其次从富文本里提取内嵌 <img>（粘贴的图片）
+      let genImage = g?.image || ''
+      if (!genImage) {
+        const m = textHtml.match(/<img[^>]+src=["']([^"']+)["']/i)
+        genImage = m ? m[1] : ''
+      }
+      return {
+        text: plainText,
+        hasRange: !!(g?.range && g.range.length > 0),
+        image: genImage,
+        imageTitle: g?.imageTitle || ''
+      }
+    })
   }
   if (node.children && node.children.length > 0) {
     result.children = node.children.map((child) => transformData(child)).filter(Boolean)
@@ -812,6 +862,8 @@ const refresh = () => {
     }
   }
   if (!data || !data.data) data = props.mindMapData || null
+  // 记录待选节点：折叠恢复时保持其祖先链展开，保证新节点可见
+  const focusUidForExpand = pendingSelectUid.value
   if (data) {
     treeData.value = transformToTreeData(JSON.parse(JSON.stringify(data)))
   }
@@ -822,6 +874,8 @@ const refresh = () => {
     pendingSelectUid.value = null
     const shouldRestoreEdit = pendingEditUid.value === uid
     if (shouldRestoreEdit) pendingEditUid.value = null
+    const caretAtEnd = pendingEditCaretAtEnd.value
+    if (shouldRestoreEdit) pendingEditCaretAtEnd.value = false
     nextTick(() => {
       if (treeRef.value) {
         treeRef.value.setCurrentKey(uid)
@@ -836,9 +890,11 @@ const refresh = () => {
           const el = treeRef.value?.$el?.querySelector(`[data-uid="${uid}"]`)
           if (el) {
             el.focus()
-            // 全选文字（方便用户直接输入替换）
             const range = document.createRange()
             range.selectNodeContents(el)
+            // caretAtEnd（如删除空节点后聚焦上一节点）：光标放末尾，
+            // 避免全选状态下再按一次退格一键清空整个节点
+            range.collapse(!caretAtEnd)
             const sel = window.getSelection()
             sel.removeAllRanges()
             sel.addRange(range)
@@ -850,9 +906,64 @@ const refresh = () => {
 
   // 树渲染完成后绑定 Tribute 到新增的 contenteditable 节点，并应用挖空显隐样式
   nextTick(() => {
+    // 恢复折叠状态：treeData 整体替换会让 el-tree（default-expand-all）重建并全部展开，
+    // 已折叠的节点被意外展开（表现为"回车后折叠丢失"），按数据中的 expand=false 重新收起
+    restoreCollapsedState(focusUidForExpand)
     attachTributeToNodes()
     applyOutlineClozeStyles()
   })
+}
+
+/**
+ * 按 treeData 中的 expand 字段恢复 el-tree 的折叠状态：
+ * expand=false 的节点重新 collapse；待选节点（新创建节点）的祖先链保持展开，
+ * 避免新节点落在折叠子树内不可见
+ */
+const restoreCollapsedState = (focusUid = null) => {
+  try {
+    const tree = treeRef.value
+    if (!tree || !tree.store || !tree.store.root) return
+    // 收集待选节点的祖先 uid，保持展开
+    const keepExpanded = new Set()
+    if (focusUid) {
+      const collectAncestors = (n) => {
+        if (!n || !n.data || !n.data.uid) return
+        if (n.data.uid === focusUid) throw new Error('found')
+        ;(n.children || []).forEach(collectAncestors)
+      }
+      try {
+        const walkData = (item) => {
+          if (!item) return
+          if (item.uid === focusUid) throw new Error('found')
+          ;(item.children || []).forEach(walkData)
+        }
+        // 在 treeData 中找祖先链
+        const findPath = (item, target, path) => {
+          if (!item) return null
+          if (item.uid === target) return [...path, item.uid]
+          for (const c of (item.children || [])) {
+            const r = findPath(c, target, path)
+            if (r) return r
+          }
+          return null
+        }
+        for (const rootItem of treeData.value) {
+          const p = findPath(rootItem, focusUid, [])
+          if (p) { p.slice(0, -1).forEach(uid => keepExpanded.add(uid)); break }
+        }
+      } catch (e) { /* 未找到则不保持任何展开 */ }
+    }
+    const walk = (n) => {
+      if (!n) return
+      if (n.data && n.data.expand === false && !keepExpanded.has(n.data.uid) && n.childNodes && n.childNodes.length > 0) {
+        if (n.expanded && typeof n.collapse === 'function') n.collapse()
+      }
+      ;(n.childNodes || []).forEach(walk)
+    }
+    tree.store.root.childNodes.forEach(walk)
+  } catch (e) {
+    // 恢复失败不影响主流程
+  }
 }
 
 const handleDataChange = () => {
@@ -916,7 +1027,7 @@ const onNodeBlur = (event, data) => {
   // 转换为思维导图富文本格式（含 [==text==] → smm-cloze span 转换）
   const richText = outlineHtmlToRichText(rawHtml)
   // 大纲显示用的 label（把 smm-cloze span 转回 [==text==] 标记）
-  const outlineLabel = revertOutlineClozeSyntax(richText)
+  const outlineLabel = sanitizeSafeHtml(revertOutlineClozeSyntax(richText))
   if (outlineLabel === data.label) return
 
   const node = props.mindMap.renderer.findNodeByUid(data.uid)
@@ -1370,7 +1481,76 @@ const onEnterKey = (event, data) => {
     }
     return
   }
+  // 光标位于文本中间（非行首/行尾）：执行"拆分并降级"——
+  // 光标后的文字剪切到新子节点（缩进一级），符合大纲的父子层级递进逻辑
+  const boundary = getCaretBoundary()
+  if (boundary && !boundary.atStart && !boundary.atEnd) {
+    event.preventDefault()
+    splitNodeAtCaret(event, data)
+    return
+  }
   onEnter(event, data)
+}
+
+/**
+ * 回车拆分（光标在文本中间时触发）：
+ * 1. 光标位置后的文字被剪切，创建一个子节点（缩进一级）承载该段文字；
+ * 2. 新子节点插入到子节点列表最顶端；
+ * 3. 新子节点进入编辑状态且该段文字默认全选（高亮），可直接继续编辑或覆盖输入。
+ */
+const splitNodeAtCaret = (event, data) => {
+  if (!props.mindMap?.renderer?.renderTree) return
+  ensureUids()
+
+  const el = event.target
+  const sel = window.getSelection()
+  if (!el || !sel || sel.rangeCount === 0 || !sel.isCollapsed) return
+
+  const range = sel.getRangeAt(0)
+  // 光标（含）之后到节点末尾的范围
+  const afterRange = document.createRange()
+  try {
+    afterRange.setStart(range.startContainer, range.startOffset)
+    afterRange.setEnd(el, el.childNodes.length)
+  } catch (e) {
+    return
+  }
+  // 先克隆检查光标后是否有实际文字，避免对空内容做无意义的拆分
+  let afterHtml = ''
+  try {
+    const testWrap = document.createElement('div')
+    testWrap.appendChild(afterRange.cloneContents())
+    if (!testWrap.textContent.trim()) return
+    const frag = afterRange.extractContents()
+    const wrap = document.createElement('div')
+    wrap.appendChild(frag)
+    afterHtml = wrap.innerHTML
+  } catch (e) {
+    return
+  }
+  const beforeHtml = el.innerHTML
+
+  const result = findNodeAndParent(props.mindMap.renderer.renderTree, data.uid)
+  if (!result) return
+
+  // 当前节点保留光标前的文字
+  const richBefore = outlineHtmlToRichText(beforeHtml)
+  result.node.data.text = richBefore
+  result.node.data.richText = true
+  data.label = sanitizeSafeHtml(revertOutlineClozeSyntax(richBefore))
+
+  // 光标后的文字剪切为新子节点（缩进一级），插入到子列表最顶端
+  const richAfter = outlineHtmlToRichText(afterHtml)
+  const newNode = { data: { text: richAfter, uid: createUid(), richText: true }, children: [] }
+  if (!result.node.children) result.node.children = []
+  result.node.children.unshift(newNode)
+
+  // 新子节点进入编辑模式，pendingEditUid 恢复时默认全选文字
+  pendingSelectUid.value = newNode.data.uid
+  pendingEditUid.value = newNode.data.uid
+
+  props.mindMap.render()
+  props.mindMap.command.addHistory()
 }
 
 const onEnter = (event, data) => {
@@ -1379,7 +1559,7 @@ const onEnter = (event, data) => {
 
   const rawHtml = getNodeText(event, data)
   const richText = outlineHtmlToRichText(rawHtml)
-  data.label = revertOutlineClozeSyntax(richText)
+  data.label = sanitizeSafeHtml(revertOutlineClozeSyntax(richText))
 
   // 直接在 renderer.renderTree（源数据）中查找，不使用 getData() 深拷贝
   const result = findNodeAndParent(props.mindMap.renderer.renderTree, data.uid)
@@ -1387,11 +1567,11 @@ const onEnter = (event, data) => {
     console.warn('[onEnter] node not found in renderTree:', data.uid)
     return
   }
-  // 根节点：创建子节点（而非兄弟节点）
+  // 根节点：创建子节点（而非兄弟节点），插到子列表最顶端
   if (!result.parent) {
     if (!result.node.children) result.node.children = []
     const childNode = { data: { text: '<p><span>新节点</span></p>', uid: createUid(), richText: true }, children: [] }
-    result.node.children.push(childNode)
+    result.node.children.unshift(childNode)
     pendingSelectUid.value = childNode.data.uid
     pendingEditUid.value = childNode.data.uid
     props.mindMap.render()
@@ -1437,15 +1617,15 @@ const onTab = (event, data) => {
 
   const rawHtml = getNodeText(event, data)
   const richText = outlineHtmlToRichText(rawHtml)
-  data.label = revertOutlineClozeSyntax(richText)
+  data.label = sanitizeSafeHtml(revertOutlineClozeSyntax(richText))
 
   // 直接在 renderer.renderTree（源数据）中查找
   const result = findNodeAndParent(props.mindMap.renderer.renderTree, data.uid)
-  // 根节点：创建子节点（而非降级）
+  // 根节点：创建子节点（而非降级），插到子列表最顶端
   if (result && !result.parent) {
     if (!result.node.children) result.node.children = []
     const childNode = { data: { text: '<p><span>新节点</span></p>', uid: createUid(), richText: true }, children: [] }
-    result.node.children.push(childNode)
+    result.node.children.unshift(childNode)
     pendingSelectUid.value = childNode.data.uid
     pendingEditUid.value = childNode.data.uid
     props.mindMap.render()
@@ -1490,7 +1670,7 @@ const onShiftTab = (event, data) => {
 
   const rawHtml = getNodeText(event, data)
   const richText = outlineHtmlToRichText(rawHtml)
-  data.label = revertOutlineClozeSyntax(richText)
+  data.label = sanitizeSafeHtml(revertOutlineClozeSyntax(richText))
 
   // 直接在 renderer.renderTree（源数据）中查找
   const result = findNodeAndParent(props.mindMap.renderer.renderTree, data.uid)
@@ -1574,13 +1754,32 @@ const removeNode = () => {
 
 /**
  * Backspace：当节点文字为空时删除当前节点并聚焦前一个兄弟节点
+ * 长按保护：
+ * 1. 长按（key repeat）只删除当前节点内的文字，文字删空后动作立即停止，
+ *    不会删除该空节点，更不会穿透删除上一个节点的内容；
+ * 2. 删除空节点后加锁，退格键松开（keyup）前不再响应任何删除，
+ *    防止焦点跳到上一节点后继续长按清空其文字；
+ * 3. 要删除空节点必须松手后再次按下退格键（单次按键）。
  */
+const onBackspaceKeyup = (e) => {
+  if (e.key === 'Backspace' || e.key === 'Delete') backspaceHoldLock = false
+}
+
 const onBackspace = (event, data) => {
+  // 刚删除过空节点且退格键尚未松开：阻止一切删除，防止穿透到上一节点
+  if (backspaceHoldLock) {
+    event.preventDefault()
+    return
+  }
   const el = event.target
   const text = (el.innerText || '').trim()
   if (text !== '') return // 有文字时不拦截，正常删除字符
 
   event.preventDefault()
+
+  // 长按产生的重复退格：当前节点文字已删空，删除动作到此为止；
+  // 需删除该空节点时须松手后再次按下
+  if (event.repeat) return
 
   if (!props.mindMap?.renderer?.renderTree) return
   ensureUids()
@@ -1592,18 +1791,23 @@ const onBackspace = (event, data) => {
   const prevSibling = index > 0 ? result.parent.children[index - 1] : null
   result.parent.children.splice(index, 1)
 
-  // 删除后聚焦前一个兄弟节点并进入编辑模式
+  // 删除后聚焦前一个兄弟节点并进入编辑模式（光标置于末尾而非全选，
+  // 避免松手后再按一次退格时一键清空上一节点全部文字）
   if (prevSibling) {
     pendingSelectUid.value = prevSibling.data.uid
     pendingEditUid.value = prevSibling.data.uid
+    pendingEditCaretAtEnd.value = true
   } else {
     // 没有前一个兄弟节点时，聚焦父节点并进入编辑模式
     const parentUid = result.parent.data?.uid || null
     pendingSelectUid.value = parentUid
     pendingEditUid.value = parentUid
+    pendingEditCaretAtEnd.value = true
   }
   props.mindMap.render()
   props.mindMap.command.addHistory()
+  // 本次按住期间不再执行任何删除，松手（keyup）后解锁
+  backspaceHoldLock = true
 }
 
 /** 在 treeData 中按 uid 查找节点 */
@@ -1697,7 +1901,7 @@ const insertSiblingByUid = (uid) => {
   commitData(newNode.data.uid)
 }
 
-/** 插入子节点 */
+/** 插入子节点（新节点插到子节点列表最顶端，便于高频新增时立即可见可编辑） */
 const insertChildByUid = (uid) => {
   if (!props.mindMap?.renderer?.renderTree) return
   ensureUids()
@@ -1705,7 +1909,7 @@ const insertChildByUid = (uid) => {
   if (!result) return
   const newNode = { data: { text: '<p><span>新节点</span></p>', uid: createUid(), richText: true }, children: [] }
   if (!result.node.children) result.node.children = []
-  result.node.children.push(newNode)
+  result.node.children.unshift(newNode)
   pendingEditUid.value = newNode.data.uid
   commitData(newNode.data.uid)
 }
@@ -2007,6 +2211,20 @@ const applyNoteToNodes = (text) => {
 
 const onNoteSave = (text) => applyNoteToNodes(text)
 const onNoteClear = () => applyNoteToNodes('')
+
+/* ============ 节点图片全屏查看（大纲模式） ============ */
+const imageViewerVisible = ref(false)
+const imageViewerSrc = ref('')
+const imageViewerTitle = ref('')
+
+// 双击大纲节点图片 → 全屏查看（与思维导图模式 node_img_dblclick 一致）
+const onNodeImageDblclick = (data, e) => {
+  const src = data?.image
+  if (!src) return
+  imageViewerSrc.value = src
+  imageViewerTitle.value = data?.imageTitle || '节点图片'
+  imageViewerVisible.value = true
+}
 
 /* ============ 节点概括（大纲模式） ============ */
 const genDialogVisible = ref(false)
@@ -2655,6 +2873,52 @@ const onToolbarExport = async (type) => {
     }
     return
   }
+  // 三模式 HTML 导出（思维导图 + 大纲 + 关联图）
+  if (type === 'tri-html') {
+    outlineExporting.value = true
+    try {
+      const rawData = mm.getData?.() || props.mindMapData
+      if (!rawData) throw new Error('没有可导出的数据')
+      const text = (rawData.data?.text || '思维导图').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() || '思维导图'
+      const svgDataUrl = await safeExportSvg(mm, text)
+      const html = await buildTriModeHtml(svgDataUrl, rawData, text)
+      const fileName = `${text}-全视图模式`
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${fileName}.html`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      ElMessage.success(`三模式 HTML 已导出：${fileName}.html`)
+    } catch (e) {
+      console.error('[OutlineView] 三模式 HTML 导出失败:', e)
+      ElMessage.error(`导出失败: ${e.message}`)
+    } finally {
+      outlineExporting.value = false
+    }
+    return
+  }
+  // 关联图 HTML 导出
+  if (type === 'graph-html') {
+    outlineExporting.value = true
+    try {
+      const rawData = mm.getData?.() || props.mindMapData
+      if (!rawData) throw new Error('没有可导出的数据')
+      const graphData = buildGraphDataFromRaw(rawData)
+      const text = (rawData.data?.text || '关联图').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() || '关联图'
+      downloadGraphHtml(graphData, text)
+      ElMessage.success(`关联图已导出：${text}.html`)
+    } catch (e) {
+      console.error('[OutlineView] 关联图导出失败:', e)
+      ElMessage.error(`导出失败: ${e.message}`)
+    } finally {
+      outlineExporting.value = false
+    }
+    return
+  }
   if (!mm.doExport) return
   outlineExporting.value = true
   const name = outlineExportFileName()
@@ -2869,6 +3133,10 @@ const onAddReview = (node) => {
   emit('add-review', node)
 }
 
+const onAddTag = (node) => {
+  emit('add-tag', node)
+}
+
 /* ============================================================
  * 拖拽排序
  * ============================================================ */
@@ -3046,6 +3314,26 @@ const onOutlinePreviewOpenFile = (data) => {
   emit('open-reference-file', data)
 }
 
+/**
+ * 预览悬浮窗外部 mousedown：点击悬浮窗以外区域即关闭（大纲模式）。
+ * 排除：悬浮窗自身、引用链接（交给 click 阶段的 onOutlineLinkClick 重新定位/刷新）。
+ */
+const onOutlinePreviewExternalMousedown = (e) => {
+  if (!previewVisible.value) return
+  const target = e.target
+  if (!target?.closest) return
+  if (target.closest('.preview-overlay')) return
+  const a = target.closest('a[href]')
+  if (a && isReferenceLink(a.getAttribute('href') || '')) return
+  if (previewShowTimer) {
+    clearTimeout(previewShowTimer)
+    previewShowTimer = null
+  }
+  clearPreviewHideTimer()
+  previewVisible.value = false
+  previewPinned.value = false
+}
+
 /* ============================================================
  * 生命周期
  * ============================================================ */
@@ -3060,12 +3348,16 @@ onMounted(() => {
   clozeHidden.value = isClozeHiddenAll()
   window.addEventListener('cloze-state-changed', onClozeStateChanged)
 
+  // Backspace 长按保护：松开退格键时解除删除锁定
+  window.addEventListener('keyup', onBackspaceKeyup)
+
   // 引用链接点击/悬浮（document capture）
   document.addEventListener('click', onOutlineLinkClick, true)
   document.addEventListener('click', onDocumentClozeClick, true)
   document.addEventListener('mousedown', onDocumentClozeMousedown, true)
   document.addEventListener('mouseover', onOutlineLinkHover, true)
   document.addEventListener('mouseout', onOutlineLinkLeave, true)
+  document.addEventListener('mousedown', onOutlinePreviewExternalMousedown, true)
   window.addEventListener('mousemove', onPreviewMouseMove)
   // 格式刷：mouseup 后检查选区应用格式
   document.addEventListener('mouseup', onPainterMouseup)
@@ -3081,11 +3373,13 @@ onMounted(() => {
 onBeforeUnmount(() => {
   unregisterListeners(props.mindMap)
   window.removeEventListener('cloze-state-changed', onClozeStateChanged)
+  window.removeEventListener('keyup', onBackspaceKeyup)
   document.removeEventListener('click', onOutlineLinkClick, true)
   document.removeEventListener('click', onDocumentClozeClick, true)
   document.removeEventListener('mousedown', onDocumentClozeMousedown, true)
   document.removeEventListener('mouseover', onOutlineLinkHover, true)
   document.removeEventListener('mouseout', onOutlineLinkLeave, true)
+  document.removeEventListener('mousedown', onOutlinePreviewExternalMousedown, true)
   window.removeEventListener('mousemove', onPreviewMouseMove)
   document.removeEventListener('mouseup', onPainterMouseup)
   if (previewShowTimer) {
@@ -3299,6 +3593,72 @@ defineExpose({
 
 .node-assoc-badge:hover {
   background: rgba(41, 128, 185, 0.12);
+}
+
+/* ========== 节点图片缩略图（大纲模式） ========== */
+.node-image,
+.node-gen-image {
+  display: inline-block;
+  vertical-align: middle;
+  max-width: 60px;
+  max-height: 40px;
+  width: auto;
+  height: auto;
+  border-radius: 4px;
+  margin: 0 2px;
+  object-fit: contain;
+  cursor: zoom-in;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+.node-image:hover,
+.node-gen-image:hover {
+  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.5);
+}
+
+/* ========== 节点图片全屏查看（大纲模式） ========== */
+.outline-img-viewer-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 6000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.82);
+  cursor: zoom-out;
+}
+
+.outline-img-viewer-img {
+  max-width: calc(100vw - 64px);
+  max-height: calc(100vh - 64px);
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 12px 50px rgba(0, 0, 0, 0.5);
+}
+
+.outline-img-viewer-close {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.outline-img-viewer-enter-active,
+.outline-img-viewer-leave-active {
+  transition: opacity 0.18s ease;
+}
+
+.outline-img-viewer-enter-from,
+.outline-img-viewer-leave-to {
+  opacity: 0;
 }
 
 /* ========== 节点概括标记（与思维导图概括节点呼应） ========== */

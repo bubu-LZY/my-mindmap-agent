@@ -1,4 +1,4 @@
-const { ipcMain, net, app } = require('electron')
+const { ipcMain, net, app, BrowserWindow, Notification } = require('electron')
 const store = require('../utils/store')
 const crypto = require('crypto')
 const { spawn } = require('child_process')
@@ -67,6 +67,36 @@ const deleteServer = (id) => {
   return true
 }
 
+
+
+// ============ MCP 状态变更通知（进程异常时主动推送 UI + 系统通知）============
+// 在 mcpManager.js 内直接调 BrowserWindow.getAllWindows() 推送，不依赖 main.js 注入，
+// 避免主进程 IPC require 顺序耦合（mcpManager 在 mainWindow 创建之前已被 require）。
+const notifyMcpStatusChange = (payload) => {
+  try {
+    const wins = BrowserWindow.getAllWindows() || []
+    for (const win of wins) {
+      if (!win || win.isDestroyed()) continue
+      try { win.webContents.send('mcp:status', payload) } catch (e) { /* 渲染层可能已销毁 */ }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// 仅在系统不支持 Notification（Linux 某些环境）时静默降级
+const showMcpSystemNotification = ({ title, body }) => {
+  try {
+    if (!Notification || !Notification.isSupported || !Notification.isSupported()) return
+    const n = new Notification({ title, body, silent: false })
+    n.on('click', () => {
+      try {
+        const wins = BrowserWindow.getAllWindows() || []
+        const main = wins.find(w => w && !w.isDestroyed()) || wins[0]
+        if (main) { main.show(); main.focus() }
+      } catch (e) {}
+    })
+    n.show()
+  } catch (e) { /* ignore */ }
+}
 const getStdioCwd = (server) => {
   // stdio MCP 进程默认继承应用启动目录；安装到 Program Files 时该目录不可写，
   // Playwright MCP 会尝试在其中创建 .playwright-mcp，导致 EPERM。
@@ -90,6 +120,8 @@ const getStdioClient = (server) => {
   if (stdioClients.has(server.id)) return stdioClients.get(server.id)
   // shell: true 让系统 shell 解析命令路径（解决 Electron 打包后找不到 npx/node 的问题）
   const isWindows = process.platform === 'win32'
+  // 安全审计：stdio 模式会在本机启动外部程序，记录 command/args 便于事后审计
+  console.log(`[MCP stdio 审计] 启动外部进程: ${server.command} ${(server.args || []).join(' ')}`)
   const proc = spawn(server.command, server.args || [], {
     env: { ...process.env, ...(server.env || {}) },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -124,11 +156,24 @@ const getStdioClient = (server) => {
     for (const [, p] of client.pending) p.reject(err)
     client.pending.clear()
     stdioClients.delete(server.id)
+    try {
+      const reason = (err && (err.message || err.code)) ? String(err.message || err.code) : '未知错误'
+      notifyMcpStatusChange({ id: server.id, name: server.name, status: 'error', reason, at: Date.now() })
+      showMcpSystemNotification({ title: 'MCP 服务异常：' + server.name, body: '进程启动/通讯失败：' + reason + '。下次调用该工具时会自动重试。' })
+    } catch (e) { /* ignore */ }
   })
-  proc.on('exit', () => {
+  proc.on('exit', (code, signal) => {
     for (const [, p] of client.pending) p.reject(new Error('stdio MCP 进程已退出'))
     client.pending.clear()
     stdioClients.delete(server.id)
+    // 仅在明确非零退出时推送（主动 kill 的 code 通常为 null，不算异常）
+    try {
+      const abnormal = code !== null && code !== 0
+      if (abnormal) {
+        notifyMcpStatusChange({ id: server.id, name: server.name, status: 'exit', code: code, signal: signal || null, at: Date.now() })
+        showMcpSystemNotification({ title: 'MCP 服务停止：' + server.name, body: '进程退出（code=' + code + '）。下次调用该工具时会自动重启。' })
+      }
+    } catch (e) { /* ignore */ }
   })
   stdioClients.set(server.id, client)
   return client
@@ -140,7 +185,11 @@ const rpcStdio = (server, method, params) => {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       client.pending.delete(id)
-      reject(new Error('stdio MCP 调用超时'))
+      const err = new Error(`stdio MCP 调用超时（${Math.round((server.timeoutMs || 10000) / 1000)} 秒）—— 可能原因：1. 命令未安装或路径错误（请在命令行单独运行 \`${server.command} ${(server.args || []).join(' ')}\` 验证）；2. 进程首次启动在拉取依赖（pip/npm 下载慢）；3. 网络受限无法访问包仓库。`);
+      err.code = 'MCP_TIMEOUT'
+      err.serverId = server.id
+      err.serverName = server.name
+      reject(err)
     }, server.timeoutMs || 10000)
     client.pending.set(id, {
       resolve: (value) => { clearTimeout(timer); resolve(value) },
@@ -196,13 +245,47 @@ const rpc = async (server, method, params, requestId) => {
 }
 
 const getTools = async (server) => {
-  await rpcFor(server, 'initialize', {
-    protocolVersion: '2024-11-05',
-    capabilities: {},
-    clientInfo: { name: 'my-mindmap-agent', version: '1.0.0' }
-  })
-  const result = await rpcFor(server, 'tools/list', {})
-  return Array.isArray(result?.tools) ? result.tools : []
+  // 首次拉取（uvx/npx 首次启动通常需要下载依赖）容易触发默认超时。
+  // 若用户的 timeoutMs ≤ 30 秒且首次超时，自动临时延长到 60 秒重试一次；用户明确设置更长则不重试。
+  const FIRST_RETRY_TIMEOUT_MS = 60000
+  const userTimeout = server.timeoutMs || 10000
+  const doList = async () => {
+    await rpcFor(server, 'initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'my-mindmap-agent', version: '2.0.0' }
+    })
+    const result = await rpcFor(server, 'tools/list', {})
+    return Array.isArray(result?.tools) ? result.tools : []
+  }
+  try {
+    return await doList()
+  } catch (e) {
+    const isFirstTimeout = e && e.code === 'MCP_TIMEOUT' && userTimeout <= 30000 && server.transport === 'stdio'
+    if (!isFirstTimeout) throw e
+    // 临时把 timeoutMs 提到 60 秒再试一次，仅影响这一次调用（不写回 store）
+    const originalTimeout = server.timeoutMs
+    server.timeoutMs = FIRST_RETRY_TIMEOUT_MS
+    // 首次超时通常是进程没起来；先把 stdio 客户端踢掉，下次 getStdioClient 会重建
+    const client = stdioClients.get(server.id)
+    if (client) {
+      try { client.proc.kill() } catch (err) {}
+      stdioClients.delete(server.id)
+    }
+    try {
+      const tools = await doList()
+      // 在错误对象上附加标记，便于上层告诉用户"自动重试成功"
+      e.firstPullRetried = true
+      e.firstPullSuccess = true
+      return tools
+    } catch (e2) {
+      server.timeoutMs = originalTimeout
+      e2.firstPullRetried = true
+      e2.firstPullSuccess = false
+      e2.originalTimeoutMs = originalTimeout
+      throw e2
+    }
+  }
 }
 
 const callTool = async (server, toolName, args) => {
@@ -213,10 +296,14 @@ ipcMain.handle('mcp:list', async () => listServers())
 ipcMain.handle('mcp:create', async (e, input) => createServer(input))
 ipcMain.handle('mcp:update', async (e, id, patch) => updateServer(id, patch))
 ipcMain.handle('mcp:delete', async (e, id) => deleteServer(id))
-ipcMain.handle('mcp:listTools', async (e, id) => {
+ipcMain.handle('mcp:listTools', async (e, id, overrideTimeoutMs) => {
   const server = listServers().find(s => s.id === id)
   if (!server) throw new Error('MCP 服务不存在')
   if (server.enabled === false) throw new Error('MCP 服务已停用')
+  // 仅本次调用临时覆盖超时（用户点「再试一次(60秒)」时使用），不写回 store
+  if (Number.isFinite(overrideTimeoutMs) && overrideTimeoutMs > 0) {
+    server.timeoutMs = overrideTimeoutMs
+  }
   return getTools(server)
 })
 ipcMain.handle('mcp:callTool', async (e, id, toolName, args) => {
@@ -227,3 +314,5 @@ ipcMain.handle('mcp:callTool', async (e, id, toolName, args) => {
 })
 
 module.exports = {}
+
+

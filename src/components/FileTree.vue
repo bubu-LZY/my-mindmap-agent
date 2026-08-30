@@ -74,8 +74,8 @@
             <span class="node-icon" v-if="data.isDir">
               <el-icon><Folder /></el-icon>
             </span>
-            <span class="node-icon" v-else>
-              <el-icon><Document /></el-icon>
+            <span class="node-icon" v-else :style="{ color: fileIcon(data.name).color }">
+              <el-icon><component :is="fileIcon(data.name).icon" /></el-icon>
             </span>
 
             <!-- 内联编辑模式 -->
@@ -166,15 +166,63 @@
         <button class="add-folder-btn" @click="addFolder">添加文件夹</button>
       </div>
     </div>
+
+    <!-- 文件树右键菜单 -->
+    <Teleport to="body">
+      <div
+        v-if="ctxMenu.visible"
+        class="file-ctx-menu"
+        :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+        @click.stop
+        @mousedown.stop
+        @contextmenu.prevent
+      >
+        <div class="file-ctx-item" @click="onAddTagFromContext">
+          <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16.5 3.5l-2-2-8 8-1.2 3.2 3.2-1.2 8-8z" />
+            <path d="M12.5 3.5l2 2" />
+          </svg>
+          添加标签
+        </div>
+        <div v-if="isSmmFile" class="file-ctx-item" @click="showVersionHistory">
+          <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            <path d="M7 3v3M13 3v3M7 12l3 3 3-3M10 15v-5" />
+          </svg>
+          历史版本
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- 版本历史弹窗 -->
+    <Teleport to="body">
+      <div v-if="versionDialog.visible" class="version-dialog-mask" @click.self="versionDialog.visible = false">
+        <div class="version-dialog">
+          <div class="version-dialog-header">
+            <span>历史版本：{{ versionDialog.fileName }}</span>
+            <button class="version-dialog-close" @click="versionDialog.visible = false">×</button>
+          </div>
+          <div class="version-dialog-body">
+            <div v-if="versionDialog.loading" class="version-empty">加载中…</div>
+            <div v-else-if="!versionDialog.list.length" class="version-empty">暂无历史版本（覆盖保存后才会自动备份）</div>
+            <div v-for="(v, i) in versionDialog.list" :key="v.path" class="version-item">
+              <span class="version-time">{{ versionTime(v.name) }}</span>
+              <button class="version-restore" @click="restoreVersion(v)">恢复</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   FolderOpened, Folder, Document, DocumentAdd,
-  FolderAdd, EditPen, Delete, CircleClose, Refresh, FolderChecked, Aim, CopyDocument, Download
+  FolderAdd, EditPen, Delete, CircleClose, Refresh, FolderChecked, Aim, CopyDocument, Download,
+  Files, Grid, Reading, Memo
 } from '@element-plus/icons-vue'
 import { getReviewPlan, removeByFilePath } from '../utils/reviewPlan'
 import { setDragFilePath, clearDragFilePath } from '../utils/dragState'
@@ -186,7 +234,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['open-file', 'file-saved', 'file-renamed', 'file-moved', 'before-move', 'file-deleted'])
+const emit = defineEmits(['open-file', 'open-doc', 'file-saved', 'file-renamed', 'file-moved', 'before-move', 'file-deleted', 'add-tag'])
 
 const fileTreeRef = ref(null)
 const inlineEditInputRef = ref(null)
@@ -298,6 +346,21 @@ const treeProps = {
   label: 'name',
   children: 'children',
   isLeaf: (data) => !data.isDir
+}
+
+/* ============================================================
+ * 文件类型 → 图标 + 颜色（目录树按扩展名区分文件类型）
+ * ============================================================ */
+
+// 根据文件名扩展名返回对应的图标组件与颜色
+const fileIcon = (name) => {
+  const ext = String(name || '').split('.').pop().toLowerCase()
+  if (ext === 'pdf') return { icon: Files, color: '#e5484d' }
+  if (['xlsx', 'xls', 'csv', 'tsv'].includes(ext)) return { icon: Grid, color: '#1d9d59' }
+  if (['md', 'markdown'].includes(ext)) return { icon: Reading, color: '#4a6cf7' }
+  if (['txt', 'log', 'json', 'html', 'xml'].includes(ext)) return { icon: Memo, color: '#8a8f99' }
+  if (ext === 'smm') return { icon: Document, color: '#f59e0b' }
+  return { icon: Document, color: 'inherit' }
 }
 
 /* ============================================================
@@ -589,9 +652,8 @@ const importFile = async () => {
       return
     }
     if (result.isMarkdown) {
-      const { parseMarkdownToTree } = await import('../utils/markdownParser')
-      const data = parseMarkdownToTree(result.data)
-      await openAsConvertedSmm(filePath, fileName, data, false)
+      // Markdown 默认用文档查看器原样阅读（不转 .smm），右键空白处可 AI 转换为思维导图
+      emit('open-doc', { filePath, fileName })
       return
     }
     // .smm / .json：主进程已解析为对象，直接打开
@@ -641,6 +703,13 @@ const openAsConvertedSmm = async (srcPath, srcName, data, isXmind) => {
 }
 
 const openFile = async (filePath, name) => {
+  // 文档类文件（pdf/docx/xlsx/csv/md/txt 等）默认用文档查看器原样打开（md 支持渲染/源码切换，
+  // 右键空白处可 AI 转换为思维导图）；xmind/opml 仍走"导入转换为导图"流程
+  const ext = String(filePath || '').split('.').pop().toLowerCase()
+  if (['pdf', 'docx', 'xlsx', 'xls', 'csv', 'tsv', 'txt', 'md', 'markdown', 'json', 'log', 'html', 'xml'].includes(ext)) {
+    emit('open-doc', { filePath, fileName: name })
+    return
+  }
   if (!window.electronAPI?.openFile) return
   try {
     const result = await window.electronAPI.openFile(filePath)
@@ -812,24 +881,15 @@ const onNodeDropExternal = async (e, data) => {
         : (file.path || '')
       if (!srcPath) continue
       const rawName = file.name || srcPath.split(/[\\/]/).pop() || '未命名文件'
-      // md/xmind 拖入：解析后直接存为目标文件夹下的 .smm，不再复制原始文件，
-      // 避免目录里同时出现 .md 和 .smm 两份文件
-      if (/\.(md|markdown|xmind)$/i.test(rawName)) {
-        let treeData = null
-        if (/\.xmind$/i.test(rawName)) {
-          const bin = await window.electronAPI.fs.readBinary(srcPath)
-          if (bin && bin.success) treeData = await parseXmindBase64(bin.base64, rawName)
-        } else {
-          const text = await window.electronAPI.fs.readFile(srcPath)
-          const { parseMarkdownToTree } = await import('../utils/markdownParser')
-          treeData = parseMarkdownToTree(text)
-        }
-        if (treeData) {
-          const base = rawName.replace(/\.(md|markdown|xmind)$/i, '')
-          const smmPath = await writeSmmFile(`${data.path}${sep}${base}.smm`, treeData)
-          if (smmPath) {
-            ok++
-            converted++
+      // xmind 拖入：解析后转 .smm；md 拖入：直接复制原文件（保留 md 原样，点击后用文档查看器阅读）
+      if (/\.xmind$/i.test(rawName)) {
+        const bin = await window.electronAPI.fs.readBinary(srcPath)
+        if (bin && bin.success) {
+          const treeData = await parseXmindBase64(bin.base64, rawName)
+          if (treeData) {
+            const base = rawName.replace(/\.xmind$/i, '')
+            const smmPath = await writeSmmFile(`${data.path}${sep}${base}.smm`, treeData)
+            if (smmPath) { ok++; converted++ }
           }
         }
         continue
@@ -873,23 +933,14 @@ const createFile = async (dirData) => {
       `${dirData.path}${sep}${fileName}`
     )
     ElMessage.success('已创建文件')
-    // 直接追加节点，不重新加载父目录（保持展开状态）
-    const tree = fileTreeRef.value
-    const parentNode = tree?.getNode(dirData.path)
-    if (parentNode) {
-      if (!parentNode.expanded) {
-        parentNode.expanded = true
-        expandedPaths.value.add(dirData.path)
-        saveExpandedPaths()
-      }
-      tree.append({
-        name: fileName,
-        path: filePath,
-        isDir: false,
-        isRoot: false
-      }, parentNode)
+    // 重新加载父目录：避免 el-tree lazy 模式 append 导致节点层级/顺序错乱（新文件跑到子文件夹下）
+    if (!expandedPaths.value.has(dirData.path)) {
+      expandedPaths.value.add(dirData.path)
+      saveExpandedPaths()
     }
-    startInlineEdit(filePath)
+    refreshNode({ path: dirData.path, isDir: true }, () => {
+      startInlineEdit(filePath)
+    })
   } catch (error) {
     ElMessage.error('创建文件失败: ' + error.message)
   }
@@ -904,23 +955,14 @@ const createDir = async (dirData) => {
       `${dirData.path}${sep}${dirName}`
     )
     ElMessage.success('已创建文件夹')
-    // 直接追加节点，不重新加载父目录
-    const tree = fileTreeRef.value
-    const parentNode = tree?.getNode(dirData.path)
-    if (parentNode) {
-      if (!parentNode.expanded) {
-        parentNode.expanded = true
-        expandedPaths.value.add(dirData.path)
-        saveExpandedPaths()
-      }
-      tree.append({
-        name: dirName,
-        path: dirPath,
-        isDir: true,
-        isRoot: false
-      }, parentNode)
+    // 重新加载父目录：避免 el-tree lazy 模式 append 导致节点层级/顺序错乱
+    if (!expandedPaths.value.has(dirData.path)) {
+      expandedPaths.value.add(dirData.path)
+      saveExpandedPaths()
     }
-    startInlineEdit(dirPath)
+    refreshNode({ path: dirData.path, isDir: true }, () => {
+      startInlineEdit(dirPath)
+    })
   } catch (error) {
     ElMessage.error('创建文件夹失败: ' + error.message)
   }
@@ -1148,12 +1190,112 @@ const handleNodeDrop = async (draggingNode, dropNode) => {
 }
 
 /* ============================================================
- * 右键菜单（预留）
+ * 右键菜单：文件节点支持「添加标签」
  * ============================================================ */
+const ctxMenu = ref({ visible: false, x: 0, y: 0, data: null })
+
 const onContextMenu = (e, data) => {
-  // 暂时使用浏览器默认右键菜单
-  // 后续可扩展为自定义右键菜单
+  // 仅对文件（非目录）显示「添加标签」菜单
+  if (!data || data.isDir) {
+    ctxMenu.value.visible = false
+    return
+  }
+  ctxMenu.value = { visible: true, x: e.clientX, y: e.clientY, data }
 }
+
+const closeCtxMenu = () => {
+  ctxMenu.value.visible = false
+}
+
+// 从右键菜单添加标签（文件级定位，非导图/文档的滚动位置）
+const onAddTagFromContext = () => {
+  const data = ctxMenu.value.data
+  const pos = { x: ctxMenu.value.x, y: ctxMenu.value.y }
+  closeCtxMenu()
+  if (!data) return
+  emit('add-tag', {
+    filePath: data.path,
+    fileName: data.name,
+    fileType: 'file',
+    nodeUid: '',
+    nodeText: '',
+    page: null,
+    scrollTop: null,
+    pos
+  })
+}
+
+// ============ 版本历史（覆盖保存自动备份 → 列表 → 回滚） ============
+const isSmmFile = computed(() => {
+  const d = ctxMenu.value.data
+  return !!(d && !d.isDir && String(d.path || '').toLowerCase().endsWith('.smm'))
+})
+
+const versionDialog = ref({ visible: false, loading: false, filePath: '', fileName: '', list: [] })
+
+const versionTime = (name) => {
+  const m = String(name || '').match(/(\d{4}-\d{2}-\d{2})T(\d{2}-\d{2}-\d{2})/)
+  return m ? `${m[1]} ${m[2].replace(/-/g, ':')}` : name
+}
+
+const showVersionHistory = async () => {
+  const data = ctxMenu.value.data
+  closeCtxMenu()
+  if (!data) return
+  versionDialog.value = { visible: true, loading: true, filePath: data.path, fileName: data.name || '', list: [] }
+  try {
+    const list = await window.electronAPI?.listFileVersions?.(data.path) || []
+    versionDialog.value.list = list
+  } catch (e) {
+    versionDialog.value.list = []
+  }
+  versionDialog.value.loading = false
+}
+
+const restoreVersion = async (v) => {
+  const fp = versionDialog.value.filePath
+  if (!fp || !v?.path) return
+  try {
+    await ElMessageBox.confirm('确定恢复到该历史版本吗？当前内容将被该版本覆盖。', '恢复历史版本', {
+      confirmButtonText: '恢复', cancelButtonText: '取消', type: 'warning'
+    })
+  } catch { return }
+  try {
+    const r = await window.electronAPI?.restoreFileVersion?.(fp, v.path)
+    if (r && r.success) {
+      versionDialog.value.visible = false
+      // 恢复成功后自动重新打开（带 skipAutoSave 标记，跳过自动保存，避免内存未保存修改覆盖恢复的版本）
+      const name = versionDialog.value.fileName
+      try {
+        const read = await window.electronAPI?.openFile?.(fp)
+        if (read && read.success && read.data) {
+          emit('open-file', { filePath: fp, fileName: name, data: read.data, isMarkdown: false, isXmind: false, skipAutoSave: true })
+          ElMessage.success('已恢复历史版本')
+          return
+        }
+      } catch (e2) { /* 读取失败则退化为刷新目录树 */ }
+      refreshTree()
+      ElMessage.success('已恢复历史版本，请重新打开该文件查看')
+    } else {
+      ElMessage.error(r?.error || '恢复失败')
+    }
+  } catch (e) {
+    ElMessage.error('恢复失败: ' + (e.message || ''))
+  }
+}
+
+// 点击任意处关闭右键菜单（用 click 而非 mousedown，避免菜单项 click 前 DOM 已被移除）
+const onGlobalClick = () => {
+  if (ctxMenu.value.visible) closeCtxMenu()
+}
+
+onMounted(() => {
+  document.addEventListener('click', onGlobalClick, true)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onGlobalClick, true)
+})
 
 /* ============================================================
  * 暴露方法
@@ -1494,5 +1636,117 @@ watch(() => props.currentFilePath, (newPath) => {
 
 :deep(.el-tree-node.is-current > .el-tree-node__content) {
   background-color: rgba(0, 122, 255, 0.08);
+}
+</style>
+
+<style>
+/* 文件树右键菜单（Teleport 到 body，需全局样式） */
+.file-ctx-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 140px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  user-select: none;
+}
+.file-ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 7px;
+  font-size: 13px;
+  color: #303133;
+  cursor: pointer;
+}
+.file-ctx-item:hover {
+  background: #f0f7ff;
+  color: #409eff;
+}
+.file-ctx-item svg {
+  color: #409eff;
+  flex-shrink: 0;
+}
+
+/* 版本历史弹窗（Teleport 到 body） */
+.version-dialog-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.version-dialog {
+  width: 380px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+.version-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+.version-dialog-close {
+  width: 24px;
+  height: 24px;
+  font-size: 18px;
+  line-height: 1;
+  color: #909399;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.version-dialog-body {
+  padding: 8px 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.version-empty {
+  padding: 20px;
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+}
+.version-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.03);
+}
+.version-time {
+  font-size: 13px;
+  color: #606266;
+  font-family: Consolas, Monaco, monospace;
+}
+.version-restore {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: #fff;
+  background: #409eff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.version-restore:hover {
+  background: #337ecc;
 }
 </style>

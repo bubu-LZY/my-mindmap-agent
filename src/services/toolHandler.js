@@ -11,6 +11,10 @@ import { searchWeb, readWebpage, aiService } from './aiService'
 import { searchService } from './searchService'
 import { applyTextStyleToNodes, applyTextStyleToTextRanges, analyzeNodeTextStyles, copyRichTextStyles, colorNameToFamily, applyTextStyleToTextRangesByColor, normalizeTextColor, normalizeHighlightColor, normalizeNodeFillColor } from '../utils/textStyle'
 import { addMemoryFact, getMemoryFacts, removeMemoryFact } from '../utils/aiMemory'
+// review #1：持久记忆工具（基于 utils/memoryStore.js）
+import { addMemory, searchMemory, listMemory, deleteMemory, toggleMemory } from '../utils/memoryStore'
+// review #5：对原文本快照（在改写前留下原内容供用户对照）
+import { snapshotBeforeTextChange } from '../utils/nodeSnapshot'
 import { taskSchedulerService } from './taskSchedulerService'
 import {
   getReviewPlan, getToday, CYCLES, isInReviewPlan,
@@ -22,13 +26,96 @@ import {
   nodeHasCloze, isUidClozeHidden, clearNodeCloze, clearNodeClozePartial, applyClozeStyles, setGlobalClozeHidden
 } from '../utils/cloze'
 import { useMindMapStore } from '../stores/mindMapStore'
-import { extractDocxText, extractPdfText } from '../utils/docExtract'
+import { parseDocument, chunkText } from './docParseService'
 import { pdfToImages } from '../utils/pdfToImage'
 import { listAllContextWindows, queryContextWindow, setContextWindow, deleteContextWindow } from '../utils/contextWindow'
 import { parseOpmlToTree, parseFreemindToTree } from '../utils/xmlOutlineParser'
 import { parseXmindBase64 } from '../utils/xmindParser'
 import { isReferenceLink, parseReferenceLink, fileExists as refFileExists, scanFiles as refScanFiles } from './referenceService'
-import { injectInteractiveSvg } from '../utils/svgExport'
+import { injectInteractiveSvg, buildInteractiveHtml } from '../utils/svgExport'
+import { buildTriModeHtml } from '../utils/triModeExport'
+import { renderSvgFromData } from '../utils/offscreenRender'
+import { safeExportSvg } from '../utils/safeExportSvg'
+import { uploadFileForProvider } from './fileUploadService'
+
+// 中文别名映射：把常见中文意图词翻译成英文关键词，用于 activate_tools / semantic_tool_search 的中文匹配
+// 覆盖：飞书/微信/导出/挖空/复习/定时/知识库/云盘/图片/搜索/布局/样式等高频领域
+export const TOOL_ALIAS_MAP = {
+  '飞书': ['feishu'], '飞书云文档': ['feishu'], '飞书云盘': ['feishu'], '飞书文档': ['feishu'], '飞书文件': ['feishu'], '云文档': ['feishu'], '云盘': ['feishu'], '云空间': ['feishu'],
+  '微信': ['wechat'], '企业微信': ['wechat'],
+  '导出': ['export'], '导入': ['import'],
+  '挖空': ['cloze'], '填空': ['cloze'], '背诵': ['recite'], '记忆': ['recite'],
+  '复习': ['review'], '复习计划': ['review'],
+  '定时': ['scheduled'], '定时任务': ['scheduled'],
+  '知识库': ['knowledge'], '语义搜索': ['semantic'],
+  '图片': ['image'], '图像': ['image'], '截图': ['image'],
+  '搜索': ['search'], '联网': ['web'], '网页': ['web'],
+  '布局': ['layout'], '样式': ['style'], '主题': ['theme'], '视图': ['view'], '大纲': ['outline'], '关联图': ['graph'],
+  '思维导图': ['mindmap'], '导图': ['mindmap']
+}
+
+// 根据中文别名扩展出英文关键词集合（用于工具检索匹配）
+function expandAliasKeywords(keyword) {
+  const out = [keyword]
+  for (const [zh, enList] of Object.entries(TOOL_ALIAS_MAP)) {
+    if (keyword.includes(zh)) out.push(...enList)
+  }
+  return [...new Set(out)]
+}
+
+/**
+ * 通过 files API 多模态读取本地文件（PDF / 图片等）
+ * 优先调用视觉模型直读；未配置 / 上传失败 / 调用失败时返回 null，由调用方降级到本地文档解析或 OCR。
+ * @param {string} filePath 本地文件绝对路径
+ * @param {string} fileName 文件名（含扩展名）
+ * @param {string} mimeType 文件 MIME 类型
+ * @param {string} readPrompt 提取指令
+ * @returns {Promise<{ text: string, source: string } | null>}
+ */
+async function readLocalFileViaVisionAPI(filePath, fileName, mimeType, readPrompt) {
+  let visionOverride = null
+  if (window.electronAPI && window.electronAPI.getVisionConfig) {
+    try {
+      const vc = await window.electronAPI.getVisionConfig()
+      if (vc && vc.available && vc.baseURL && vc.model) {
+        visionOverride = {
+          baseURL: vc.baseURL,
+          profileId: vc.profileId || '',
+          model: vc.model,
+          autoComplete: vc.autoComplete !== false,
+          filesURL: vc.filesURL || ''
+        }
+      }
+    } catch { /* 查询失败按未配置处理 */ }
+  }
+  if (!visionOverride) return null
+
+  if (!window.electronAPI?.fs?.readBinary) return null
+  const r = await window.electronAPI.fs.readBinary(filePath)
+  if (!r || !r.success || !r.base64) return null
+
+  const up = await uploadFileForProvider({
+    baseURL: visionOverride.baseURL,
+    profileId: visionOverride.profileId,
+    fileName: fileName || filePath.split(/[\\/]/).pop() || 'file',
+    mimeType,
+    base64: r.base64,
+    customFilesURL: visionOverride.filesURL || ''
+  })
+  if (!up || !up.success || !up.ref) return null
+
+  const systemPrompt = '你是文档内容提取助手，请忠实、完整地提取文件中的文字内容；若是扫描版或图片，先识别文字再输出。不要添加解释、前言或总结。'
+  const choice = await aiService.chat(
+    [{ type: 'text', text: readPrompt }, up.ref],
+    systemPrompt,
+    null,
+    { configOverride: visionOverride }
+  )
+  const outText = String(choice?.message?.content || '').trim()
+  if (!outText) return null
+
+  return { text: outText, source: `多模态识别（files API ${mimeType}）` }
+}
 
 // 共享：文字级富文本样式参数（set_node_style / batch_node_actions / batch_text_style 通用）
 const richTextStyleProps = {
@@ -100,9 +187,9 @@ const saveGeneratedMindmap = async (treeData, fallbackName) => {
   return { filePath: null, fileName }
 }
 
-// ========== 工具目录（用于 query_tools 返回） ==========
+// 工具目录（用于 query_tools 返回）
 const toolCatalog = [
-  { name: 'generate_mindmap', category: 'Mindmap', desc: 'Generate a full mindmap from Markdown content and auto-save as .smm to the default save dir' },
+  { name: 'generate_mindmap', category: 'Mindmap', desc: 'Generate a BRAND-NEW mindmap from Markdown content and auto-save as .smm to the default save dir. Only for pasted/new content — do NOT use it to edit or restructure an existing map (use update_node_text / batch_node_actions / delete_node / merge_nodes / insert_parent_node instead).' },
   { name: 'get_mindmap_content', category: 'Mindmap', desc: 'Get full content of the current mindmap (plain text)' },
   { name: 'get_mindmap_info', category: 'Mindmap', desc: 'Get stats of the current mindmap (node count, depth, etc.)' },
   { name: 'save_mindmap', category: 'Mindmap', desc: 'Save the current mindmap to a file' },
@@ -149,7 +236,7 @@ const toolCatalog = [
   { name: 'ai_cloze_full_map', category: 'AI', desc: 'AI full-map cloze: blank keywords across the whole opened map (all nodes), ignoring selection; for full self-test review' },
   { name: 'parallel_ai_workers', category: 'AI', desc: 'Split a heavy AI job into multiple independent subtasks and run them concurrently, then aggregate the results; use for large map generation/rewrite/cloze/content production' },
   { name: 'add_to_review', category: 'Study', desc: 'Add nodes to the review plan: targets (uids/keyword/mode) adds all matched in one call; omit = current selection; already-planned nodes skipped' },
-  { name: 'get_review_schedule', category: 'Study', desc: 'Query the review plan by date or date range and memory cycle (1/3/7/15/31 days), with completion status and overdue items; always query this tool for review questions; convert relative time words like 今天/明天/昨天 to YYYY-MM-DD before passing date/start_date/end_date' },
+  { name: 'get_review_schedule', category: 'Study', desc: 'Query the review plan by date or date range and memory cycle (1/3/7/15/31 days), with completion status and overdue items; always query this tool for review questions; vague mentions of 任务/计划/安排 (e.g. 本周任务) usually mean this review plan, not scheduled_task; convert relative time words like 今天/明天/昨天 to YYYY-MM-DD before passing date/start_date/end_date' },
   { name: 'get_today_review_status', category: 'Study', desc: 'Get the review plan and completion status for today (list + progress stats); export=true also saves a Markdown file to the default save dir' },
   { name: 'complete_review_task', category: 'Study', desc: 'Review check-in: mark today-due (or given cycle/date) review items remembered/forgot; single item or all at once; supports checking in future dates early. Works with the id and cycle from get_today_review_status' },
   { name: 'delete_review_plan', category: 'Study', desc: 'Delete review-plan tasks: by filePath (all tasks of that file), by nodeUid (single task), or all=true for everything; asks the user to confirm before executing' },
@@ -165,8 +252,8 @@ const toolCatalog = [
   { name: 'search_web', category: 'Web', desc: 'Web search for real-time info' },
   { name: 'read_webpage', category: 'Web', desc: 'Read the full body text of a webpage (follow up web search when the summary is not enough)' },
   { name: 'get_location', category: 'Web', desc: 'Get the current location (IP-based, free, no key) so weather/local search matches the actual city' },
-  { name: 'search_knowledge_base', category: 'KB', desc: 'Search content and filenames of all indexed mindmap files; cross-file node search' },
-  { name: 'semantic_search', desc: 'Semantic search: retrieve similar files and nodes from the local SQLite knowledge base using multiple AI-intent keywords', category: 'KB' },
+  { name: 'search_knowledge_base', category: 'KB', desc: 'Search content and filenames of all indexed mindmap files and documents (PDF/DOCX/XLSX/CSV/MD/TXT auto-indexed); cross-file node and chunk search' },
+  { name: 'semantic_search', desc: 'Semantic search: retrieve similar files, nodes and document chunks from the local SQLite knowledge base (BM25 Chinese ranking) using multiple AI-intent keywords', category: 'KB' },
   { name: 'semantic_tool_search', category: 'Discovery', desc: 'Semantically find the best tool, custom tool, MCP server, or Skill for the user request (unified local scoring)' },
   { name: 'read_mindmap_file', category: 'KB', desc: 'Read the content of a mindmap file at a given path' },
   { name: 'read_node_image', category: 'KB', desc: 'Recognize text/content in the image attached to a mindmap node (multimodal first, local OCR fallback)' },
@@ -199,20 +286,125 @@ const toolCatalog = [
   { name: 'format_painter', category: 'Style', desc: 'Format painter: copy the source node format onto a target node set; optionally copy text-level styles too' },
   { name: 'merge_mindmap_files', category: 'Mindmap', desc: 'Merge another .smm map file (or a given branch of it) under a node of the current map; cross-file knowledge consolidation' },
   { name: 'export_subtree', category: 'Export', desc: 'Export the selected/given subtree: smm=standalone map file; png/jpg/svg=image (jpg saved as png; saved to default dir and sent into chat); ask the user first if the format is unspecified' },
-  { name: 'export_to_markdown', category: 'Export', desc: 'SMM to Markdown: export the whole map as a .md file (default save dir)' },
+  { name: 'export_to_markdown', category: 'Export', desc: 'SMM to Markdown: export the whole map as a .md file (default save dir; can read a file by path without opening it)' },
+  { name: 'export_mindmap_html', category: 'Export', desc: 'Map to interactive HTML: single mindmap view, or full-view 3-mode HTML (mindmap+outline+graph); can read a file by path without opening it' },
   { name: 'export_mindmap_pdf', category: 'Export', desc: 'Map to PDF: export the whole mindmap (canvas graphic) as a .pdf file (default save dir)' },
   { name: 'export_outline_pdf', category: 'Export', desc: 'Outline to PDF: typeset the indented outline text into a PDF doc (default save dir), good for printing' },
   { name: 'save_text_file', category: 'Export', desc: 'Save arbitrary generated text/markdown/HTML/JSON content directly to the default save dir. Use whenever the AI has composed a document (e.g. quiz HTML) that should be exported as a file instead of printed in chat' },
   { name: 'find_related', category: 'KB', desc: 'Related content: find things related to a keyword in the local KB and current map, and suggest how to link them into the current map' },
   { name: 'memory', category: 'Memory', desc: 'Long-term memory: save (only for explicit long-term intent), get (list all), forget (delete by id)' },
-  { name: 'read_local_file', category: 'KB', desc: 'Read a local document in full: txt/md/json direct, docx/pdf text extraction, images auto-OCR, .smm to outline text; required when analyzing local files the user references' },
-  { name: 'retrieve_local_file', category: 'KB', desc: 'Fast semantic retrieval inside a local document: extract text once (cached) then return only the chunks most relevant to the user query; use for large PDF/docx/txt instead of reading the whole file' },
+  { name: 'add_memory', category: 'Memory', desc: 'Add a long-term memory item (review #1). Prefer this over the legacy memory tool: content (text, ≤500 chars), category in (preference|fact|context|instruction), source optional auto|manual. Returns success or error.' },
+  { name: 'search_memory', category: 'Memory', desc: 'Search long-term memory by keyword (review #1): query (string), limit optional int (default 8). Returns up to N items with content + category.' },
+  { name: 'list_memory', category: 'Memory', desc: 'List long-term memory items (review #1). Optional filters: category (preference|fact|context|instruction), enabledOnly (bool), limit (int). Returns total + items.' },
+  { name: 'delete_memory', category: 'Memory', desc: 'Delete a long-term memory item by id (review #1). Use sparingly; usually list_memory first to find the id.' },
+  { name: 'toggle_memory', category: 'Memory', desc: 'Enable/disable a long-term memory item by id (review #1). Disabled items are skipped in search_memory and not auto-injected as system context.' },
+  { name: 'read_local_file', category: 'KB', desc: 'Read a local document in full: txt/md/json direct, docx/xlsx/xls/csv/tsv/pdf text extraction, images auto-OCR, .smm to outline text; required when analyzing local files the user references' },
+  { name: 'retrieve_local_file', category: 'KB', desc: 'Fast semantic retrieval inside a local document: extract text once (cached) then return only the chunks most relevant to the user query; use for large PDF/docx/xlsx/txt instead of reading the whole file' },
   { name: 'list_directory', category: 'File', desc: 'List entries of a local folder (subfolders + files with dates); default = folder of the current file' },
   { name: 'find_local_file', category: 'KB', desc: 'Search local common dirs (Desktop/Documents/Downloads/default save dir/app dir) by filename keyword, returns full paths; use when only the filename is known or a read reports "not found"' },
   { name: 'import_file_as_mindmap', category: 'Mindmap', desc: 'Import an external-format file as a mindmap and save .smm: Markdown/OPML/FreeMind(.mm)/XMind/txt' },
   { name: 'list_references', category: 'Refs', desc: 'Reference list & broken-link check: list @file/#node references in the current map (or all files) and verify the referenced file/node still exists' },
   { name: 'scheduled_task', category: 'Scheduler', desc: 'AI scheduled tasks: create / list / update / delete (action param)' },
 ]
+
+
+// ============ 容错 JSON 解析（review 修复：AI 出题返回被 max_tokens 截断时仍能尽量提取题目） ============
+function parseQuizResponse(raw) {
+  if (!raw) return []
+  const trimmed = String(raw).trim()
+  if (!trimmed) return []
+
+  // 栈式闭合：按 LIFO 顺序补齐未闭合的字符串/数组/对象（review 修复：处理被 max_tokens 截断的不完整 JSON）
+  function heal(text) {
+    const stack = []
+    let inStr = false, strCh = '', esc = false
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]
+      if (inStr) {
+        if (esc) { esc = false; continue }
+        if (ch === String.fromCharCode(92)) { esc = true; continue }
+        if (ch === strCh) inStr = false
+        continue
+      }
+      if (ch === '"' || ch === "'") { inStr = true; strCh = ch; continue }
+      if (ch === '{' || ch === '[') stack.push(ch)
+      else if (ch === '}' || ch === ']') {
+        if (stack.length) {
+          const top = stack[stack.length - 1]
+          if ((ch === '}' && top === '{') || (ch === ']' && top === '[')) stack.pop()
+        }
+      }
+    }
+    let suffix = ''
+    if (inStr) suffix += strCh
+    while (stack.length) {
+      const t = stack.pop()
+      suffix += (t === '{' ? '}' : ']')
+    }
+    return text + suffix
+  }
+
+  function extractQs(p) {
+    if (Array.isArray(p)) return p.filter(function (q) { return q && q.question })
+    if (p && Array.isArray(p.questions)) return p.questions.filter(function (q) { return q && q.question })
+    return []
+  }
+
+  // 1) 完整解析
+  try { return extractQs(JSON.parse(trimmed)) } catch (e) {}
+
+  const first = trimmed.indexOf('{')
+  if (first < 0) return []
+
+  // 2) 从末尾倒数找最近的 '}' 切片再尝试 heal
+  for (let end = trimmed.length; end > first; end--) {
+    if (trimmed[end - 1] !== '}') continue
+    const sub = trimmed.slice(first, end)
+    try { return extractQs(JSON.parse(sub)) } catch (e) {}
+    try { return extractQs(JSON.parse(heal(sub))) } catch (e) {}
+  }
+
+  // 3) per-object salvage：从最外层每个 {...} 拉出来单独 parse，无法解析的通过 heal 修复
+  const out = []
+  let depth = 0, start = -1, inStr2 = false, strCh2 = '', esc2 = false
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]
+    if (inStr2) {
+      if (esc2) { esc2 = false; continue }
+      if (ch === String.fromCharCode(92)) { esc2 = true; continue }
+      if (ch === strCh2) inStr2 = false
+      continue
+    }
+    if (ch === '"') { inStr2 = true; strCh2 = '"'; continue }
+    if (ch === '{') {
+      if (depth === 0) start = i
+      depth++
+    } else if (ch === '}') {
+      depth--
+      if (depth === 0 && start >= 0) {
+        const objStr = trimmed.slice(start, i + 1)
+        try {
+          const obj = JSON.parse(objStr)
+          if (obj && obj.question) out.push(obj)
+        } catch (e) {}
+        start = -1
+      }
+    }
+  }
+  // 还残留未闭合的顶层对象 → heal 后再试
+  if (depth > 0 && start >= 0) {
+    const objStr = trimmed.slice(start)
+    try {
+      const obj = JSON.parse(heal(objStr))
+      if (obj && obj.question) out.push(obj)
+    } catch (e) {}
+  }
+  return out
+}
+
+
+
+
 
 
 // 工具调度元数据：不随 OpenAI tools schema 发给模型，避免供应商拒绝未知字段；调度器用它在本地决策。
@@ -240,6 +432,10 @@ export async function semanticToolSearch(query, limit = 10) {
   const q = String(query || '').trim().toLowerCase()
   if (!q) return []
   const tokens = q.split(/[\s,，、/|]+/).filter(Boolean)
+  // 中文别名扩展：把"飞书/导出/挖空/复习"等意图词翻译成英文关键词，避免中文匹配不到工具
+  const expanded = []
+  for (const t of tokens) expanded.push(...expandAliasKeywords(t))
+  const tokensSet = [...new Set(expanded)]
 
   const builtins = (aiTools || []).map(t => ({
     kind: 'tool',
@@ -290,7 +486,7 @@ export async function semanticToolSearch(query, limit = 10) {
   const scored = pool.map(item => {
     const hay = `${item.name} ${item.description}`.toLowerCase()
     let score = 0
-    for (const token of tokens) {
+    for (const token of tokensSet) {
       if (item.name.toLowerCase().includes(token)) score += 6
       if ((item.description || '').toLowerCase().includes(token)) score += 3
       if (hay.includes(token)) score += 1
@@ -300,6 +496,11 @@ export async function semanticToolSearch(query, limit = 10) {
     return { ...item, score }
   }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, limit)
   return scored
+}
+
+// 工具目录（按类目分组）：设置页"访问令牌管理"勾选每令牌可用工具范围用
+export function getToolCatalogForPermissions() {
+  return toolCatalog.map(({ name, category, desc }) => ({ name, category, desc }))
 }
 
 export function buildToolCatalogText(maxDescLen = 90) {
@@ -656,6 +857,8 @@ export const aiTools = [
             properties: targetNodesProps
           },
           fillColor: { type: 'string', description: 'Node background fill color; normalized to the app node-fill palette (e.g. #91d5ff blue)' },
+          borderColor: { type: 'string', description: 'Node border line color (e.g. #007aff blue / 红 / 绿); set "transparent" or "" to remove border. Pairs with borderWidth.' },
+          borderWidth: { type: 'number', description: 'Node border line width in px (default 2, max 8); only meaningful with borderColor.' },
           ...richTextStyleProps,
           shape: { type: 'string', enum: ['rectangle', 'roundedRectangle', 'diamond', 'parallelogram', 'roundedOuterRectangle'], description: 'Node shape' },
           fontSize: { type: 'number', description: 'Node font size (e.g. 14); empty = unchanged' }
@@ -703,7 +906,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'get_review_schedule',
-      description: 'Query review plan by date/date range and memory cycle (1/3/7/15/31 days), with progress and overdue items. Always use for review questions. Convert 今天/明天/昨天 to YYYY-MM-DD before passing dates.',
+      description: 'Query review plan by date/date range and memory cycle (1/3/7/15/31 days), with progress and overdue items. Always use for review questions. When the user says 任务/计划/安排/复习 without other context (e.g. 本周任务, 这周要做什么), it usually refers to this review plan, NOT scheduled_task. Convert 今天/明天/昨天 to YYYY-MM-DD before passing dates.',
       parameters: {
         type: 'object',
         properties: {
@@ -1002,11 +1205,27 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'export_to_markdown',
-      description: 'Convert the current map (SMM doc) to a Markdown file saved to the default save dir. Use when the user says SMM转markdown/导出markdown/转成md文件. Returns the saved path and a content preview.',
+      description: 'Convert a mindmap (SMM doc) to a Markdown file saved to the default save dir. By default exports the currently open map; pass file_path to export any .smm file WITHOUT opening it (MCP/external calls). Use when the user says SMM转markdown/导出markdown/转成md文件. Returns the saved path and a content preview.',
       parameters: {
         type: 'object',
         properties: {
-          file_name: { type: 'string', description: 'File name (no extension); default = root node text' }
+          file_name: { type: 'string', description: 'File name (no extension); default = root node text' },
+          file_path: { type: 'string', description: 'Optional absolute path of a .smm file to export. Omit to export the currently open map.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'export_mindmap_html',
+      description: 'Export a mindmap as a self-contained interactive HTML file. mode=single = single mindmap view (zoom/pan + cloze toggle); mode=full = full-view 3-mode HTML (mindmap + outline + graph tabs). By default exports the currently open map; pass file_path to export any .smm file WITHOUT opening it. Use when the user says 导出HTML/导出全视图/三模式HTML. Returns the saved path.',
+      parameters: {
+        type: 'object',
+        properties: {
+          mode: { type: 'string', enum: ['single', 'full'], description: 'single = single mindmap HTML (default); full = full-view 3-mode HTML (导图+大纲+关联图)' },
+          file_name: { type: 'string', description: 'File name (no extension); default = root node text' },
+          file_path: { type: 'string', description: 'Optional absolute path of a .smm file to export. Omit to export the currently open map.' }
         }
       }
     }
@@ -1415,13 +1634,14 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'feishu_get_doc_content',
-      description: 'Get the plain text content of a Feishu online doc (docx type). Use when the user wants to view a Feishu doc or the AI needs to read an uploaded doc for analysis. docToken comes from feishu_list_files results or upload/import returned tokens.',
+      description: 'Get the plain text content of Feishu online doc(s) (docx type). Use when the user wants to view Feishu doc(s) or the AI needs to read uploaded doc(s) for analysis. docToken comes from feishu_list_files results or upload/import returned tokens. For batch read, pass docTokens array to read many docs in ONE call.',
       parameters: {
         type: 'object',
         properties: {
-          docToken: { type: 'string', description: 'Feishu doc token' }
+          docToken: { type: 'string', description: 'Feishu doc token (single doc). Omit when using docTokens.' },
+          docTokens: { type: 'array', description: 'Batch doc token list. Prefer this for reading multiple docs in one call.', items: { type: 'string', description: 'Feishu doc token' } }
         },
-        required: ['docToken']
+        required: []
       }
     }
   },
@@ -1429,14 +1649,15 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'feishu_delete_file',
-      description: 'Delete a file or doc in Feishu Drive (moved to trash, recoverable). Use when the user explicitly asks to delete a Feishu file; confirm with the user before deleting.',
+      description: 'Delete file(s) in Feishu Drive (moved to trash, recoverable). Use when the user explicitly asks to delete a Feishu file; confirm with the user before deleting. For batch delete, pass the items array (each item = {fileToken, fileType}) to delete many in ONE call. IMPORTANT: fileType MUST be the exact "type" value returned by feishu_list_files (docx/doc/sheet/bitable/file/folder); do NOT guess or default it, otherwise deletion fails.',
       parameters: {
         type: 'object',
         properties: {
-          fileToken: { type: 'string', description: 'File token' },
-          fileType: { type: 'string', enum: ['file', 'doc', 'docx', 'sheet', 'bitable', 'folder'], description: 'File type, default file (plain Drive file)' }
+          fileToken: { type: 'string', description: 'File token (single file). Omit when using items.' },
+          fileType: { type: 'string', enum: ['file', 'doc', 'docx', 'sheet', 'bitable', 'folder'], description: 'File type. Use the "type" field from feishu_list_files result (not the displayed Chinese name).' },
+          items: { type: 'array', description: 'Batch delete list. Each item = {fileToken, fileType}. Prefer this for deleting multiple files in one call.', items: { type: 'object', properties: { fileToken: { type: 'string', description: 'File token' }, fileType: { type: 'string', enum: ['file', 'doc', 'docx', 'sheet', 'bitable', 'folder'], description: 'File type from feishu_list_files "type" field' } }, required: ['fileToken', 'fileType'] } }
         },
-        required: ['fileToken']
+        required: []
       }
     }
   },
@@ -1444,15 +1665,16 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'feishu_rename_file',
-      description: 'Rename a file or doc in Feishu Drive. Use when the user asks to change a Feishu file name.',
+      description: 'Rename file(s)/doc(s) in Feishu Drive. Use when the user asks to change a Feishu file name. fileType MUST be the exact "type" value returned by feishu_list_files (do NOT guess or default it). For batch rename, pass items (each = {fileToken, newName, fileType}) to rename many in ONE call.',
       parameters: {
         type: 'object',
         properties: {
-          fileToken: { type: 'string', description: 'File token' },
-          newName: { type: 'string', description: 'New file name (with extension)' },
-          fileType: { type: 'string', enum: ['file', 'doc', 'docx', 'sheet', 'bitable'], description: 'File type, default file' }
+          fileToken: { type: 'string', description: 'File token (single file). Omit when using items.' },
+          newName: { type: 'string', description: 'New file name (with extension). Omit when using items.' },
+          fileType: { type: 'string', enum: ['file', 'doc', 'docx', 'sheet', 'bitable'], description: 'File type from feishu_list_files "type" field' },
+          items: { type: 'array', description: 'Batch rename list. Each item = {fileToken, newName, fileType}. Prefer this for renaming multiple files in one call.', items: { type: 'object', properties: { fileToken: { type: 'string', description: 'File token' }, newName: { type: 'string', description: 'New file name (with extension)' }, fileType: { type: 'string', enum: ['file', 'doc', 'docx', 'sheet', 'bitable'], description: 'File type from feishu_list_files "type" field' } }, required: ['fileToken', 'newName', 'fileType'] } }
         },
-        required: ['fileToken', 'newName']
+        required: []
       }
     }
   },
@@ -1793,7 +2015,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'search_knowledge_base',
-      description: 'Search all indexed mindmap files. Can search node content inside files (cross-file) and filenames. Use when the answer may not be in the currently opened mindmap. Returns matching filenames, file paths, node content and node uid.',
+      description: 'Search all indexed local content (mindmap files + documents read by AI: PDF/DOCX/XLSX/CSV/MD/TXT auto-indexed). Can search node content inside mindmap files (cross-file), document chunks and filenames. Use when the answer may not be in the currently opened mindmap. Returns matching filenames, file paths, node/chunk content and node uid.',
       parameters: {
         type: 'object',
         properties: {
@@ -1807,7 +2029,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'semantic_search',
-      description: 'Semantic search over the local KB: expand intent into 3~6 keywords (synonyms/related terms), merge/dedupe/rank by hit count. Suited for fuzzy questions (vs search_knowledge_base exact match). Returns related files and nodes.',
+      description: 'Semantic search over the local KB (mindmaps + auto-indexed PDF/DOCX/XLSX/CSV/MD/TXT documents, BM25 Chinese ranking): expand intent into 3~6 keywords (synonyms/related terms), merge/dedupe/rank by hit count. Suited for fuzzy questions (vs search_knowledge_base exact match). Returns related files, nodes and document chunks.',
       parameters: {
         type: 'object',
         properties: {
@@ -1869,7 +2091,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'retrieve_local_file',
-      description: 'Fast semantic retrieval inside a local document. Extracts text once (cached in-session) and returns only the top chunks most relevant to the user query — do NOT read the whole file. Pass file_path (absolute path, e.g. from the 【拖入文件｜路径：xxx】 marker) and query (the user\'s actual question). Best for large PDF/docx/txt when the user drops a file and asks a question; use read_local_file only when the user needs the FULL content or an OCR-scanned PDF.',
+      description: 'Fast semantic retrieval inside a local document (txt/md/json/log/html/xml/docx/xlsx/xls/csv/tsv/pdf). Extracts text once (cached in-session) and returns only the top chunks most relevant to the user query — do NOT read the whole file. Pass file_path (absolute path, e.g. from the 【拖入文件｜路径：xxx】 marker) and query (the user\'s actual question). Best for large PDF/docx/xlsx/xls/txt when the user drops a file and asks a question; use read_local_file only when the user needs the FULL content or an OCR-scanned PDF.',
       parameters: {
         type: 'object',
         properties: {
@@ -2033,7 +2255,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'scheduled_task',
-      description: 'AI scheduled tasks (app wakes at the trigger time and prompt is sent to the AI). action=create: name/prompt/datetime(YYYY-MM-DD HH:mm)/cycle(once|daily|weekly|monthly) required. action=list: list all tasks with taskId. action=update: change name/prompt/datetime/cycle/enabled by task_id (only changed fields). action=delete: remove by task_id (confirm first). Example: user says 每天晚上8点提醒我复习 -> action=create, name=晚间复习提醒, prompt=汇总复习计划完成情况, datetime=today 20:00, cycle=daily.',
+      description: 'AI scheduled tasks (app wakes at the trigger time and prompt is sent to the AI). action=create: name/prompt/datetime(YYYY-MM-DD HH:mm)/cycle(once|daily|weekly|monthly) required. action=list: list all tasks with taskId. action=update: change name/prompt/datetime/cycle/enabled by task_id (only changed fields). action=delete: remove by task_id (confirm first). Example: user says 每天晚上8点提醒我复习 -> action=create, name=晚间复习提醒, prompt=汇总复习计划完成情况, datetime=today 20:00, cycle=daily. NOTE: this is for creating/removing app automation triggers, NOT for querying study plans. When the user asks about 本周任务/复习计划/待复习/学习安排, use get_review_schedule instead.',
       parameters: {
         type: 'object',
         properties: {
@@ -2048,7 +2270,7 @@ export const aiTools = [
         required: ['action']
       }
     }
-  },,
+  },
   {
     type: 'function',
     function: {
@@ -2085,7 +2307,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'read_local_file',
-      description: 'Read a local document in full: txt/md/json/log (direct), docx/pdf (text extraction; scanned PDF auto-OCR via page_start/page_end or ocr_all), images (auto OCR), smm (outline text). Use when user @-references or asks to analyze a local file.',
+      description: 'Read a local document in full: txt/md/json/log (direct), docx (text extraction), xlsx/xls/csv/tsv (Excel/CSV tables, each row becomes one tab-separated line), pdf (text extraction; scanned PDF auto-OCR via page_start/page_end or ocr_all), images (auto OCR), smm (outline text). Use when user @-references or asks to analyze a local file.',
       parameters: {
         type: 'object',
         properties: {
@@ -2258,11 +2480,12 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'list_directory',
-      description: 'List the entries of a local folder (one level): subfolders and supported files with modified dates. Default dir = folder of the currently open file. Use to browse what exists in a folder (find_local_file only matches keywords and shows no folder structure).',
+      description: 'List the entries of a local folder. By default lists one level (subfolders + supported files with modified dates). Set recursive=true to recursively list ALL subdirectories and files (directory tree). Default dir = folder of the currently open file; in MCP/external calls it falls back to the directory-tree roots. Use to browse what exists in a folder (find_local_file only matches keywords and shows no folder structure).',
       parameters: {
         type: 'object',
         properties: {
-          dir_path: { type: 'string', description: 'Absolute folder path; omit = folder of the currently open file' }
+          dir_path: { type: 'string', description: 'Absolute folder path; omit = folder of the currently open file, or the directory-tree roots if no file is open' },
+          recursive: { type: 'boolean', description: 'true = recursively list all subdirectories (directory tree); default false = one level' }
         }
       }
     }
@@ -2316,6 +2539,150 @@ export const aiTools = [
 
 ]
 
+// 工具名 → 中文名映射（用于访问令牌权限勾选界面等面向用户的展示）
+export const TOOL_NAME_MAP = {
+  generate_mindmap: '生成导图',
+  expand_node: '扩展节点',
+  set_mindmap_data: '更新导图数据',
+  summarize_node: '添加概要',
+  search_nodes: '搜索节点',
+  update_node_text: '修改节点文本',
+  delete_node: '删除节点',
+  change_layout: '切换布局',
+  export_mindmap: '导出导图',
+  get_mindmap_info: '获取导图信息',
+  insert_sibling_node: '插入兄弟节点',
+  insert_child_node: '插入子节点',
+  insert_parent_node: '插入父节点',
+  move_node_up: '上移节点',
+  move_node_down: '下移节点',
+  toggle_node_expand: '展开/收起节点',
+  remove_node_only: '仅删除节点',
+  copy_node: '复制节点',
+  cut_node: '剪切节点',
+  paste_node: '粘贴节点',
+  set_node_text: '设置节点文本',
+  set_node_style: '设置节点样式',
+  search_web: '联网搜索',
+  audit_mindmap: '导图诊断',
+  refactor_mindmap: '导图重构',
+  research_to_mindmap: '研究生成导图',
+  read_webpage: '读取网页',
+  get_location: '获取位置',
+  ocr_recognize: 'OCR 识别',
+  search_knowledge_base: '知识库搜索',
+  ai_continue_children: 'AI 续写子节点',
+  parallel_ai_workers: '并行子 Agent',
+  ai_recite_rewrite: 'AI 背诵改写',
+  ai_cloze: 'AI 智能挖空',
+  ai_cloze_full_map: 'AI 全文挖空',
+  ai_quiz: 'AI 出题（新文件）',
+  ai_quiz_append: 'AI 出题（挂到节点）',
+  batch_text_style: '批量文字样式',
+  focus_node: '定位节点',
+  query_node_styles: '查询节点样式',
+  get_review_schedule: '查询复习计划',
+  get_today_review_status: '今日复习状态',
+  delete_review_plan: '删除复习计划',
+  format_painter: '格式刷',
+  set_node_note: '节点备注',
+  outer_frame: '外框',
+  associative_line: '关联线',
+  undo: '撤销',
+  redo: '重做',
+  upload_to_feishu: '上传到飞书',
+  save_mindmap: '保存导图',
+  new_mindmap: '新建导图',
+  get_mindmap_content: '获取导图内容',
+  add_to_review: '添加复习',
+  read_mindmap_file: '读取导图文件',
+  read_node_image: '识别节点图片',
+  semantic_search: '语义检索',
+  activate_tools: '激活工具',
+  move_node: '移动节点',
+  merge_nodes: '合并节点',
+  scheduled_task: '定时任务',
+  find_related: '关联推荐',
+  memory: '长期记忆',
+  context_window: '上下文窗口',
+  feishu_list_files: '飞书文件列表',
+  feishu_get_doc_content: '读取飞书文档',
+  feishu_delete_file: '删除飞书文件',
+  feishu_rename_file: '重命名飞书文件',
+  upload_mindmap_to_feishu_doc: '上传导图为飞书文档',
+  upload_file_to_feishu: '上传文件到飞书',
+  send_feishu_message: '发送飞书消息',
+  send_wechat_message: '发送微信消息',
+  send_wechat_image: '发送微信图片',
+  send_feishu_image: '发送飞书图片',
+  send_wechat_file: '发送微信文件',
+  send_feishu_file: '发送飞书文件',
+  select_node: '选中节点',
+  batch_node_actions: '批量节点操作',
+  read_local_file: '读取本地文件',
+  save_text_file: '保存文本文件',
+  delete_local_file: '删除本地文件',
+  find_local_file: '查找本地文件',
+  retrieve_local_file: '检索本地文件',
+  list_directory: '列出目录',
+  import_file_as_mindmap: '导入文件为导图',
+  export_to_markdown: '导出 Markdown',
+  export_mindmap_html: '导出 HTML（含全视图）',
+  export_mindmap_pdf: '导出导图 PDF',
+  export_outline_pdf: '导出大纲 PDF',
+  export_subtree: '导出子树',
+  merge_mindmap_files: '合并导图文件',
+  clear_mindmap: '清空导图',
+  clear_cloze: '清除挖空',
+  toggle_cloze_visibility: '切换挖空可见性',
+  list_cloze_nodes: '列出挖空节点',
+  mechanical_cloze: '机械挖空',
+  complete_review_task: '完成复习任务',
+  add_child_nodes: '批量添加子节点',
+  rename_mindmap_file: '重命名导图文件',
+  duplicate_nodes: '复制节点（多选）',
+  sort_children: '子节点排序',
+  read_node_subtree: '读取节点子树',
+  get_node_detail: '获取节点详情',
+  query_nodes: '查询节点',
+  set_theme: '设置主题',
+  switch_view: '切换视图',
+  zoom_control: '缩放控制',
+  list_references: '列出引用',
+  find_replace_text: '查找替换文本',
+  create_skill: '创建技能',
+  update_skill: '更新技能',
+  get_skill: '获取技能',
+  delete_skill: '删除技能',
+  list_skills: '列出技能',
+  invoke_skill: '调用技能',
+  list_custom_tools: '列出自定义工具',
+  call_custom_tool: '调用自定义工具',
+  list_mcp_servers: '列出 MCP 服务',
+  list_mcp_tools: '列出 MCP 工具',
+  mcp_call_tool: '调用 MCP 工具',
+  semantic_tool_search: '语义工具搜索'
+}
+
+// MCP 访问令牌权限勾选列表：与 ChatPanel.listMcpTools 同源（getCoreTools + aiTools），
+// 类目与描述取自工具目录（目录没有的归 Other），保证勾选列表与 MCP 实际下发的工具完全一致
+export function getMcpToolPermissions() {
+  const byName = new Map()
+  for (const t of toolCatalog) byName.set(t.name, t)
+  const groups = new Map()
+  const seen = new Set()
+  for (const t of [...getCoreTools(), ...aiTools]) {
+    const name = t?.function?.name
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    const meta = byName.get(name) || {}
+    const cat = meta.category || 'Other'
+    if (!groups.has(cat)) groups.set(cat, [])
+    groups.get(cat).push({ name, cnName: TOOL_NAME_MAP[name] || '', desc: meta.desc || '' })
+  }
+  return groups
+}
+
 // ========== 批量操作共享助手 ==========
 // 节点富文本 → 纯文本
 function nodePlainText(html) {
@@ -2339,6 +2706,53 @@ function normalizeForMatch(str) {
 
 // 本地文档文本提取缓存：path → { success, text, source, noTextLayer? }（拖入文件后语义检索/多次读取避免重复解析，加速）
 const localDocTextCache = new Map()
+// 缓存上限：最多缓存 20 个文档，单文档文本最多 2MB（超大文档不缓存全文，避免内存被挤爆）
+const LOCAL_DOC_CACHE_MAX = 20
+const LOCAL_DOC_CACHE_MAX_TEXT = 2 * 1024 * 1024
+
+// 写缓存：超大文本不缓存；超过条数淘汰最早插入的（近似 FIFO，足够控制内存）
+function setLocalDocCache(key, value) {
+  const textLen = value?.text?.length || 0
+  if (textLen > LOCAL_DOC_CACHE_MAX_TEXT) return
+  if (localDocTextCache.has(key)) localDocTextCache.delete(key)
+  localDocTextCache.set(key, value)
+  while (localDocTextCache.size > LOCAL_DOC_CACHE_MAX) {
+    const oldest = localDocTextCache.keys().next().value
+    localDocTextCache.delete(oldest)
+  }
+}
+
+// 路径自动纠错：文件不存在时，用文件名做模糊搜索（桌面/文档/下载/默认保存目录等常用目录），
+// 命中唯一文件则返回其路径，命中多个返回候选列表，未命中返回 null。
+// 目的：消除模型"猜错路径 → 报文件不存在 → 再 find_local_file"的多余往返（高频文档场景）。
+async function resolveFilePathAuto(filePath) {
+  const norm = String(filePath || '').trim()
+  if (!norm) return { resolved: null, candidates: [], searched: false }
+  try {
+    if (!window.electronAPI?.fs?.findFile) return { resolved: null, candidates: [], searched: false }
+    const exists = await window.electronAPI.fs.exists(norm)
+    if (exists) return { resolved: norm, candidates: [], searched: false }
+    const baseName = norm.split(/[/\\]/).pop().replace(/\.[^.]+$/, '')
+    if (!baseName) return { resolved: null, candidates: [], searched: false }
+    const r = await window.electronAPI.fs.findFile({ keyword: baseName, maxResults: 8 })
+    if (!r?.success || !Array.isArray(r.results) || r.results.length === 0) {
+      return { resolved: null, candidates: [], searched: true }
+    }
+    // 优先按扩展名匹配，其次按 basename 精确匹配
+    const ext = norm.split('.').pop().toLowerCase()
+    let matches = r.results
+    if (ext && ext !== 'pdf' && ext !== 'docx' && ext !== 'xlsx' && ext !== 'txt' && ext !== 'md') {
+      // 无明确扩展名时全部候选
+    } else if (ext) {
+      const extMatches = r.results.filter(f => f.path.toLowerCase().endsWith('.' + ext))
+      if (extMatches.length) matches = extMatches
+    }
+    if (matches.length === 1) return { resolved: matches[0].path, candidates: [], searched: true }
+    return { resolved: null, candidates: matches.map(m => m.path), searched: true }
+  } catch {
+    return { resolved: null, candidates: [], searched: false }
+  }
+}
 
 // 从本地文档提取文本（txt/md/docx/pdf 文本层），带缓存；不处理 OCR 扫描版（走 read_local_file 兜底）
 async function extractLocalDocTextCached(filePath, ext) {
@@ -2346,35 +2760,46 @@ async function extractLocalDocTextCached(filePath, ext) {
   if (localDocTextCache.has(key)) return localDocTextCache.get(key)
   let result = { success: false, error: '不支持的格式' }
   try {
-    if (['txt', 'md', 'markdown', 'json', 'log', 'csv', 'html', 'xml'].includes(ext)) {
-      const text = await window.electronAPI.fs.readFile(filePath)
-      result = { success: true, text, source: '文本' }
-    } else if (ext === 'docx') {
-      const bin = await window.electronAPI.fs.readBinary(filePath)
-      if (!bin.success) {
-        result = { success: false, error: bin.error }
-      } else {
-        const buf = Uint8Array.from(atob(bin.base64), c => c.charCodeAt(0))
-        const res = await extractDocxText(buf.buffer)
-        result = res.success ? { success: true, text: res.text, source: 'Word' } : { success: false, error: res.error }
-      }
-    } else if (ext === 'pdf') {
-      const bin = await window.electronAPI.fs.readBinary(filePath)
-      if (!bin.success) {
-        result = { success: false, error: bin.error }
-      } else {
-        const buf = Uint8Array.from(atob(bin.base64), c => c.charCodeAt(0))
-        const res = await extractPdfText(buf.buffer)
-        result = res.success
-          ? { success: true, text: res.text, source: 'PDF' }
-          : { success: false, error: res.error, noTextLayer: true }
-      }
+    // 统一走 docParseService：PDF(pdfjs) / DOCX(mammoth) / XLSX(exceljs) / CSV·TSV(papaparse) / 文本直读
+    if (['txt', 'md', 'markdown', 'json', 'log', 'csv', 'tsv', 'html', 'xml', 'docx', 'pdf', 'xlsx', 'xls'].includes(ext)) {
+      const res = await parseDocument(filePath)
+      result = res.success
+        ? { success: true, text: res.text, source: res.type, meta: res.meta }
+        : { success: false, error: res.error, noTextLayer: ext === 'pdf' }
     }
   } catch (e) {
     result = { success: false, error: e.message || String(e) }
   }
-  if (result.success) localDocTextCache.set(key, result)
+  if (result.success) setLocalDocCache(key, result)
   return result
+}
+
+// 预热文本缓存：文档在查看器中打开时提取文本后写入缓存，
+// 让 Agent 后续 read_local_file / retrieve_local_file 直接命中，无需重新解析全文（加速读取）
+export function warmLocalDocTextCache(filePath, ext, text, meta) {
+  if (!filePath || !text) return
+  setLocalDocCache(filePath, { success: true, text, source: ext, meta: meta || {} })
+}
+
+// 后台索引文档到知识库（fire-and-forget，失败静默）：BM25 入库 + 本地向量索引
+async function indexDocumentInBackground(filePath, fileName, ext, text) {
+  try {
+    if (!searchService.isAvailable()) return
+    const docExts = ['docx', 'xlsx', 'xls', 'csv', 'tsv', 'pdf', 'txt', 'md', 'markdown', 'json', 'log', 'html', 'xml']
+    if (!docExts.includes(ext)) return
+    const chunks = chunkText(String(text || ''))
+    if (!chunks.length) return
+    let mtime = ''
+    if (window.electronAPI?.fs?.stat) {
+      const st = await window.electronAPI.fs.stat(filePath)
+      if (st?.success) mtime = st.mtime
+    }
+    const r = await searchService.indexDocument(filePath, fileName, 'doc', chunks, mtime)
+    // BM25 入库成功且非跳过（内容有更新）时追加向量索引（E5 本地推理，异步慢速）
+    if (r?.success && !r?.skipped) {
+      searchService.indexDocumentVectors(filePath, fileName, mtime, chunks.slice(0, 500))
+    }
+  } catch { /* 索引失败不影响读取 */ }
 }
 
 // 把全文按段落切分为约 chunkSize 字的片段（保留段落边界）
@@ -2405,6 +2830,84 @@ function buildQueryTerms(query) {
     if (/[\u4e00-\u9fff]{2}/.test(pair)) ngrams.push(pair)
   }
   return { terms, ngrams: [...new Set(ngrams)] }
+}
+
+// 中文数字 → 整数（支持 一~九十九、百；阿拉伯数字直转）
+function zhNumToInt(s) {
+  const t = String(s || '').trim()
+  if (!t) return -1
+  if (/^\d+$/.test(t)) return parseInt(t, 10)
+  const map = { '零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 }
+  let n = 0
+  if (t.includes('十')) {
+    const parts = t.split('十')
+    n = (parts[0] ? (map[parts[0]] ?? 1) : 1) * 10 + (parts[1] ? (map[parts[1]] ?? 0) : 0)
+  } else if (t.includes('百')) {
+    const parts = t.split('百')
+    n = (map[parts[0]] ?? 1) * 100 + (parts[1] ? zhNumToInt(parts[1]) : 0)
+  } else {
+    n = map[t] ?? -1
+  }
+  return n
+}
+
+// 从 query 中解析目标章节号：{ chapter, section }（无则为 null）
+function parseChapterQuery(query) {
+  const q = String(query || '')
+  const chapter = q.match(/第\s*([一二三四五六七八九十百零两\d]+)\s*章/)
+  const section = q.match(/第\s*([一二三四五六七八九十百零两\d]+)\s*节/)
+  return {
+    chapter: chapter ? zhNumToInt(chapter[1]) : null,
+    section: section ? zhNumToInt(section[1]) : null
+  }
+}
+
+// 章节标题行判断：归一化后以「第X章」「第X节」开头（PDF 提取文本可能带字符间空格）
+const CHAPTER_LINE_RE = /^第[一二三四五六七八九十百零两\d]+章/
+const SECTION_LINE_RE = /^第[一二三四五六七八九十百零两\d]+节/
+
+// 按章节定位提取连续内容：query 含「第X章/第X节」时，返回该章节标题到下一同级标题之间的完整原文。
+// 文档无目录/章节标题（如纯文本、无层级 PDF）时返回 null，由调用方降级为语义检索。
+function extractSectionByHeading(fullText, query) {
+  const { chapter, section } = parseChapterQuery(query)
+  if (chapter == null && section == null) return null
+  const lines = String(fullText || '').split(/\r?\n/)
+  const parsed = [] // { idx, norm, chapter, section }
+  let curChapter = null
+  let curSection = null
+  for (let i = 0; i < lines.length; i++) {
+    const norm = normalizeForMatch(lines[i])
+    const c = norm.match(CHAPTER_LINE_RE)
+    const s = norm.match(SECTION_LINE_RE)
+    if (c) {
+      const n = zhNumToInt(norm.slice(1, norm.indexOf('章')))
+      if (n >= 0) { curChapter = n; curSection = null }
+    } else if (s) {
+      const n = zhNumToInt(norm.slice(1, norm.indexOf('节')))
+      if (n >= 0) curSection = n
+    }
+    parsed.push({ idx: i, norm, chapter: curChapter, section: curSection })
+  }
+
+  // 目标：匹配 chapter（若指定）与 section（若指定）
+  const target = parsed.filter(p =>
+    (chapter == null || p.chapter === chapter) &&
+    (section == null || p.section === section)
+  )
+  if (!target.length) return null
+
+  // 取目标连续区间的起止行（中间可能有换页等杂质，但尽量连续）
+  const startIdx = target[0].idx
+  let endIdx = target[target.length - 1].idx
+  // 向后延伸直到遇到下一同级标题（下一章/下一节），截断区间
+  const isTitle = (p) => p.norm.match(CHAPTER_LINE_RE) || p.norm.match(SECTION_LINE_RE)
+  for (let i = endIdx + 1; i < lines.length; i++) {
+    if (isTitle(parsed[i])) break
+    endIdx = i
+  }
+  const content = lines.slice(startIdx, endIdx + 1).map(s => s.trim()).filter(Boolean).join('\n')
+  if (!content) return null
+  return content
 }
 
 // 根据问题对片段打分，返回 topK 个最相关片段
@@ -2755,14 +3258,41 @@ function replaceHtmlFind(html, find, replacement, regex, flags) {
 }
 
 // 对节点集合批量应用样式，返回明细（与 set_node_style 原逻辑一致）
+// 归一化节点边框颜色：接受颜色名/十六进制，统一为合法 CSS 颜色
+function normalizeBorderColor(color) {
+  const c = String(color || '').trim()
+  if (!c) return '#007aff'
+  // 常见中文颜色名映射
+  const map = {
+    红: '#f5222d', 橙: '#fa8c16', 黄: '#fadb14', 绿: '#52c41a', 青: '#13c2c2',
+    蓝: '#007aff', 紫: '#722ed1', 粉: '#eb2f96', 黑: '#303133', 白: '#ffffff', 灰: '#8c8c8c'
+  }
+  if (map[c]) return map[c]
+  // 已是合法颜色（#开头 或 rgb( / 颜色名），直接返回
+  if (/^#[0-9a-fA-F]{3,8}$/.test(c) || /^rgb/i.test(c) || /^[a-z]+$/i.test(c)) return c
+  return '#007aff'
+}
+
 function applyNodeStyles(mindMap, nodes, styleArgs = {}) {
   const details = []
 
-  // 节点级样式：背景填充色 / 形状 / 字号
+  // 节点级样式：背景填充色 / 形状 / 字号 / 边框
   const nodeStyle = {}
   if (styleArgs.fillColor) nodeStyle.fillColor = normalizeNodeFillColor(styleArgs.fillColor)
   if (styleArgs.shape) nodeStyle.shape = styleArgs.shape
   if (styleArgs.fontSize) nodeStyle.fontSize = styleArgs.fontSize
+  // 边框：borderColor + borderWidth 成对设置；borderColor 为 transparent 或空表示移除边框
+  if (styleArgs.borderColor !== undefined) {
+    const bc = String(styleArgs.borderColor || '').trim()
+    if (!bc || bc === 'transparent' || bc === 'none') {
+      nodeStyle.borderColor = 'transparent'
+      nodeStyle.borderWidth = 0
+    } else {
+      nodeStyle.borderColor = normalizeBorderColor(bc)
+      const bw = Number(styleArgs.borderWidth)
+      nodeStyle.borderWidth = Number.isFinite(bw) && bw > 0 ? Math.min(bw, 8) : 2
+    }
+  }
   if (Object.keys(nodeStyle).length > 0) {
     let styleOk = 0
     for (const node of nodes) {
@@ -2776,8 +3306,8 @@ function applyNodeStyles(mindMap, nodes, styleArgs = {}) {
     }
     mindMap.render()
     details.push(styleOk > 0
-      ? `节点背景/形状/字号已应用到 ${styleOk}/${nodes.length} 个节点`
-      : '节点背景/形状/字号未生效（setStyle 全部失败）')
+      ? `节点背景/形状/字号/边框已应用到 ${styleOk}/${nodes.length} 个节点`
+      : '节点背景/形状/字号/边框未生效（setStyle 全部失败）')
   }
 
   // 文本级样式：颜色 / 高亮 / 加粗 / 斜体 / 下划线 / 删除线 / 字体 / 字号（写入富文本 HTML）
@@ -3194,7 +3724,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
   switch (name) {
     case 'audit_mindmap': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const analysis = analyzeMindMapTree(mindMap.getData())
         const summary = {
           nodeCount: analysis.nodes.length,
@@ -3222,7 +3752,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'refactor_mindmap': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const treeData = mindMap.getData()
         const analysis = analyzeMindMapTree(treeData)
         const apply = args.apply === true
@@ -3248,7 +3778,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'reorganize_mindmap': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const treeData = mindMap.getData()
         const contentText = treeToText(treeData)
         if (!contentText.trim()) return { success: false, message: '当前导图没有任何内容可整理' }
@@ -3375,7 +3905,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'get_mindmap_content': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const treeData = mindMap.getData()
         const nodeCount = countNodes(treeData)
         const mode = args.mode || 'auto'
@@ -3398,7 +3928,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'get_mindmap_info': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const treeData = mindMap.getData()
         const nodeCount = countNodes(treeData)
         const maxDepth = getMaxDepth(treeData)
@@ -3415,7 +3945,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'save_mindmap': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const treeData = mindMap.getData()
         const saveData = JSON.stringify(treeData, null, 2)
         // 当前打开的是 .smm 文件时，优先原地覆盖保存，避免「每次修改都另存一个导图」
@@ -3466,7 +3996,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'new_mindmap': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const rootText = args.rootText || '中心主题'
         const treeData = {
           data: { text: `<p><span>${escHtml(rootText)}</span></p>`, uid: createUid(), richText: true },
@@ -3538,7 +4068,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'add_child_nodes': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         // 父节点：优先 targets（uids/keyword/mode），否则当前选中节点；多父节点在一次调用内全部处理
         let parents
         if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
@@ -3659,6 +4189,8 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
               ? mindMap.renderer.findNodeByUid(String(u.uid))
               : null
             if (node && !node.isGeneralization) {
+              // review #5：改写前快照原文本到 node.note，最多保留 5 条历史
+              try { snapshotBeforeTextChange(node, 'ai_rewrite') } catch (e) {}
               node.setText(`<p><span>${escHtml(String(u.text))}</span></p>`)
               updated++
             } else {
@@ -3684,7 +4216,11 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         if (!targets.length) {
           return { success: false, message: '没有目标节点。请提供 updates=[{uid,text}]、targets（uids/keyword/mode），或先选中节点' }
         }
-        targets.forEach(n => n.setText(`<p><span>${escHtml(String(args.text))}</span></p>`))
+        targets.forEach(n => {
+          // review #5：改写前快照原文本到 node.note
+          try { snapshotBeforeTextChange(n, 'ai_rewrite') } catch (e) {}
+          n.setText(`<p><span>${escHtml(String(args.text))}</span></p>`)
+        })
         return { success: true, message: targets.length > 1 ? `已更新 ${targets.length} 个节点的文本` : '节点文本已更新' }
       } catch (e) {
         return { success: false, message: `更新节点文本失败: ${e.message}` }
@@ -3801,7 +4337,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
         const details = applyNodeStyles(mindMap, targetNodes, args)
         if (details.length === 0) {
-          return { success: false, message: '未提供任何样式参数：请至少填写 textColor/highlightColor/bold/italic/underline/strikethrough/fontFamily/textFontSize/fillColor/shape/fontSize 之一' }
+          return { success: false, message: '未提供任何样式参数：请至少填写 textColor/highlightColor/bold/italic/underline/strikethrough/fontFamily/textFontSize/fillColor/borderColor/shape/fontSize 之一' }
         }
         const applied = details.some(d => !d.includes('未生效') && !d.includes('全部失败'))
         return applied
@@ -3814,7 +4350,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'batch_text_style': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const { nodes, error } = resolveTargetNodes(mindMap, args.targets || {})
         if (error) return { success: false, message: `目标节点解析失败：${error}` }
         const targetNodes = nodes.filter(n => !n.isGeneralization)
@@ -4161,7 +4697,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'search_nodes': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const treeData = mindMap.getData()
         const rawKeywords = []
         if (args.keyword) rawKeywords.push(String(args.keyword))
@@ -4206,7 +4742,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'query_nodes': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const filters = args.filters || {}
         const limit = Math.min(Math.max(Number(args.limit) || 200, 1), 500)
         const returnFields = Array.isArray(args.returnFields) && args.returnFields.length > 0
@@ -4375,7 +4911,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'change_layout': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         mindMap.setLayout(args.layout)
         mindMap.render()
         return { success: true, message: `布局已切换为：${args.layout}` }
@@ -4386,7 +4922,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'set_theme': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         mindMap.setTheme(args.theme)
         mindMap.render()
         return { success: true, message: `主题已切换为：${args.theme}` }
@@ -4409,7 +4945,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'zoom_control': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         switch (args.action) {
           case 'in': mindMap.view.enlarge(); break
           case 'out': mindMap.view.narrow(); break
@@ -4424,7 +4960,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'undo': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         mindMap.execCommand('BACK')
         return { success: true, message: '已撤销' }
       } catch (e) {
@@ -4434,7 +4970,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'redo': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         mindMap.execCommand('FORWARD')
         return { success: true, message: '已重做' }
       } catch (e) {
@@ -4444,7 +4980,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'export_mindmap': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         // simple-mind-map 不支持 jpg（export 会返回 null 产出空文件），统一按 png 导出
         const format = args.format === 'jpg' ? 'png' : (args.format || 'png')
         // 导出文件名
@@ -4490,7 +5026,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           const sheet = { id: 'sheet1', class: 'sheet', title: rootText, rootTopic: toTopic(treeData) }
           const zip = new JSZip()
           zip.file('content.json', JSON.stringify([sheet]))
-          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '1.0.0' } }))
+          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '2.0.0' } }))
           const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
           if (!window.electronAPI?.saveBinaryFile) return { success: false, message: '文件保存功能不可用' }
           const r = await window.electronAPI.saveBinaryFile(fileName, base64)
@@ -4540,7 +5076,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'upload_to_feishu': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const feishu = window.electronAPI?.feishu
         if (!feishu || typeof feishu.uploadFile !== 'function') {
           return { success: false, message: '飞书功能不可用：请先在设置中配置飞书 App ID 和 App Secret' }
@@ -4568,10 +5104,11 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           : '\n注意：未能自动开启链接分享权限，如链接无法访问，请在飞书云空间中手动开启分享。'
         return {
           success: true,
-          message: `已将思维导图文件 ${fileName} 上传到飞书云空间（我的空间根目录）。\n文件令牌：${uploadResult?.file_token || '未知'}${url ? `\n访问链接：${url}` : ''}${permNote}`,
+          message: `已将思维导图文件 ${fileName} 上传到飞书云空间（我的空间根目录）。\n文件令牌：${uploadResult?.file_token || '未知'}\n文件类型：file（后续删除/重命名时 fileType 传 "file"）${url ? `\n访问链接：${url}` : ''}${permNote}`,
           filePath,
           fileName,
           feishuFileToken: uploadResult?.file_token || '',
+          feishuFileType: 'file',
           feishuUrl: url,
           permission: uploadResult?.permission || null
         }
@@ -4583,7 +5120,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'upload_mindmap_to_feishu_doc': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const feishu = window.electronAPI?.feishu
         if (!feishu || typeof feishu.importMarkdownDoc !== 'function') {
           return { success: false, message: '飞书功能不可用：请先在设置中配置飞书 App ID 和 App Secret' }
@@ -4604,8 +5141,9 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           : '\n注意：未能自动开启链接分享权限，如链接无法访问，请在飞书中手动开启分享。'
         return {
           success: true,
-          message: `已将思维导图《${title}》转换为飞书在线文档并上传（节点层级已转为标题层级）。\n文档令牌：${result?.token || '未知'}${url ? `\n文档链接：${url}` : ''}${permNote}`,
+          message: `已将思维导图《${title}》转换为飞书在线文档并上传（节点层级已转为标题层级）。\n文档令牌：${result?.token || '未知'}\n文件类型：docx（后续删除/重命名时 fileType 传 "docx"）${url ? `\n文档链接：${url}` : ''}${permNote}`,
           feishuDocToken: result?.token || '',
+          feishuFileType: 'docx',
           feishuUrl: url,
           title
         }
@@ -4632,10 +5170,11 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           : '\n注意：未能自动开启链接分享权限，如链接无法访问，请在飞书云空间中手动开启分享。'
         return {
           success: true,
-          message: `已将文件 ${fileName} 上传到飞书云盘。\n文件令牌：${result?.file_token || '未知'}${url ? `\n访问链接：${url}` : ''}${permNote}`,
+          message: `已将文件 ${fileName} 上传到飞书云盘。\n文件令牌：${result?.file_token || '未知'}\n文件类型：file（后续删除/重命名时 fileType 传 "file"）${url ? `\n访问链接：${url}` : ''}${permNote}`,
           filePath,
           fileName,
           feishuFileToken: result?.file_token || '',
+          feishuFileType: 'file',
           feishuUrl: url
         }
       } catch (e) {
@@ -4665,11 +5204,11 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           const typeMap = { doc: '文档(doc)', docx: '文档(docx)', sheet: '表格', bitable: '多维表格', file: '云盘文件', folder: '文件夹' }
           const typeName = typeMap[f.type] || f.type || '未知'
           const url = f.type === 'docx' ? `https://www.feishu.cn/docx/${f.token}` : (f.type === 'folder' ? '' : `https://www.feishu.cn/file/${f.token}`)
-          return `${i + 1}. ${f.name}（${typeName}）\n   token: ${f.token}${url ? `\n   链接: ${url}` : ''}`
+          return `${i + 1}. ${f.name}（${typeName}）\n   token: ${f.token}\n   type: ${f.type || 'file'}${url ? `\n   链接: ${url}` : ''}`
         }).join('\n')
         return {
           success: true,
-          message: `飞书云盘文件列表（共 ${files.length} 项）：\n\n${formatted}`,
+          message: `飞书云盘文件列表（共 ${files.length} 项）：\n\n${formatted}\n\n提示：删除/重命名时，fileType 需使用上方每项的 "type" 值（如 docx/sheet/folder）。`,
           files
         }
       } catch (e) {
@@ -4684,13 +5223,38 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         if (!feishu || typeof feishu.getDocContent !== 'function') {
           return { success: false, message: '飞书功能不可用：请先在设置中配置飞书 App ID 和 App Secret' }
         }
-        const docToken = (args.docToken || '').trim()
-        if (!docToken) return { success: false, message: '缺少文档 token 参数 docToken' }
-        const data = await feishu.getDocContent(docToken)
-        const content = data?.content || ''
-        if (!content) return { success: true, message: '文档内容为空或无法读取（注意：仅支持 docx 在线文档）' }
-        const trimmed = content.length > 5000 ? content.slice(0, 5000) + '\n...（内容过长已截断）' : content
-        return { success: true, message: `文档内容：\n\n${trimmed}` }
+        // 组装待读列表：优先 docTokens 批量；否则单文档 docToken
+        const tokens = []
+        if (Array.isArray(args.docTokens) && args.docTokens.length > 0) {
+          for (const t of args.docTokens) if (t && String(t).trim()) tokens.push(String(t).trim())
+        } else {
+          const docToken = (args.docToken || '').trim()
+          if (!docToken) return { success: false, message: '缺少文档 token 参数 docToken（或批量 docTokens）' }
+          tokens.push(docToken)
+        }
+        if (tokens.length === 0) return { success: false, message: '没有可读取的文档（docTokens 或 docToken 为空）' }
+
+        const parts = []
+        const failed = []
+        for (const t of tokens) {
+          try {
+            const data = await feishu.getDocContent(t)
+            const content = data?.content || ''
+            if (!content) {
+              parts.push(`【文档 ${t}】内容为空或无法读取（注意：仅支持 docx 在线文档）`)
+            } else {
+              const trimmed = content.length > 5000 ? content.slice(0, 5000) + '\n...（内容过长已截断）' : content
+              parts.push(`【文档 ${t}】\n${trimmed}`)
+            }
+          } catch (e) {
+            failed.push({ docToken: t, error: e.message })
+          }
+        }
+        let msg = tokens.length === 1
+          ? `文档内容：\n\n${parts[0] || ''}`
+          : `已读取 ${parts.length} 篇文档：\n\n${parts.join('\n\n---\n\n')}`
+        if (failed.length > 0) msg += `\n\n失败 ${failed.length} 篇：\n${failed.map(f => `- ${f.docToken}: ${f.error}`).join('\n')}`
+        return { success: failed.length === 0, message: msg }
       } catch (e) {
         console.error('feishu_get_doc_content error:', e)
         return { success: false, message: `获取飞书文档内容失败: ${e.message}` }
@@ -4703,10 +5267,33 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         if (!feishu || typeof feishu.deleteFile !== 'function') {
           return { success: false, message: '飞书功能不可用：请先在设置中配置飞书 App ID 和 App Secret' }
         }
-        const fileToken = (args.fileToken || '').trim()
-        if (!fileToken) return { success: false, message: '缺少文件 token 参数 fileToken' }
-        await feishu.deleteFile(fileToken, args.fileType || 'file')
-        return { success: true, message: `已删除飞书文件（已移入回收站，可在飞书回收站恢复）\ntoken: ${fileToken}` }
+        // 组装待删除列表：优先 items 批量；否则单文件 fileToken
+        const targets = []
+        if (Array.isArray(args.items) && args.items.length > 0) {
+          for (const it of args.items) {
+            const t = (it && it.fileToken) || ''
+            if (t) targets.push({ fileToken: t, fileType: (it && it.fileType) || 'file' })
+          }
+        } else {
+          const fileToken = (args.fileToken || '').trim()
+          if (!fileToken) return { success: false, message: '缺少文件 token 参数 fileToken（或批量 items）' }
+          targets.push({ fileToken, fileType: args.fileType || 'file' })
+        }
+        if (targets.length === 0) return { success: false, message: '没有可删除的文件（items 或 fileToken 为空）' }
+
+        const ok = []
+        const failed = []
+        for (const t of targets) {
+          try {
+            await feishu.deleteFile(t.fileToken, t.fileType)
+            ok.push(t.fileToken)
+          } catch (e) {
+            failed.push({ fileToken: t.fileToken, fileType: t.fileType, error: e.message })
+          }
+        }
+        let msg = `已删除 ${ok.length} 个飞书文件（已移入回收站，可在飞书回收站恢复）`
+        if (failed.length > 0) msg += `\n\n失败 ${failed.length} 个：\n${failed.map(f => `- token=${f.fileToken}（type=${f.fileType}）: ${f.error}`).join('\n')}`
+        return { success: failed.length === 0, message: msg, deleted: ok, failed }
       } catch (e) {
         console.error('feishu_delete_file error:', e)
         return { success: false, message: `删除飞书文件失败: ${e.message}` }
@@ -4719,11 +5306,35 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         if (!feishu || typeof feishu.renameFile !== 'function') {
           return { success: false, message: '飞书功能不可用：请先在设置中配置飞书 App ID 和 App Secret' }
         }
-        const fileToken = (args.fileToken || '').trim()
-        const newName = (args.newName || '').trim()
-        if (!fileToken || !newName) return { success: false, message: '缺少参数 fileToken 或 newName' }
-        await feishu.renameFile(fileToken, newName, args.fileType || 'file')
-        return { success: true, message: `已重命名飞书文件为：${newName}` }
+        // 组装待重命名列表：优先 items 批量；否则单文件 fileToken
+        const targets = []
+        if (Array.isArray(args.items) && args.items.length > 0) {
+          for (const it of args.items) {
+            const ft = (it && it.fileToken) || ''
+            const nn = (it && it.newName) || ''
+            if (ft && nn) targets.push({ fileToken: ft, newName: nn, fileType: (it && it.fileType) || 'file' })
+          }
+        } else {
+          const fileToken = (args.fileToken || '').trim()
+          const newName = (args.newName || '').trim()
+          if (!fileToken || !newName) return { success: false, message: '缺少参数 fileToken 或 newName（或批量 items）' }
+          targets.push({ fileToken, newName, fileType: args.fileType || 'file' })
+        }
+        if (targets.length === 0) return { success: false, message: '没有可重命名的文件（items 或 fileToken 为空）' }
+
+        const ok = []
+        const failed = []
+        for (const t of targets) {
+          try {
+            await feishu.renameFile(t.fileToken, t.newName, t.fileType)
+            ok.push({ fileToken: t.fileToken, newName: t.newName })
+          } catch (e) {
+            failed.push({ fileToken: t.fileToken, newName: t.newName, error: e.message })
+          }
+        }
+        let msg = `已重命名 ${ok.length} 个飞书文件`
+        if (failed.length > 0) msg += `\n\n失败 ${failed.length} 个：\n${failed.map(f => `- token=${f.fileToken} → ${f.newName}: ${f.error}`).join('\n')}`
+        return { success: failed.length === 0, message: msg, renamed: ok, failed }
       } catch (e) {
         console.error('feishu_rename_file error:', e)
         return { success: false, message: `重命名飞书文件失败: ${e.message}` }
@@ -5060,7 +5671,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'mechanical_cloze': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const exactText = String(args.text || '').trim()
         const regexText = String(args.regex || '').trim()
         if (!exactText && !regexText) return { success: false, message: '请提供 text（精确文本）或 regex（正则）至少一项' }
@@ -5214,6 +5825,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'add_to_review': {
       try {
+        if (!mindMap?.renderer) return { success: false, message: '请先打开一个思维导图文件，再使用添加复习功能' }
         // targets 直达批量加入复习（避免先 select_node 循环）
         let targetNodes
         if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
@@ -5322,6 +5934,42 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           return `${cy.label}周期：${done}/${total} 完成`
         }).join('；')
 
+        // 结构化数据，方便程序化调用（如同步到日历）
+        const items = []
+        for (const [date, rows] of byDate.entries()) {
+          for (const r of rows) {
+            items.push({
+              id: r.it.id,
+              title: r.it.nodeText || '(节点已删除，文本缺失)',
+              date: r.c.reviewDate,
+              cycle: r.c.cycle,
+              cycleLabel: r.c.label,
+              completed: !!r.c.completed,
+              isOverdue: false,
+              sourceFile: r.it.filePath || ''
+            })
+          }
+        }
+        // 逾期项也加入 items
+        const overdueItems = []
+        for (const it of all) {
+          for (const c of it.cycles || []) {
+            if (!c.completed && c.reviewDate && c.reviewDate < startDate) {
+              if (cycleLabel && c.label !== cycleLabel) continue
+              overdueItems.push({
+                id: it.id,
+                title: it.nodeText || '(文本缺失)',
+                date: c.reviewDate,
+                cycle: c.cycle,
+                cycleLabel: c.label,
+                completed: false,
+                isOverdue: true,
+                sourceFile: it.filePath || ''
+              })
+            }
+          }
+        }
+
         const rangeLabel = startDate === endDate ? startDate : `${startDate} ~ ${endDate}`
         const cycleSuffix = cycleLabel ? `，${cycleLabel}周期` : ''
         const parts = [
@@ -5331,7 +5979,14 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           overdue.length > 0 ? `⚠️ 逾期未复习 ${overdue.length} 项：\n${overdue.slice(0, 15).join('\n')}${overdue.length > 15 ? `\n...等共 ${overdue.length} 项` : ''}` : ''
         ].filter(Boolean)
 
-        return { success: true, message: parts.join('\n\n'), itemCount: matched, overdueCount: overdue.length }
+        return {
+          success: true,
+          message: parts.join('\n\n'),
+          itemCount: matched,
+          overdueCount: overdue.length,
+          items,
+          overdueItems
+        }
       } catch (e) {
         return { success: false, message: `查询复习计划失败: ${e.message}` }
       }
@@ -5354,10 +6009,21 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
         // 逾期落后项（今日之前到期未完成）
         const overdue = []
+        const overdueItems = []
         for (const it of all) {
           for (const c of it.cycles || []) {
             if (!c.completed && c.reviewDate && c.reviewDate < today) {
               overdue.push(`[${c.label}] ${(it.nodeText || '(文本缺失)').slice(0, 30)}（原定 ${c.reviewDate}）`)
+              overdueItems.push({
+                id: it.id,
+                title: it.nodeText || '(文本缺失)',
+                date: c.reviewDate,
+                cycle: c.cycle,
+                cycleLabel: c.label,
+                completed: false,
+                isOverdue: true,
+                sourceFile: it.filePath || ''
+              })
             }
           }
         }
@@ -5414,12 +6080,15 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           overdueCount: overdue.length,
           items: todayRows.map(r => ({
             id: r.it.id,
+            title: r.it.nodeText || '(节点已删除，文本缺失)',
+            date: today,
             cycle: r.c.cycle,
-            label: r.c.label,
-            nodeText: String(r.it.nodeText || '').slice(0, 50),
-            fileName: r.it.fileName || '',
-            completed: !!r.c.completed
-          }))
+            cycleLabel: r.c.label,
+            completed: !!r.c.completed,
+            isOverdue: false,
+            sourceFile: r.it.filePath || ''
+          })),
+          overdueItems
         }
       } catch (e) {
         return { success: false, message: `获取今日复习状态失败: ${e.message}` }
@@ -5539,7 +6208,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'toggle_cloze_visibility': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const wantShow = args.show === undefined ? null : !!args.show
 
         if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
@@ -5570,7 +6239,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'list_cloze_nodes': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const found = []
         const nodes = []
         const walk = (node) => {
@@ -5597,7 +6266,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'clear_cloze': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const { nodes, error } = resolveTargetNodes(mindMap, args.targets || {})
         if (error) return { success: false, message: `目标节点解析失败：${error}` }
         const delimiter = args.before || args.after || ''
@@ -5633,7 +6302,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
     case 'ai_quiz': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         // 出题范围：targets > 选中节点 > 整图
         let scopeNodes = []
         let topicName = ''
@@ -5669,30 +6338,30 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           ? args.types.filter(t => typeNames[t]).map(t => typeNames[t])
           : ['单选题', '多选题', '简答题']
 
-        const sys = '你是出题专家。根据用户提供的思维导图内容出自测题，严格基于原文，不引入外部知识。只输出 JSON，不要任何其他文字。'
+        const sys = '你是出题专家。根据用户提供的思维导图内容出自测题，严格基于原文，不引入外部知识，只出核心考点/重点题。只输出 JSON，不要任何其他文字。'
         const usr = `基于以下思维导图内容，出 ${count} 道题（题型混合：${types.join('、')}）。
 
 输出 JSON 格式：
 {"title":"主题名","questions":[{"type":"单选题|多选题|简答题","question":"题干","options":["A. xxx","B. xxx","C. xxx","D. xxx"],"answer":"答案（如 B / ACD / 文字答案）","explanation":"简要解析"}]}
 
-要求：题干和答案必须能在原文中找到依据；干扰项要合理；简答题 answer 给出原文要点。options 仅选择题需要，简答题为空数组。
+要求：题干考察核心考点/得分点/易错点，不要考偏门细节或抠字眼；题干和答案必须能在原文中找到依据；干扰项要合理；简答题 answer 给出原文要点。options 仅选择题需要，简答题为空数组。
 
 思维导图内容：
 ${contentText.slice(0, 9000)}`
 
         const choice = await aiService.chat(usr, sys, null, { responseFormat: 'json' })
-        let jsonStr = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
-        const braceStart = jsonStr.indexOf('{')
-        const braceEnd = jsonStr.lastIndexOf('}')
-        if (braceStart === -1 || braceEnd === -1) return { success: false, message: 'AI 出题返回内容无法解析，请重试' }
-        let quiz
-        try {
-          quiz = JSON.parse(jsonStr.slice(braceStart, braceEnd + 1))
-        } catch {
-          return { success: false, message: 'AI 出题返回的 JSON 格式异常，请重试' }
+        const rawResponse = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
+        // ai_quiz 期望 { title, questions } 结构。先尝试完整解析，再容错提取 questions 数组
+        let quiz = null
+        try { quiz = JSON.parse(rawResponse) } catch (e) {
+          // 容错：仅拿到 questions 数组时，title 兜底用 topicName（后续代码处理）
+          const arr = parseQuizResponse(rawResponse)
+          if (arr.length) quiz = { title: null, questions: arr }
         }
-        const questions = Array.isArray(quiz.questions) ? quiz.questions.filter(q => q && q.question) : []
-        if (!questions.length) return { success: false, message: 'AI 没有生成有效题目，请重试' }
+        const questions = Array.isArray(quiz?.questions) ? quiz.questions.filter(q => q && q.question) : []
+        if (!quiz || !questions.length) {
+          return { success: false, message: 'AI 出题返回内容无法解析（可能被截断）：\n预览：' + rawResponse.slice(0, 250) }
+        }
 
         // 组装自测导图：根=主题；每题一级子节点；选项、答案+解析（合并一个节点，内容挖空隐藏）为二级
         const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -5757,7 +6426,7 @@ ${contentText.slice(0, 9000)}`
 
     case 'ai_quiz_append': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         // 目标节点：targets > 当前选中节点
         let targetNodes = []
         if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
@@ -5781,11 +6450,19 @@ ${contentText.slice(0, 9000)}`
           ? args.types.filter(t => typeNames[t]).map(t => typeNames[t])
           : ['填空题', '选择题']
 
-        // 收集每个节点内容（含直接子节点作为出题上下文）
+        // 收集每个节点内容（含整个子树作为出题上下文：非叶子节点基于「父节点 + 全部后代」整体出题）
         const nodeInfos = targetNodes.map((n, i) => {
           const text = nodePlainText(n.getData?.('text') || '').slice(0, 300)
-          const children = (n.children || []).filter(c => !c.isGeneralization)
-            .map(c => nodePlainText(c.getData?.('text') || '')).filter(Boolean).slice(0, 20)
+          const collectSubtree = (node, out = []) => {
+            for (const c of (node.children || [])) {
+              if (c.isGeneralization) continue
+              const t = nodePlainText(c.getData?.('text') || '')
+              if (t) out.push(t)
+              collectSubtree(c, out)
+            }
+            return out
+          }
+          const children = collectSubtree(n).slice(0, 40)
           return { index: i + 1, text, children }
         }).filter(info => info.text)
         if (!nodeInfos.length) return { success: false, message: '目标节点都没有文本内容' }
@@ -5794,7 +6471,7 @@ ${contentText.slice(0, 9000)}`
         // 记录当前文档根节点 uid：AI 等待期间用户可能切换文件，返回后据此识别目标是否已随旧文件整体失效
         const rootUidAtStart = (() => { try { return mindMap.renderer.root?.getData?.('uid') || null } catch (e) { return null } })()
 
-        const sys = '你是出题专家。根据用户提供的知识点，为每个知识点出一道题（填空题或选择题），并给出答案和解析。严格基于原文，不引入外部知识。只输出 JSON 对象，不要任何其他文字。'
+        const sys = '你是出题专家。根据用户提供的知识点，为每个知识点出一道题（填空题或选择题），并给出答案和解析。严格基于原文，不引入外部知识，题干考察该知识点的核心考点/得分点。只输出 JSON 对象，不要任何其他文字。'
         const block = nodeInfos.map(info => {
           const childTxt = info.children.length ? `\n   子节点：${info.children.join('；')}` : ''
           return `${info.index}. ${info.text}${childTxt}`
@@ -5808,37 +6485,24 @@ ${contentText.slice(0, 9000)}`
 - questions 数组长度等于 ${nodeInfos.length}，与知识点一一对应、顺序一致
 - index 与知识点编号一致
 - 填空题 options 为空数组；选择题 options 为 4 个选项，answer 为正确选项字母（如 B）
-- 题干与答案必须能在原文找到依据；解析说明记忆要点或判断依据
+- 题干考察该知识点的核心考点/得分点/易错点，不要考偏门细节；题干与答案必须能在原文找到依据
+- 解析(explanation)≤50 字，宁短勿长；explanation 超长会被服务端截断、整个返回 JSON 解析失败、出题整体报错
+- 解析按要点列（如"①发现矛盾 ②分析矛盾"），不要写完整长句
 - 不要漏掉任何知识点
 
 知识点：
 ${block}`
 
         const choice = await aiService.chat(usr, sys, null, { responseFormat: 'json' })
-        let jsonStr = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
-        let list = []
-        // 优先解析对象 {"questions":[...]}
-        const objStart = jsonStr.indexOf('{')
-        const objEnd = jsonStr.lastIndexOf('}')
-        if (objStart !== -1 && objEnd !== -1) {
-          try {
-            const obj = JSON.parse(jsonStr.slice(objStart, objEnd + 1))
-            if (Array.isArray(obj?.questions)) list = obj.questions
-          } catch {}
-        }
-        // 兜底：直接解析数组 [...]
-        if (!list.length) {
-          const arrStart = jsonStr.indexOf('[')
-          const arrEnd = jsonStr.lastIndexOf(']')
-          if (arrStart !== -1 && arrEnd !== -1) {
-            try {
-              const arr = JSON.parse(jsonStr.slice(arrStart, arrEnd + 1))
-              if (Array.isArray(arr)) list = arr
-            } catch {}
+        const rawResponse = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
+        const list = parseQuizResponse(rawResponse)
+        const validQuestions = Array.isArray(list) ? list.filter(q => q && q.question) : []
+        if (!validQuestions.length) {
+          return {
+            success: false,
+            message: 'AI 出题返回内容无法解析（可能被 max_tokens 截断）：\n内容预览：' + rawResponse.slice(0, 250) + '\n建议：① 减少单次出题节点数（≤10 个）；② 设置解析(explanation)≤50 字。'
           }
         }
-        const validQuestions = Array.isArray(list) ? list.filter(q => q && q.question) : []
-        if (!validQuestions.length) return { success: false, message: 'AI 出题返回内容无法解析，请重试' }
 
         // 优先按 index 映射，数量一致时按顺序兜底
         const byIndex = new Map()
@@ -5898,7 +6562,13 @@ ${block}`
         })
 
         if (added === 0) return { success: false, message: '没有成功添加任何题目子节点，请重试' }
-        mindMap.render()
+        // 直接改数据树后需完全重绘（render 仅部分刷新，新节点可能不显示或布局错乱）
+        try {
+          if (typeof mindMap.reRender === 'function') mindMap.reRender()
+          else mindMap.render()
+        } catch (e) {
+          mindMap.render()
+        }
         // 题目节点的答案/解析挖空默认隐藏（显式写入节点覆盖值，不受全局显隐开关影响）
         try {
           const quizNodes = createdUids
@@ -5928,7 +6598,7 @@ ${block}`
 
     case 'focus_node': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         let node = null
         if (args.uid) {
           node = mindMap.renderer.findNodeByUid(args.uid)
@@ -5967,7 +6637,7 @@ ${block}`
 
     case 'merge_mindmap_files': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const srcPath = (args.sourceFilePath || '').trim()
         if (!srcPath) return { success: false, message: '请提供 sourceFilePath' }
         if (!window.electronAPI?.fs?.readFile) return { success: false, message: '文件读取功能不可用' }
@@ -6056,7 +6726,7 @@ ${block}`
 
     case 'export_subtree': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const format = (args.format || '').toLowerCase()
         if (!['smm', 'png', 'jpg', 'svg'].includes(format)) {
           return { success: false, message: 'format 必须是 smm/png/jpg/svg 之一；用户未指定时应先询问用户要导出为独立导图文件还是图片' }
@@ -6286,39 +6956,14 @@ ${block}`
           return { success: false, message: '语义检索服务不可用（本地 SQLite 知识库未启用，请在桌面应用中运行）' }
         }
 
-        // 逐关键词检索，合并去重，按命中关键词数排序（命中越多越相关）
+        // 混合语义检索：BM25 关键词 + 本地向量余弦（E5），RRF 融合排序；向量不可用自动降级 BM25
         const terms = [...new Set([...keywords, query.trim()].filter(Boolean))]
-        const merged = new Map()
-        for (const term of terms) {
-          let res
-          try {
-            res = await searchService.search(term)
-          } catch (e) {
-            continue
-          }
-          for (const r of res?.results || []) {
-            const key = `${r.filePath}::${r.nodeUid}`
-            if (!merged.has(key)) {
-              merged.set(key, { ...r, hitTerms: [term] })
-            } else {
-              const item = merged.get(key)
-              if (!item.hitTerms.includes(term)) item.hitTerms.push(term)
-            }
-          }
-        }
-        const queryTokens = [...new Set(terms.flatMap(term => term.toLowerCase().split(/[\s,，、]+/)).filter(Boolean))]
-        const ranked = [...merged.values()].map((result, index) => {
-          const content = String(result.snippet || '').replace(/<[^>]+>/g, '')
-          const haystack = `${result.fileName || ''} ${content}`.toLowerCase()
-          let score = result.hitTerms.length * 6
-          for (const token of queryTokens) if (haystack.includes(token)) score += 3
-          return { ...result, snippet: content, score, ref: index + 1 }
-        }).sort((a, b) => b.score - a.score).slice(0, 30)
+        const { results: ranked } = await searchService.semanticSearch(query, keywords)
 
         if (ranked.length === 0) {
           return {
             success: true,
-            message: `语义检索"${query}"（关键词：${terms.join('、')}）未找到匹配内容。建议：1) 换一组更通用的关键词重试；2) 确认相关文件已打开过（本地索引库仅包含已索引的思维导图文件）`
+            message: `语义检索"${query}"（关键词：${terms.join('、')}）未找到匹配内容。建议：1) 换一组更通用的关键词重试；2) 确认相关文件已被 AI 读取过或手动打开过（本地索引库包含已索引的思维导图与文档）`
           }
         }
 
@@ -6329,9 +6974,10 @@ ${block}`
           byFile.get(r.fileName).push(r)
         }
         const fileSections = [...byFile.entries()].map(([fileName, items], fi) => {
-          const nodes = items.slice(0, 10).map((r) =>
-            `   [KB${r.ref}] ${r.snippet}（命中：${r.hitTerms.join('、')}；相似度：${r.score}）${r.nodeUid ? ` [uid:${r.nodeUid}]` : ''}`
-          ).join('\n')
+          const nodes = items.slice(0, 10).map((r) => {
+            const hitInfo = r.hitTerms?.length ? `命中：${r.hitTerms.join('、')}` : (r.vectorRank ? '向量语义命中' : '命中')
+            return `   [KB${r.ref}] ${r.snippet}（${hitInfo}；相关度：${r.score}）${r.nodeUid ? ` [uid:${r.nodeUid}]` : ''}`
+          }).join('\n')
           const more = items.length > 10 ? `\n   ...等共 ${items.length} 处命中` : ''
           return `${fi + 1}. 文件：${fileName}\n   路径：${items[0].filePath}\n${nodes}${more}`
         }).join('\n\n')
@@ -6392,7 +7038,7 @@ ${block}`
 
     case 'read_node_image': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         let node = null
         if (args.uid) {
           node = mindMap.renderer.findNodeByUid(args.uid)
@@ -6473,7 +7119,7 @@ ${block}`
 
     case 'clear_mindmap': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const emptyTree = {
           data: { text: '<p><span>中心主题</span></p>', uid: createUid(), richText: true },
           children: []
@@ -6515,24 +7161,34 @@ ${block}`
 
         // keyword：目录（名称/描述/类目）匹配，命中即激活，免去先查目录再激活的一轮往返
         if (keyword) {
-          const matched = toolCatalog.filter(t =>
-            t.name === 'activate_tools' ? false : (
-              t.name.toLowerCase().includes(keyword) ||
-              t.desc.toLowerCase().includes(keyword) ||
-              (t.category || '').toLowerCase().includes(keyword)
+          // 扩展关键词：原始关键词 + 中文别名对应的英文词（若中文关键词未直接命中）
+          const keywords = expandAliasKeywords(keyword)
+          const matchedSet = new Set()
+          for (const kw of keywords) {
+            const matched = toolCatalog.filter(t =>
+              t.name === 'activate_tools' ? false : (
+                t.name.toLowerCase().includes(kw) ||
+                t.desc.toLowerCase().includes(kw) ||
+                (t.category || '').toLowerCase().includes(kw)
+              )
             )
-          ).slice(0, limit)
-          for (const m of matched) {
-            if (!activated.includes(m.name) && aiTools.some(t => t.function.name === m.name)) activated.push(m.name)
+            for (const m of matched) matchedSet.add(m.name)
+            if (matchedSet.size >= limit) break
           }
-          for (const c of customList) {
-            if (
-              (c.id || '').toLowerCase().includes(keyword) ||
-              (c.name || '').toLowerCase().includes(keyword) ||
-              (c.description || '').toLowerCase().includes(keyword) ||
-              (c.category || '').toLowerCase().includes(keyword)
-            ) {
-              if (!customActivations.some(x => x.id === c.id)) customActivations.push(c)
+          const matched = [...matchedSet].slice(0, limit)
+          for (const m of matched) {
+            if (!activated.includes(m) && aiTools.some(t => t.function.name === m)) activated.push(m)
+          }
+          for (const kw of keywords) {
+            for (const c of customList) {
+              if (
+                (c.id || '').toLowerCase().includes(kw) ||
+                (c.name || '').toLowerCase().includes(kw) ||
+                (c.description || '').toLowerCase().includes(kw) ||
+                (c.category || '').toLowerCase().includes(kw)
+              ) {
+                if (!customActivations.some(x => x.id === c.id)) customActivations.push(c)
+              }
             }
           }
         }
@@ -6549,8 +7205,8 @@ ${block}`
           return {
             success: false,
             message: keyword
-              ? `关键词 "${args.keyword}" 未匹配到任何工具。请换英文关键词（如 pdf / export / cloze / feishu），或调用 activate_tools() 不带参数查看完整目录。`
-              : `未找到工具: ${notFound.join(', ')}。请用 activate_tools(keyword="英文关键词") 查找，或不带参数查看完整目录。`
+              ? `关键词 "${args.keyword}" 未匹配到任何工具。请换中文或英文关键词（如 飞书/导出/挖空/复习/定时任务/feishu/export/cloze），或调用 activate_tools() 不带参数查看完整目录。`
+              : `未找到工具: ${notFound.join(', ')}。请用 activate_tools(keyword="中文或英文关键词") 查找，或不带参数查看完整目录。`
           }
         }
 
@@ -6700,9 +7356,53 @@ ${block}`
       } catch (e) { return { success: false, message: `删除 Skill 失败: ${e.message}` } }
     }
 
-    case 'move_node': {
+    case 'add_memory': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!args.content || typeof args.content !== 'string') return { success: false, message: '请提供 content' }
+        const r = addMemory(args.content, args.category, args.source || 'manual')
+        return {
+          success: r.success,
+          message: r.success ? (r.dedup ? '记忆已存在且内容相同，自动更新使用计数（id=' + (r.item && r.item.id) + '）' : '已保存记忆（id=' + (r.item && r.item.id) + '，category=' + (r.item && r.item.category) + '）') : (r.error || '添加失败'),
+          item: r.item
+        }
+      } catch (e) { return { success: false, message: '添加记忆失败: ' + e.message } }
+    }
+    case 'search_memory': {
+      try {
+        if (!args.query || typeof args.query !== 'string') return { success: false, message: '请提供 query' }
+        const limit = Math.min(Math.max(Number(args.limit) || 8, 1), 32)
+        const r = searchMemory(args.query, limit)
+        if (!r.items.length) return { success: true, message: '没有匹配的记忆', items: [] }
+        const lines = r.items.map(it => '【' + it.category + '】' + (it.enabled === false ? '（已禁用）' : '') + ' ' + it.content)
+        return { success: true, message: '找到 ' + r.items.length + ' 条相关记忆：\n' + lines.join('\n'), items: r.items }
+      } catch (e) { return { success: false, message: '搜索记忆失败: ' + e.message } }
+    }
+    case 'list_memory': {
+      try {
+        const r = listMemory({ category: args.category, enabledOnly: args.enabledOnly === true, limit: args.limit ? Number(args.limit) : undefined })
+        if (!r.items.length) return { success: true, message: '当前没有记忆项（共 0 条）' }
+        const lines = r.items.map(it => '【' + it.category + '】' + (it.enabled === false ? '（已禁用）' : '') + ' ' + it.content)
+        return { success: true, message: '当前共 ' + r.items.length + ' 条记忆：\n' + lines.join('\n'), items: r.items, total: r.total }
+      } catch (e) { return { success: false, message: '列出记忆失败: ' + e.message } }
+    }
+    case 'delete_memory': {
+      try {
+        if (!args.id) return { success: false, message: '请提供 id' }
+        const r = deleteMemory(args.id)
+        return { success: r.success, message: r.success ? '已删除记忆' : '未找到该 id' }
+      } catch (e) { return { success: false, message: '删除记忆失败: ' + e.message } }
+    }
+    case 'toggle_memory': {
+      try {
+        if (!args.id) return { success: false, message: '请提供 id' }
+        const r = toggleMemory(args.id, args.enabled !== false)
+        return { success: r.success, message: r.success ? ('已' + (args.enabled !== false ? '启用' : '禁用')) : (r.error || '未找到') }
+      } catch (e) { return { success: false, message: '切换记忆失败: ' + e.message } }
+    }
+
+        case 'move_node': {
+      try {
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         if (!args.uid || !args.targetParentUid) return { success: false, message: '请提供 uid 和 targetParentUid' }
         const node = mindMap.renderer.findNodeByUid(args.uid)
         const target = mindMap.renderer.findNodeByUid(args.targetParentUid)
@@ -6730,7 +7430,7 @@ ${block}`
 
     case 'batch_move_nodes': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         let sourceNodes
         if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
           const { nodes, error } = resolveTargetNodes(mindMap, args.targets)
@@ -6769,7 +7469,7 @@ ${block}`
 
     case 'duplicate_nodes': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         let sourceNodes
         if (Array.isArray(args.uids) && args.uids.length) {
           sourceNodes = args.uids.map(uid => mindMap.renderer.findNodeByUid(uid)).filter(Boolean)
@@ -6805,7 +7505,7 @@ ${block}`
 
     case 'sort_children': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const node = mindMap.renderer.findNodeByUid(args.uid)
         if (!node) return { success: false, message: `未找到 uid=${args.uid} 的节点` }
         const children = (node.children || []).filter(c => !c.isGeneralization)
@@ -6854,7 +7554,7 @@ ${block}`
 
     case 'read_node_subtree': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         let node = null
         if (args.uid) {
           node = mindMap.renderer.findNodeByUid(args.uid)
@@ -6884,7 +7584,7 @@ ${block}`
 
     case 'get_node_detail': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         let node = null
         if (args.uid) {
           node = mindMap.renderer.findNodeByUid(args.uid)
@@ -6963,7 +7663,7 @@ ${block}`
 
     case 'merge_nodes': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const uids = (Array.isArray(args.uids) ? args.uids : [args.uids]).filter(Boolean)
         if (uids.length < 2) return { success: false, message: '合并至少需要 2 个节点 uid' }
         const sep = args.separator === 'newline' ? '\n' : (args.separator || '、')
@@ -7111,6 +7811,8 @@ ${block}`
           keyword: keyword || '*',
           exts: Array.isArray(args.exts) ? args.exts : undefined,
           dirs,
+          // onlyDirs=true 时只搜 dirs 指定目录，不再追加桌面/文档/下载等默认范围（MCP 范围限制）
+          onlyDirs: args.onlyDirs === true,
           listMode: !keyword
         })
         if (!r || !r.success) {
@@ -7176,26 +7878,58 @@ ${block}`
         if (!filePath) return { success: false, message: '请提供 file_path（文件绝对路径）' }
         if (!query) return { success: false, message: '请提供 query（用户的问题）用于语义检索' }
         if (!window.electronAPI?.fs?.readFile) return { success: false, message: '文件系统不可用' }
+        let resolvedPath = filePath
         const exists = await window.electronAPI.fs.exists(filePath)
-        if (!exists) return { success: false, message: '文件不存在：' + filePath }
-        const ext = filePath.split('.').pop().toLowerCase()
-        const supported = ['txt', 'md', 'markdown', 'json', 'log', 'csv', 'html', 'xml', 'docx', 'pdf']
+        if (!exists) {
+          // 路径自动纠错：用文件名模糊搜索，唯一命中直接继续，多个命中返回候选，未命中才报错
+          const auto = await resolveFilePathAuto(filePath)
+          if (auto.resolved) {
+            resolvedPath = auto.resolved
+          } else if (auto.candidates && auto.candidates.length > 1) {
+            return { success: false, message: `文件不存在：${filePath}。已按文件名自动搜索，找到多个候选（请选一个使用）：\n${auto.candidates.map((p, i) => `${i + 1}. ${p}`).join('\n')}` }
+          } else if (auto.candidates && auto.candidates.length === 1) {
+            resolvedPath = auto.candidates[0]
+          } else {
+            return { success: false, message: '文件不存在：' + filePath }
+          }
+        }
+        const ext = resolvedPath.split('.').pop().toLowerCase()
+        const supported = ['txt', 'md', 'markdown', 'json', 'log', 'csv', 'tsv', 'html', 'xml', 'docx', 'pdf', 'xlsx', 'xls']
         if (!supported.includes(ext)) return { success: false, message: '语义检索暂不支持 .' + ext + '，请改用 read_local_file 读取' }
-        const res = await extractLocalDocTextCached(filePath, ext)
+        let res = await extractLocalDocTextCached(resolvedPath, ext)
         if (!res.success) {
-          if (res.noTextLayer) return { success: false, message: '该 PDF 没有可提取的文本层（扫描版/图片型），无法快速语义检索。可用 read_local_file 走 OCR 兜底（较慢），或改用 docx/md 版本。' }
-          return { success: false, message: '文本提取失败：' + res.error }
+          // 扫描版/图片型 PDF 无文本层：优先走 files API 多模态读取全文，再据此语义检索
+          if (res.noTextLayer && ext === 'pdf') {
+            const fileName = resolvedPath.split(/[\\/]/).pop()
+            const visionRes = await readLocalFileViaVisionAPI(resolvedPath, fileName, 'application/pdf',
+              '请提取该 PDF 文件中的全部文字内容，按原文顺序逐页输出，保留标题层级与段落结构；若是扫描版，请先识别页面中的文字。不要添加解释或总结。')
+            if (visionRes) {
+              res = { success: true, text: visionRes.text, source: visionRes.source }
+            } else {
+              return { success: false, message: '该 PDF 没有可提取的文本层（扫描版/图片型），且 files API 多模态不可用，无法语义检索。可用 read_local_file 走 OCR 兜底（较慢），或改用 docx/md 版本。' }
+            }
+          } else {
+            return { success: false, message: '文本提取失败：' + res.error }
+          }
         }
         const topK = Math.min(Math.max(Number(args.top_k) || 6, 1), 12)
+        // 章节感知：query 含「第X章/第X节」且文档有对应标题时，直接返回该章节连续完整内容（优于碎片语义检索）
+        const sectionText = extractSectionByHeading(res.text, query)
+        if (sectionText) {
+          return {
+            success: true,
+            message: '已从「' + resolvedPath + '」中定位到目标章节，返回其完整内容：\n\n' + sectionText + '\n\n（以上为该章节连续原文，通常足以完成总结/生成，无需再次检索。）'
+          }
+        }
         const hits = retrieveRelevantChunks(res.text, query, topK)
         if (!hits.length) {
-          return { success: true, message: '已在「' + filePath + '」全文范围内检索，未找到与「' + query + '」明显相关的内容。可换关键词重试，或用 read_local_file 查看全文。' }
+          return { success: true, message: '已在「' + resolvedPath + '」全文范围内检索，未找到与「' + query + '」明显相关的内容。可换关键词重试，或用 read_local_file 查看全文。' }
         }
         const totalChunks = chunkDocument(res.text).length
         const blocks = hits.map((h, idx) => '【相关片段 ' + (idx + 1) + '】\n' + h.text).join('\n\n---\n\n')
         return {
           success: true,
-          message: '已从「' + filePath + '」（共 ' + totalChunks + ' 个片段）中语义检索到 ' + hits.length + ' 个与「' + query + '」最相关的片段：\n\n' + blocks + '\n\n（以上为相关性排序后的局部片段，非全文。若信息不足，可继续用 read_local_file 查看其余内容或调整关键词。）'
+          message: '已从「' + resolvedPath + '」（共 ' + totalChunks + ' 个片段）中语义检索到 ' + hits.length + ' 个与「' + query + '」最相关的片段：\n\n' + blocks + '\n\n（以上片段已覆盖该主题的核心内容，通常足以完成总结/生成，无需对同一文件重复检索；确需补充细节时再换关键词检索一次。）'
         }
       } catch (e) {
         return { success: false, message: '语义检索失败: ' + (e.message || e) }
@@ -7228,7 +7962,7 @@ ${block}`
         const maxChars = Math.min(Math.max(Number(args.max_chars) || 50000, 200), 200000)
 
         let text = '', source = ''
-        if (['txt', 'md', 'markdown', 'json', 'log', 'csv', 'html', 'xml'].includes(ext)) {
+        if (['txt', 'md', 'markdown', 'json', 'log', 'html', 'xml'].includes(ext)) {
           text = await window.electronAPI.fs.readFile(filePath)
           source = ext === 'md' || ext === 'markdown' ? 'Markdown 文本' : '纯文本'
         } else if (ext === 'smm') {
@@ -7239,24 +7973,28 @@ ${block}`
           }
           text = treeToText(treeData)
           source = '思维导图大纲文本'
-        } else if (ext === 'docx') {
-          if (!window.electronAPI?.fs?.readBinary) return { success: false, message: '文件系统不支持二进制读取' }
-          const bin = await window.electronAPI.fs.readBinary(filePath)
-          if (!bin.success) return { success: false, message: `读取 docx 失败: ${bin.error}` }
-          const buf = Uint8Array.from(atob(bin.base64), c => c.charCodeAt(0))
-          const res = await extractDocxText(buf.buffer)
-          if (!res.success) return { success: false, message: `docx 提取失败: ${res.error}` }
+        } else if (['docx', 'xlsx', 'xls', 'csv', 'tsv'].includes(ext)) {
+          // 统一解析器：docx(mammoth) / xlsx(exceljs) / xls(SheetJS) / csv·tsv(papaparse)；优先命中缓存
+          const res = await extractLocalDocTextCached(filePath, ext)
+          if (!res.success) return { success: false, message: `${ext} 解析失败: ${res.error}` }
           text = res.text
-          source = 'Word 文档提取文本'
+          source = ext === 'docx'
+            ? 'Word 文档提取文本'
+            : ext === 'xlsx'
+              ? `Excel 表格（${res.meta.sheets} 个工作表 / ${res.meta.rows} 行）`
+              : ext === 'xls'
+                ? `Excel 表格·旧版 xls（${res.meta.sheets} 个工作表 / ${res.meta.rows} 行）`
+                : `${ext.toUpperCase()} 表格（${res.meta.rows} 行）`
         } else if (ext === 'pdf') {
-          if (!window.electronAPI?.fs?.readBinary) return { success: false, message: '文件系统不支持二进制读取' }
-          const bin = await window.electronAPI.fs.readBinary(filePath)
-          if (!bin.success) return { success: false, message: `读取 pdf 失败: ${bin.error}` }
-          const buf = Uint8Array.from(atob(bin.base64), c => c.charCodeAt(0))
-          const res = await extractPdfText(buf.buffer)
+          // 优先走 files API 多模态：无论扫描版/图片型 PDF，都先发给视觉模型直读
+          const visionRes = await readLocalFileViaVisionAPI(filePath, fileName, 'application/pdf',
+            '请提取该 PDF 文件中的全部文字内容，按原文顺序逐页输出，保留标题层级与段落结构；若是扫描版，请先识别页面中的文字。不要添加解释或总结。')
+          if (!visionRes) {
+          // 降级本地文本提取：优先命中缓存（文档在查看器打开时已预提取），避免每次重新解析全文导致 Agent 读取慢
+          const res = await extractLocalDocTextCached(filePath, ext)
           if (res.success) {
             text = res.text
-            source = 'PDF 提取文本'
+            source = `PDF 提取文本${res.meta?.pages ? `（${res.meta.pages} 页）` : ''}`
           } else {
             // OCR 兜底：文本层不可提取（扫描版 / CID 中文 PDF）时渲染为图片逐页识别
             // 识别优先走多模态（ocr-smart 内部判断 vision.enabled），未开启/失败自动降级本地 tesseract
@@ -7272,7 +8010,12 @@ ${block}`
               if (args.page_end != null) pageOpts.pageEnd = Number(args.page_end)
               else if (Number(args.max_chars) >= 50000) pageOpts.pageEnd = 999999
             }
-            const img = await pdfToImages(buf.buffer, pageOpts)
+            // 扫描版 PDF 转图片前重新读一次二进制（parseDocument 内部只返回文本）
+            if (!window.electronAPI?.fs?.readBinary) return { success: false, message: '文件系统不支持二进制读取' }
+            const binPdf = await window.electronAPI.fs.readBinary(filePath)
+            if (!binPdf.success) return { success: false, message: `读取 pdf 失败: ${binPdf.error}` }
+            const bufPdf = Uint8Array.from(atob(binPdf.base64), c => c.charCodeAt(0))
+            const img = await pdfToImages(bufPdf.buffer, pageOpts)
             if (!img.success || !img.pages?.length) {
               return { success: false, message: `pdf 提取失败: ${res.error}（转图片也失败: ${img.error || '无页面'}）` }
             }
@@ -7300,8 +8043,18 @@ ${block}`
             text = parts.join('\n\n')
             source = `PDF 识别（${rangeDesc}${visionNote}）`
           }
+          } else {
+            text = visionRes.text
+            source = visionRes.source
+          }
         } else if (['png', 'jpg', 'jpeg', 'bmp', 'webp'].includes(ext)) {
-          if (!window.electronAPI?.ocrSmart) return { success: false, message: 'OCR 功能不可用' }
+          // 优先走 files API 多模态：无论图片是否含文字，都先发给视觉模型直读
+          const imgMime = 'image/' + (ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext)
+          const visionRes = await readLocalFileViaVisionAPI(filePath, fileName, imgMime,
+            '请识别该图片中的全部文字内容，按原文顺序输出；若图片中没有文字，请如实说明。不要添加解释或总结。')
+          if (!visionRes) {
+          // 降级本地 OCR
+          if (!window.electronAPI?.ocrSmart) return { success: false, message: '多模态与 OCR 功能均不可用' }
           if (!window.electronAPI?.fs?.readBinary) return { success: false, message: '文件系统不支持二进制读取' }
           const bin = await window.electronAPI.fs.readBinary(filePath)
           if (!bin.success) return { success: false, message: `读取图片失败: ${bin.error}` }
@@ -7314,8 +8067,12 @@ ${block}`
             const fallback = res?.fallback_reason ? `（多模态失败: ${res.fallback_reason}）` : ''
             return { success: false, message: `图片识别失败${fallback}: ${res?.error || '（图片中可能没有文字或识别失败）'}` }
           }
+          } else {
+            text = visionRes.text
+            source = visionRes.source
+          }
         } else {
-          return { success: false, message: `不支持的文件类型 .${ext}。支持：txt/md/json/log/docx/pdf/smm 及常见图片（OCR）` }
+          return { success: false, message: `不支持的文件类型 .${ext}。支持：txt/md/json/log/html/xml/docx/xlsx/xls/csv/tsv/pdf/smm 及常见图片（OCR）` }
         }
 
         const total = text.length
@@ -7324,6 +8081,8 @@ ${block}`
         if (offset > 0 || offset + maxChars < total) {
           note = `\n\n【分段提示】全文共 ${total} 字符，当前返回第 ${offset}~${Math.min(offset + maxChars, total)} 字符。需要后续内容时用 offset=${Math.min(offset + maxChars, total)} 继续读取。`
         }
+        // 后台索引到本地知识库：AI 读过的文档可被 search_knowledge_base / semantic_search 检索到（失败静默）
+        indexDocumentInBackground(filePath, fileName, ext, text)
         return {
           success: true,
           message: `文件"${fileName}"（${source}，共 ${total} 字符）：\n\n${shown}${note}`,
@@ -7579,33 +8338,57 @@ ${block}`
     case 'find_related': {
       try {
         const keyword = String(args.keyword || '').trim()
-        if (!keyword) return { success: false, message: '请提供 keyword' }
         const perSource = Math.min(Math.max(Number(args.count) || 8, 1), 20)
         const plain = (s) => String(s || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
 
-        // 来源一：本地知识库（跨文件）
-        const kbLines = []
-        try {
-          if (searchService.isAvailable && searchService.isAvailable()) {
-            const results = await searchService.search(keyword)
-            for (const r of results.slice(0, perSource)) {
-              kbLines.push(`- [${r.fileName || r.filePath || '文件'}] ${plain(r.content || r.text || '').slice(0, 80)}`)
+        // auto 模式：未提供 keyword 时，自动从当前导图提取关键词（选中节点，否则根节点 + 一级子节点）
+        let autoKeywords = []
+        if (!keyword && mindMap) {
+          try {
+            const active = mindMap.renderer.activeNodeList || []
+            const texts = []
+            if (active.length) {
+              active.forEach(n => texts.push(plain(n.getData?.('text') || '')))
+            } else {
+              const treeData = mindMap.getData()
+              texts.push(plain(treeData?.data?.text || ''))
+              ;(treeData?.children || []).slice(0, 8).forEach(c => texts.push(plain(c?.data?.text || '')))
             }
-          }
-        } catch (e) {
-          // 知识库不可用则跳过
+            autoKeywords = [...new Set(texts.map(t => t.slice(0, 12)).filter(t => t.length >= 2))].slice(0, 8)
+          } catch { /* 提取失败按无关键词处理 */ }
         }
 
-        // 来源二：当前导图内匹配节点
+        const kws = keyword ? [keyword] : autoKeywords
+        if (!kws.length) return { success: false, message: '请提供 keyword，或先选中节点以自动提取关键词' }
+
+        // 对每个关键词跨知识库搜索，汇总去重（跨文件关联发现）
+        const kbLines = []
+        const seenKb = new Set()
+        if (searchService.isAvailable && searchService.isAvailable()) {
+          for (const kw of kws.slice(0, 5)) {
+            try {
+              const results = await searchService.search(kw)
+              for (const r of results.slice(0, Math.ceil(perSource / Math.max(1, kws.length)) + 1)) {
+                const line = `- [${r.fileName || r.filePath || '文件'}] ${plain(r.content || r.text || '').slice(0, 80)}`
+                if (!seenKb.has(line)) { seenKb.add(line); kbLines.push(line) }
+                if (kbLines.length >= perSource) break
+              }
+            } catch { /* 单个关键词搜索失败跳过 */ }
+            if (kbLines.length >= perSource) break
+          }
+        }
+
+        // 当前导图内匹配节点
         const mapLines = []
+        const seenMap = new Set()
         if (mindMap) {
           const treeData = mindMap.getData()
-          const kw = keyword.toLowerCase()
           const walk = (node) => {
             if (!node || !node.data) return
             const text = plain(node.data.text)
-            if (text && text.toLowerCase().includes(kw)) {
-              mapLines.push(`- ${getNodePath(treeData, node.data.uid) || text}`)
+            if (text && kws.some(k => text.toLowerCase().includes(k.toLowerCase()))) {
+              const line = `- ${getNodePath(treeData, node.data.uid) || text}`
+              if (!seenMap.has(line)) { seenMap.add(line); mapLines.push(line) }
             }
             ;(node.children || []).forEach(walk)
           }
@@ -7613,12 +8396,13 @@ ${block}`
         }
 
         if (kbLines.length === 0 && mapLines.length === 0) {
-          return { success: true, message: `知识库和当前导图中都没有找到与「${keyword}」相关的内容。` }
+          return { success: true, message: `知识库和当前导图中都没有找到与${keyword ? `「${keyword}」` : '当前导图'}相关的内容。` }
         }
-        let msg = `与「${keyword}」相关的内容：`
-        if (kbLines.length > 0) msg += `\n\n【本地知识库（${kbLines.length} 处）】\n${kbLines.join('\n')}`
+        const kwLabel = keyword ? `「${keyword}」` : `当前导图（自动关键词：${kws.slice(0, 5).join('、')}）`
+        let msg = `与${kwLabel}相关的内容：`
+        if (kbLines.length > 0) msg += `\n\n【本地知识库（${kbLines.length} 处，跨文件）】\n${kbLines.join('\n')}`
         if (mapLines.length > 0) msg += `\n\n【当前导图（${mapLines.length} 处）】\n${mapLines.slice(0, perSource).join('\n')}`
-        msg += `\n\n关联建议：若要把知识库中的相关内容接入当前导图，可在对应节点下用 expand_node 添加关联子节点，或让用户用 @ 引用该文件。`
+        msg += `\n\n关联建议：可把知识库中的相关内容用 merge_mindmap_files 合并进当前导图，或用 @ 引用该文件。`
         return { success: true, message: msg }
       } catch (e) {
         return { success: false, message: `关联查询失败: ${e.message}` }
@@ -7654,7 +8438,7 @@ ${block}`
 
     case 'query_node_styles': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         let nodes
         if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
           const r = resolveTargetNodes(mindMap, args.targets)
@@ -7747,7 +8531,7 @@ ${block}`
 
     case 'set_node_note': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const note = String(args.note ?? '')
         const hasTargets = args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)
         let nodes
@@ -7774,7 +8558,7 @@ ${block}`
 
     case 'associative_line': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const action = args.action || 'list'
         if (action === 'add') {
           if (!mindMap.associativeLine) return { success: false, message: '关联线功能未启用' }
@@ -7829,7 +8613,7 @@ ${block}`
 
     case 'outer_frame': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         if (args.action === 'remove') {
           let cleared = 0
           if (args.all) {
@@ -7882,7 +8666,7 @@ ${block}`
 
     case 'format_painter': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const source = resolveNodeByUidOrKeyword(mindMap, args.source)
         if (!source) return { success: false, message: `未找到源节点：${args.source}` }
         const { nodes, error } = resolveTargetNodes(mindMap, args.targets || {})
@@ -7945,11 +8729,102 @@ ${block}`
     }
 
     // 导出文件名：参数指定 → 根节点文本 → 默认名
-    case 'export_to_markdown':
+    case 'export_to_markdown': {
+      try {
+        if (!window.electronAPI?.saveFile) {
+          return { success: false, message: '文件保存接口不可用（需在应用内运行）' }
+        }
+        // 数据来源：优先 file_path 直接读文件（脱离当前打开的导图）；否则用当前打开的导图
+        let data = null
+        if (args.file_path) {
+          const fp = String(args.file_path).trim()
+          if (!window.electronAPI?.fs?.readFile) return { success: false, message: '文件系统不可用' }
+          const content = await window.electronAPI.fs.readFile(fp)
+          if (!content) return { success: false, message: `无法读取文件：${fp}` }
+          try { data = JSON.parse(content) } catch { return { success: false, message: `文件格式错误（不是有效的 .smm 文件）：${fp}` } }
+        } else {
+          if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先用 list_directory(recursive=true) 或 find_local_file 找到 .smm 文件，再用 export_to_markdown(file_path=...) 直接导出，无需打开。' }
+          data = mindMap.getData()
+        }
+        data = Array.isArray(data) ? data[0] : data
+        const rootText = nodePlainText(data?.data?.text || data?.text || '')
+        const safeName = String(args.file_name || rootText || '思维导图').slice(0, 40).replace(/[\\/:*?"<>|]/g, '_').trim() || '思维导图'
+
+        const mod = await import('simple-mind-map/src/parse/markdown.js')
+        const markdown = mod.default || mod
+        const mdText = markdown.transformToMarkdown(data)
+        if (!mdText) return { success: false, message: 'Markdown 转换结果为空' }
+        const result = await window.electronAPI.saveFile(`${safeName}.md`, mdText, { overwrite: true })
+        if (!result?.success) return { success: false, message: `保存失败：${result?.error || '未知错误'}` }
+        const preview = mdText.split('\n').slice(0, 8).join('\n')
+        return {
+          success: true,
+          message: `已导出 Markdown：${result.filePath}\n\n内容预览：\n${preview}${mdText.split('\n').length > 8 ? '\n…' : ''}`,
+          filePath: result.filePath
+        }
+      } catch (e) {
+        return { success: false, message: `导出失败: ${e.message}` }
+      }
+    }
+
+    case 'export_mindmap_html': {
+      try {
+        if (!window.electronAPI?.saveFile) {
+          return { success: false, message: '文件保存接口不可用（需在应用内运行）' }
+        }
+        // 数据来源：优先 file_path 直接读文件（脱离当前打开的导图）；否则用当前打开的导图
+        let data = null
+        let useOffscreen = false
+        if (args.file_path) {
+          const fp = String(args.file_path).trim()
+          if (!window.electronAPI?.fs?.readFile) return { success: false, message: '文件系统不可用' }
+          const content = await window.electronAPI.fs.readFile(fp)
+          if (!content) return { success: false, message: `无法读取文件：${fp}` }
+          try { data = JSON.parse(content) } catch { return { success: false, message: `文件格式错误（不是有效的 .smm 文件）：${fp}` } }
+          useOffscreen = true // 指定了文件路径：离屏渲染，不依赖当前打开的导图
+        } else {
+          if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先用 list_directory(recursive=true) 或 find_local_file 找到 .smm 文件，再用 export_mindmap_html(file_path=...) 直接导出，无需打开。' }
+          data = mindMap.getData()
+        }
+        data = Array.isArray(data) ? data[0] : data
+        const rootText = nodePlainText(data?.data?.text || data?.text || '')
+        const safeName = String(args.file_name || rootText || '思维导图').slice(0, 40).replace(/[\\/:*?"<>|]/g, '_').trim() || '思维导图'
+        const mode = args.mode === 'full' ? 'full' : 'single'
+
+        // 生成 SVG：离屏渲染（file_path 或当前无实例时）或复用当前实例（更贴近实时画布）
+        let svgDataUrl = null
+        if (!useOffscreen && mindMap) {
+          try { svgDataUrl = await safeExportSvg(mindMap, safeName) } catch (e) { svgDataUrl = null }
+        }
+        if (!svgDataUrl) {
+          svgDataUrl = await renderSvgFromData(data, { name: safeName })
+        }
+
+        let html = ''
+        let fileName = safeName
+        if (mode === 'full') {
+          html = await buildTriModeHtml(svgDataUrl, data, safeName)
+          fileName = `${safeName}-全视图模式`
+        } else {
+          html = await buildInteractiveHtml(svgDataUrl, safeName)
+        }
+        const result = await window.electronAPI.saveFile(`${fileName}.html`, html, { overwrite: true })
+        if (!result?.success) return { success: false, message: `保存失败：${result?.error || '未知错误'}` }
+        return {
+          success: true,
+          message: `已导出${mode === 'full' ? '全视图（三模式）' : '交互式'} HTML：${result.filePath}`,
+          filePath: result.filePath,
+          fileName: `${fileName}.html`
+        }
+      } catch (e) {
+        return { success: false, message: `导出 HTML 失败: ${e.message}` }
+      }
+    }
+
     case 'export_mindmap_pdf':
     case 'export_outline_pdf': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         if (!window.electronAPI?.saveFile || !window.electronAPI?.saveBinaryFile) {
           return { success: false, message: '文件保存接口不可用（需在应用内运行）' }
         }
@@ -7961,20 +8836,6 @@ ${block}`
         const root = Array.isArray(data) ? data[0] : data
         const rootText = nodePlainText(root?.data?.text || root?.text || '')
         const safeName = String(args.file_name || rootText || '思维导图').slice(0, 40).replace(/[\\/:*?"<>|]/g, '_').trim() || '思维导图'
-
-        if (name === 'export_to_markdown') {
-          const mod = await import('simple-mind-map/src/parse/markdown.js')
-          const markdown = mod.default || mod
-          const mdText = markdown.transformToMarkdown(data)
-          if (!mdText) return { success: false, message: 'Markdown 转换结果为空' }
-          const result = await window.electronAPI.saveFile(`${safeName}.md`, mdText, { overwrite: true })
-          if (!result?.success) return { success: false, message: `保存失败：${result?.error || '未知错误'}` }
-          const preview = mdText.split('\n').slice(0, 8).join('\n')
-          return {
-            success: true,
-            message: `已导出 Markdown：${result.filePath}\n\n内容预览：\n${preview}${mdText.split('\n').length > 8 ? '\n…' : ''}`
-          }
-        }
 
         if (name === 'export_mindmap_pdf') {
           if (!mindMap.doExport) return { success: false, message: '导出插件未注册' }
@@ -8021,7 +8882,7 @@ ${block}`
 
     case 'find_replace_text': {
       try {
-        if (!mindMap) return { success: false, message: '思维导图实例未初始化' }
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         const find = String(args.find ?? '')
         if (!find) return { success: false, message: 'find 不能为空' }
         const replacement = String(args.replacement ?? '')
@@ -8135,23 +8996,81 @@ ${block}`
         const fsApi = window.electronAPI?.fs
         if (!fsApi || typeof fsApi.listDir !== 'function') return { success: false, message: '目录浏览功能不可用' }
         let dir = args.dir_path || ''
+        // 未指定目录时：优先当前打开文件的目录；否则回退到目录树根（MCP/外部调用场景无打开文件也能列）
         if (!dir) {
           const store = useMindMapStore()
           if (store.currentFilePath) dir = store.currentFilePath.replace(/[\\/][^\\/]+$/, '')
         }
-        if (!dir) return { success: false, message: '未指定 dir_path，且当前没有打开的文件可推断目录' }
-        const res = await fsApi.listDir(dir)
-        const dirs = res?.dirs || []
-        const files = res?.files || []
+        const dirs = []
+        if (!dir) {
+          // 回退到目录树根（与文件树展示范围一致）：手动添加的文件夹 + 自动保存目录根 + 默认保存目录
+          try {
+            const roots = JSON.parse(localStorage.getItem('MINDMAP_FOLDER_ROOTS') || '[]')
+            if (Array.isArray(roots)) dirs.push(...roots.filter(p => typeof p === 'string' && p))
+          } catch { /* 忽略 */ }
+          try {
+            const auto = localStorage.getItem('MINDMAP_AUTO_ROOT')
+            if (auto) dirs.push(auto)
+          } catch { /* 忽略 */ }
+          if (window.electronAPI?.getDefaultSaveDir) {
+            try {
+              const saveDir = await window.electronAPI.getDefaultSaveDir()
+              if (saveDir) dirs.push(saveDir)
+            } catch { /* 忽略 */ }
+          }
+        }
+        // 目录根去重（统一分隔符，避免保存目录与手动添加根重复导致重复列出）
+        const normPath = (s) => String(s || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase()
+        const uniqueDirs = [...new Set(dirs.filter(Boolean))].filter((d, i, arr) => arr.findIndex(x => normPath(x) === normPath(d)) === i)
+
+        const recursive = args.recursive === true
+
+        // 递归列出某目录的条目。注意：fs:listDir 返回的是扁平数组（元素含 isDir 字段），不是 {dirs, files} 对象
+        const walkDir = async (d, out, depth) => {
+          const list = await fsApi.listDir(d)
+          const entries = Array.isArray(list) ? list : []
+          for (const e of entries) {
+            out.push({ ...e, path: e.path || `${d.replace(/[\\/]+$/, '')}/${e.name}`, depth })
+            if (recursive && e.isDir && depth < 12) {
+              await walkDir(e.path || `${d.replace(/[\\/]+$/, '')}/${e.name}`, out, depth + 1)
+            }
+          }
+        }
+
+        const allEntries = []
+        if (uniqueDirs.length) {
+          // 多个目录树根：逐根列出
+          for (const d of uniqueDirs) {
+            try {
+              await walkDir(d, allEntries, 0)
+            } catch (e) { /* 单个根失败不影响其余 */ }
+          }
+          if (!allEntries.length) {
+            return { success: true, message: `目录树根（${uniqueDirs.join('、')}）下没有文件` }
+          }
+        } else {
+          if (!dir) return { success: false, message: '未指定 dir_path，且当前没有打开的文件，也没有配置目录树根目录' }
+          await walkDir(dir, allEntries, 0)
+        }
+
+        if (!allEntries.length) {
+          return { success: true, message: `目录 ${dir} 为空` }
+        }
+
         const fmtDate = (ms) => { try { return new Date(ms).toISOString().slice(0, 10) } catch { return '' } }
+        const files = allEntries.filter(e => !e.isDir)
+        const subdirs = allEntries.filter(e => e.isDir)
         const lines = []
-        if (dirs.length) lines.push(`文件夹（${dirs.length}）：${dirs.map(d => d.name).join('、')}`)
+        if (subdirs.length) lines.push(`文件夹（${subdirs.length}）：${subdirs.map(d => d.name).join('、')}`)
         if (files.length) lines.push(`文件（${files.length}）：${files.map(f => `${f.name}${f.mtime ? ` ${fmtDate(f.mtime)}` : ''}`).join('、')}`)
+        const label = uniqueDirs.length
+          ? `目录树根（${uniqueDirs.join('、')}）${recursive ? '（递归）' : ''}`
+          : `目录 ${dir}${recursive ? '（递归）' : ''}`
         return {
           success: true,
-          message: `目录 ${dir}\n${lines.join('\n') || '（空目录或没有支持的文件类型）'}`,
-          dir,
-          subdirs: dirs,
+          message: `${label}\n${lines.join('\n') || '（空目录或没有支持的文件类型）'}`,
+          dir: dir || uniqueDirs,
+          subdirs,
           files
         }
       } catch (e) {

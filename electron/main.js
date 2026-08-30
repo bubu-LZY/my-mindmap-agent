@@ -24,6 +24,7 @@ process.on('unhandledRejection', (reason) => {
 const { app, BrowserWindow, shell, ipcMain, Tray, Menu, nativeImage } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const crypto = require('crypto')
 
 // === IPC 发送方校验（防御渲染层被注入后滥用特权 IPC）===
 // 仅放行业务主窗口：生产为 file:// 打包产物，开发为本地 dev server。
@@ -78,6 +79,9 @@ const httpServerModule = require('./ipc/httpServer')
 require('./ipc/mcpManager')
 require('./ipc/skillsManager')
 require('./ipc/customTools')
+require('./ipc/vectorStore')
+require('./ipc/passwordGate')
+const networkMonitor = require('./ipc/networkMonitor')
 
 // 在默认浏览器中打开 URL
 ipcMain.handle('open-external', async (event, url) => {
@@ -608,6 +612,7 @@ function getDefaultSaveDir() {
 
 // 将默认保存目录挂载到 app 上，供 IPC 模块使用
 app.whenReady().then(() => {
+  try { networkMonitor.start() } catch (e) { console.error('[networkMonitor] start failed:', e) }
   app.defaultSaveDir = getDefaultSaveDir()
 })
 
@@ -656,6 +661,31 @@ function showMainWindow() {
   mainWindow.focus()
 }
 
+// 校验外部前端资源目录（resources/app-dist）的完整性：
+// 外部目录自带 .integrity-manifest.json（由 tools/gen-integrity-manifest.js 生成，
+// 轻量更新器 update.nsi 会连同前端资源一起同步复制），逐文件比对 SHA256。
+// 任一文件缺失或哈希不匹配即判定为被篡改，返回 false（回退包内资源）。
+// 说明：校验的是「外部 manifest 与外部文件的内部一致性」，可拦截"替换单个 JS 注入"类常见篡改；
+// 若同时篡改文件与 manifest 则需进一步签名（当前无代码签名，暂不做）。
+function verifyExternalDist(externalDir) {
+  try {
+    const manifestPath = path.join(externalDir, 'integrity-manifest.json')
+    if (!fs.existsSync(manifestPath)) return false
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    const expected = manifest && manifest.files
+    if (!expected || typeof expected !== 'object' || Object.keys(expected).length === 0) return false
+    for (const rel of Object.keys(expected)) {
+      const file = path.join(externalDir, rel)
+      if (!fs.existsSync(file)) return false
+      const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+      if (hash !== expected[rel]) return false
+    }
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
 function createWindow() {
   // 开机自启动带 --hidden 参数：静默驻留托盘，不弹窗口；用户手动双击则正常显示
   const startHidden = process.argv.includes('--hidden')
@@ -701,12 +731,19 @@ function createWindow() {
     })
   } else {
     // 生产环境：优先加载外部前端资源目录 resources/app-dist（轻量更新器 update.nsi 只替换此目录，
-    // 几秒完成一次前端更新，无需重跑完整安装）；目录不存在时回落到包内 asar 的 dist
-    const externalIndex = path.join(process.resourcesPath, 'app-dist', 'index.html')
+    // 几秒完成一次前端更新，无需重跑完整安装）；加载前做 SHA256 完整性校验，
+    // 防止外部目录被篡改注入恶意 JS；目录不存在或校验失败时回退到包内 asar 的 dist
+    const externalDir = path.join(process.resourcesPath, 'app-dist')
+    const externalIndex = path.join(externalDir, 'index.html')
     const bundledIndex = path.join(__dirname, '..', 'dist', 'index.html')
     if (fs.existsSync(externalIndex)) {
-      console.log('[loader] 使用外部前端资源:', externalIndex)
-      mainWindow.loadFile(externalIndex)
+      if (verifyExternalDist(externalDir)) {
+        console.log('[loader] 使用外部前端资源（完整性校验通过）:', externalIndex)
+        mainWindow.loadFile(externalIndex)
+      } else {
+        console.warn('[loader] 外部前端资源完整性校验失败，回退包内资源')
+        mainWindow.loadFile(bundledIndex)
+      }
     } else {
       mainWindow.loadFile(bundledIndex)
     }
@@ -747,6 +784,16 @@ function parseScheduledTaskArg(argv) {
   return null
 }
 
+// 解析命令行中的 .smm 文件路径（Windows 双击 .smm 文件 → 系统把文件路径作为参数传给应用）
+function parseOpenFilePath(argv) {
+  const p = (argv || []).find(arg => {
+    if (typeof arg !== 'string' || !arg) return false
+    if (arg.startsWith('-')) return false
+    return /\.smm$/i.test(arg)
+  })
+  return p ? path.resolve(p) : null
+}
+
 // 转发定时任务触发事件到渲染进程（等待页面加载完成，避免事件丢失）
 function forwardScheduledTask(win, taskId) {
   const send = () => {
@@ -761,45 +808,70 @@ function forwardScheduledTask(win, taskId) {
   }
 }
 
+// 转发"打开 .smm 文件"事件到渲染进程（等待页面加载完成，避免事件丢失）
+function forwardOpenFile(win, filePath) {
+  if (!filePath) return
+  const send = () => {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('app:openFile', filePath)
+    }
+  }
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', send)
+  } else {
+    send()
+  }
+}
+
 if (!gotTheLock) {
   // 已有实例在运行：本实例退出，任务由 first-instance 的 second-instance 处理器转交
   app.quit()
 } else {
-  // 第二实例启动：聚焦已有窗口，并转交其携带的定时任务参数
+  // 第二实例启动：定时任务静默执行不弹窗；普通启动才聚焦已有窗口
   app.on('second-instance', (event, commandLine) => {
     if (!mainWindow || mainWindow.isDestroyed()) return
 
+    const taskId = parseScheduledTaskArg(commandLine)
+    if (taskId) {
+      // 定时任务触发：后台静默执行，不弹出窗口、不抢焦点
+      // 只转发任务事件到渲染进程，让 AI 在后台处理
+      forwardScheduledTask(mainWindow, taskId)
+      return
+    }
+
+    // 双击 .smm 文件：聚焦窗口并转发文件打开事件
+    const openFilePath = parseOpenFilePath(commandLine)
+    if (openFilePath) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      forwardOpenFile(mainWindow, openFilePath)
+      return
+    }
+
+    // 普通启动（用户手动双击）：正常显示并聚焦窗口
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
     mainWindow.focus()
-
-    const taskId = parseScheduledTaskArg(commandLine)
-    if (taskId) {
-      forwardScheduledTask(mainWindow, taskId)
-    }
   })
 
   app.whenReady().then(() => {
     // 确保默认保存目录已初始化
     app.defaultSaveDir = getDefaultSaveDir()
 
-    // 开机自启动：写入注册表 HKCU\Software\Microsoft\Windows\CurrentVersion\Run
-    // （Electron setLoginItemSettings 在 Windows 上的底层实现即注册表 Run 键）
-    // 仅打包后的正式版启用，开发环境不写入；每次启动幂等写入，被清理也会自动恢复
-    if (app.isPackaged) {
-      try {
-        app.setLoginItemSettings({
-          name: 'my-mindmap agent',
-          openAtLogin: true,
-          args: ['--hidden'] // 开机静默驻留托盘，不弹窗口
-        })
-      } catch (e) {
-        console.error('设置开机自启动失败:', e)
-      }
-    }
+    // 开机自启动：不再默认强制开启（原逻辑打包后每次启动幂等写入注册表 + --hidden 静默驻留）。
+    // 改为由用户在设置界面通过 auto-launch:set 手动控制，避免应用默认持续后台驻留增大攻击面。
+    // （若用户曾手动开启，注册表项已存在，app 启动仍会自动拉起，符合用户预期）
 
     createWindow()
     createTray()
+
+    // 首次启动即通过双击 .smm 文件拉起：把命令行中的文件路径转发给渲染进程打开
+    const startupOpenFile = parseOpenFilePath(process.argv)
+    if (startupOpenFile) {
+      forwardOpenFile(mainWindow, startupOpenFile)
+    }
+
     httpServerModule.init(() => mainWindow)
     httpServerModule.initAutoStart()
 

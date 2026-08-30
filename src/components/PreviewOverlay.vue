@@ -66,7 +66,7 @@
 import { ref, computed, watch, reactive, onBeforeUnmount, nextTick } from 'vue'
 import MindMap from 'simple-mind-map'
 import { readFile } from '../services/referenceService'
-import { escapeHtml } from '../utils/sanitizeHtml'
+import { escapeHtml, sanitizeSafeHtml } from '../utils/sanitizeHtml'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -450,7 +450,7 @@ const renderMarkdownPreview = (content) => {
       return `<div class="md-line">${line ? escapeHtml(line) : '&nbsp;'}</div>`
     })
     .join('')
-  miniMapContainerRef.value.innerHTML = `<div class="md-preview">${html}</div>`
+  miniMapContainerRef.value.innerHTML = sanitizeSafeHtml(`<div class="md-preview">${html}</div>`)
 }
 
 // 监听可见性和文件路径变化

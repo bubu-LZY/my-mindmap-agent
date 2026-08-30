@@ -5,6 +5,9 @@
 
 import { stripThinkBlocks, createThinkStreamFilter } from '../utils/thinkFilter'
 import { createPlanStreamFilter } from '../utils/planFilter'
+import { useDeepThinkingStore } from '../stores/deepThinkingStore'
+import { addLogEvent } from '../utils/logStore'
+import { estimateTokens } from '../utils/contextWindow'
 
 /**
  * 清洗工具返回值，移除/截断 AI 不需要且会爆上下文的大字段：
@@ -87,10 +90,46 @@ export function buildBaseURL(baseURL) {
 }
 
 /**
+ * 按 baseURL 域名匹配厂商，返回兼容的深度思考参数字段集合。
+ * 命中规则按厂商权威文档：
+ * - OpenAI（o3/o4-mini/gpt-5 系列）顶层 reasoning_effort
+ * - DeepSeek v3.2+：thinking: { type: 'enabled', reasoning_effort }
+ * - 阿里百炼（Qwen3/GLM/Kimi 兼容端）：enable_thinking + reasoning_effort
+ * - 兼容 OpenAI 协议的中转站 / 第三方：默认走顶层 reasoning_effort（多数透传支持）
+ *
+ * 未知厂商或不匹配返回空对象 → 调用方不传任何参数（静默降级）。
+ *
+ * @param {string} baseURL  用户配置的 baseURL
+ * @param {string} effort   'low' | 'medium' | 'high'
+ * @returns {object}       应合并进请求 body 的字段（可能为空）
+ */
+export function buildDeepThinkingParams(baseURL, effort) {
+  if (!baseURL) return {}
+  const url = String(baseURL).toLowerCase()
+  // DeepSeek：api-docs.deepseek.com 系列（含中转）
+  if (url.includes('deepseek')) {
+    return { thinking: { type: 'enabled', reasoning_effort: effort || 'high' } }
+  }
+  // 阿里百炼 / 阿里云通义千问 / Qwen：dashscope / aliyun
+  if (url.includes('dashscope') || url.includes('aliyun') || url.includes('qwen')) {
+    return { enable_thinking: true, reasoning_effort: effort || 'high' }
+  }
+  // 智谱 GLM：bigmodel / zhipu（bigmodel 已逐步支持 reasoning_effort）
+  if (url.includes('bigmodel') || url.includes('zhipu')) {
+    return { reasoning_effort: effort || 'high' }
+  }
+  // 默认（OpenAI、Azure、Moonshot、Ollama、各类中转）：顶层 reasoning_effort
+  return { reasoning_effort: effort || 'high' }
+}
+
+/**
  * 并行安全工具（纯查询、无副作用、互不依赖）：
  * 同一批 tool_calls 全部属于此集合时用 Promise.all 并行执行
  */
+// 单工具软超时：防止单个工具 hang 死整批处理
+const TOOL_TIMEOUT_MS = 60000
 const PARALLEL_SAFE_TOOLS = new Set([
+
   'get_mindmap_content',
   'get_mindmap_info',
   'search_nodes',
@@ -127,6 +166,7 @@ export function resetWebSearchTask(taskId = `search_${Date.now()}_${Math.random(
   return taskId
 }
 export async function searchWeb(query, options = {}) {
+  if (isOffline()) throw new Error('网络不可用：当前处于离线状态，请稍后或连接网络后再试（NETWORK_DOWN）')
   const deepResearch = options.deepResearch === true || /深度调研|系统调研|全面调研/.test(String(query || ''))
   const taskId = options.taskId || currentWebSearchTaskId || resetWebSearchTask()
   // 优先走主进程 IPC：渲染进程直接 fetch 会被 CORS 拦截而永远返回空
@@ -157,6 +197,7 @@ export async function searchWeb(query, options = {}) {
 
 // 读取网页正文（主进程抓取并提取纯文本，配合联网搜索使用）
 export async function readWebpage(url) {
+  if (isOffline()) throw new Error('网络不可用：当前处于离线状态，无法读取网页（NETWORK_DOWN）')
   if (typeof window !== 'undefined' && window.electronAPI && window.electronAPI.webFetch) {
     const r = await window.electronAPI.webFetch(url)
     if (r && r.success) {
@@ -196,8 +237,8 @@ export const providerPresets = [
     id: 'zhipu',
     name: '智谱 GLM',
     icon: '✨',
-    baseURL: 'https://open.bigmodel.cn/api/paas',
-    models: ['glm-4', 'glm-4-flash', 'glm-4-air']
+    baseURL: 'https://open.bigmodel.cn/api/paas/v4',
+    models: ['glm-4', 'glm-4-flash', 'glm-4-air', 'glm-4.6v-flash']
   },
   {
     id: 'qwen',
@@ -356,7 +397,15 @@ function extractLatestUserQuery(messages) {
     else if (Array.isArray(m.content)) {
       text = m.content.filter(p => p && p.type === 'text').map(p => p.text).join('\n')
     }
-    return text.split(/\n## /)[0].trim()
+    // 剥掉动态注入的标记/块（拖入文件路径、引用节点、意图规范化改写），只留用户真实输入；
+    // 否则路径/改写里的英文词（如 mindmap/agent）会误命中自动工具发现，导致首答被清空重试
+    text = text
+      .replace(/【拖入文件｜路径：[^】]*】/g, '')
+      .replace(/【引用节点｜uid=[^】]*】/g, '')
+      .replace(/【意图规范化改写[^】]*】[\s\S]*?(?=\n## |$)/g, '')
+      .split(/\n## /)[0]
+      .trim()
+    return text
   }
   return ''
 }
@@ -364,10 +413,19 @@ function extractLatestUserQuery(messages) {
 /** 拒答特征检测：模型没用任何工具却输出"无法完成"类回复时触发语义兜底 */
 const REFUSAL_RE = /(无法|不能|做不到|不支持|没有.{0,6}(功能|工具|能力)|暂不|无法执行|无法完成|我帮不了)/
 
+
+// 网络检测（review #14/#22）：离线时短路 AI 请求、联网工具，避免挂起
+function isOffline() {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
+  } catch (e) {}
+  return false
+}
 class AIService {
   constructor() {
     this.baseURL = ''
-    this.apiKey = ''
+    this.apiKey = ''      // 兼容旧引用；不再存明文，发请求由主进程按 profileId 注入 key
+    this.profileId = ''   // 当前活跃基础档 id（发请求时传给主进程查 key）
     this.model = ''
     // URL 自动补全开关（false 时按填写的地址原样请求）
     this.autoComplete = true
@@ -385,6 +443,12 @@ class AIService {
     // 运行代际令牌：新一轮 chatWithCallbacks 启动时更新；旧循环检测到自己过期后静默退出，
     // 防止"停止/切换会话后立即发新消息，旧循环因 _aborted 被新轮回置而复活"
     this._activeRunToken = null
+    // 日志钩子：记录每次 AI 请求/返回摘要，供 ChatPanel 注入运行日志（子 Agent、工序内部 AI 调用可见）
+    this.logCallback = null
+  }
+
+  setLogCallback(fn) {
+    this.logCallback = typeof fn === 'function' ? fn : null
   }
 
   /**
@@ -427,7 +491,8 @@ class AIService {
   async init() {
     const config = await window.electronAPI.getAIConfig()
     this.baseURL = config.baseURL
-    this.apiKey = config.apiKey
+    this.apiKey = ''  // 主进程不再回传明文，前端不持有
+    this.profileId = config.activeProfileId || ''
     this.model = config.model
     this.autoComplete = config.autoComplete !== false
     this.temperature = Number.isFinite(Number(config.temperature)) ? Number(config.temperature) : 0.7
@@ -436,11 +501,12 @@ class AIService {
 
   /**
    * 直接设置配置（不经过 Electron，用于临时测试或运行时更新）
-   * @param {object} config { baseURL, apiKey, model, autoComplete }
+   * @param {object} config { baseURL, profileId, model, autoComplete }
    */
   setConfig(config) {
     this.baseURL = config.baseURL || ''
-    this.apiKey = config.apiKey || ''
+    this.apiKey = ''  // 不持有明文
+    this.profileId = config.profileId || config.activeProfileId || ''
     this.model = config.model || ''
     this.autoComplete = config.autoComplete !== false
     this.temperature = Number.isFinite(Number(config.temperature)) ? Number(config.temperature) : 0.7
@@ -475,27 +541,24 @@ class AIService {
   }
 
   /**
-   * 构建请求头（可传入 apiKey 覆盖当前配置，用于多模态等独立配置档）
+   * 构建请求头。Authorization 由主进程按 profileId 注入，
+   * 渲染进程不再构造 Authorization、不再持有 apiKey 明文（防 XSS 窃取）。
    */
-  _buildHeaders(apiKey) {
-    const headers = { 'Content-Type': 'application/json' }
-    const key = apiKey !== undefined ? apiKey : this.apiKey
-    if (key) {
-      headers['Authorization'] = `Bearer ${key}`
-    }
-    return headers
+  _buildHeaders() {
+    return { 'Content-Type': 'application/json' }
   }
 
   /**
    * 非流式 API 请求（自动选择 IPC 或直接 fetch）
+   * @param {string} profileId 配置档 id（主进程据此注入 Authorization）
    * @returns {Promise<{ ok: boolean, status: number, json: Function, text: Function }>}
    */
-  async _fetchAPI(url, body, apiKey) {
-    const headers = this._buildHeaders(apiKey)
+  async _fetchAPI(url, body, profileId, extraHeaders) {
+    const headers = { ...this._buildHeaders(), ...(extraHeaders || {}) }
 
     if (this._isElectron()) {
       // 通过 IPC 代理
-      const result = await window.electronAPI.aiChat(url, headers, body)
+      const result = await window.electronAPI.aiChat(url, headers, body, profileId)
       if (!result.success) {
         return {
           ok: false,
@@ -527,8 +590,8 @@ class AIService {
    * 返回一个统一的 reader，read() 返回 { done, value: string }
    * @returns {Promise<{ ok: boolean, status: number, getReader: Function }>}
    */
-  async _fetchStream(url, body, apiKey) {
-    const headers = this._buildHeaders(apiKey)
+  async _fetchStream(url, body, profileId) {
+    const headers = this._buildHeaders()
 
     if (this._isElectron() && window.electronAPI.aiChatStream) {
       // 通过 IPC 代理流式请求
@@ -586,7 +649,9 @@ class AIService {
             chunkResolver = null
             resolver({ done: true, value: undefined })
           }
-        }
+        },
+        // profileId（主进程据此注入 Authorization）
+        profileId
       )
 
       // 等待第一个数据或错误来确认连接状态
@@ -656,7 +721,7 @@ class AIService {
    * 发送一个极简请求，根据响应判断连接状态
    * @returns {Promise<{success: boolean, message: string}>}
    */
-  async testConnection() {
+  async testConnection(apiKey) {
     await this.ensureInitialized()
     try {
       const url = buildChatURL(this.baseURL, this.autoComplete)
@@ -665,7 +730,12 @@ class AIService {
         messages: [{ role: 'user', content: 'Hi' }],
         max_tokens: 5
       })
-      const response = await this._fetchAPI(url, body)
+      // 测试连接时用户刚填的明文 key（非掩码）直接带上，避免依赖磁盘已保存配置
+      const headers = this._buildHeaders()
+      if (apiKey && typeof apiKey === 'string' && !apiKey.includes('****')) {
+        headers['Authorization'] = `Bearer ${apiKey}`
+      }
+      const response = await this._fetchAPI(url, body, this.profileId, headers)
       if (response.ok) return { success: true, message: '连接成功！' }
       const err = await response.json().catch(() => ({}))
       return {
@@ -693,6 +763,15 @@ class AIService {
       err.aborted = true
       throw err
     }
+    // 本次运行实际使用的连接配置：默认当前配置；多模态等场景通过 options.configOverride 传入独立配置档
+    const cfg = options.configOverride && options.configOverride.baseURL
+      ? {
+          baseURL: options.configOverride.baseURL,
+          profileId: options.configOverride.profileId || this.profileId,
+          model: options.configOverride.model || this.model,
+          autoComplete: options.configOverride.autoComplete !== false
+        }
+      : { baseURL: this.baseURL, profileId: this.profileId, model: this.model, autoComplete: this.autoComplete }
     const messages = []
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt })
     messages.push({ role: 'user', content: userMessage })
@@ -727,7 +806,7 @@ class AIService {
       throw err
     }
 
-    const body = { model: this.model, messages, temperature: options.temperature ?? this.temperature ?? 0.7 }
+    const body = { model: cfg.model, messages, temperature: options.temperature ?? this.temperature ?? 0.7 }
     if (tools) body.tools = tools
     if (Number.isFinite(options.max_tokens) && options.max_tokens > 0) body.max_tokens = options.max_tokens
 
@@ -736,11 +815,31 @@ class AIService {
       body.response_format = { type: 'json_object' }
     }
 
-    let response = await this._fetchAPI(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(body))
+    // 深度思考开关：按 baseURL 自动适配厂商参数（OpenAI 顶层 reasoning_effort / DeepSeek thinking 对象 / 阿里百炼 enable_thinking 等）
+    if (!options.skipDeepThinking) {
+      try {
+        const store = useDeepThinkingStore()
+        if (store && store.enabled) {
+          Object.assign(body, buildDeepThinkingParams(cfg.baseURL, store.effort))
+        }
+      } catch (e) { /* store 不可用时跳过，不影响主流程 */ }
+    }
+
+    // 记录 AI 请求摘要（供运行日志：工序/子 Agent 内部 AI 调用可见）
+    if (this.logCallback) {
+      try {
+        const lastUser = messages.filter(m => m.role === 'user').pop()
+        const brief = typeof lastUser?.content === 'string'
+          ? lastUser.content.slice(0, 200)
+          : (Array.isArray(lastUser?.content) ? lastUser.content.map(c => c.text || '').join(' ').slice(0, 200) : '')
+        this.logCallback('send', `模型: ${cfg.model}\n请求: ${brief}`)
+      } catch (e) {}
+    }
+    let response = await this._fetchAPI(buildChatURL(cfg.baseURL, cfg.autoComplete), JSON.stringify(body), cfg.profileId)
     // 部分供应商不支持 response_format：收到 4xx 时去掉该参数重试一次
     if (!response.ok && options.responseFormat === 'json') {
       delete body.response_format
-      response = await this._fetchAPI(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(body))
+      response = await this._fetchAPI(buildChatURL(cfg.baseURL, cfg.autoComplete), JSON.stringify(body), cfg.profileId)
     }
     if (!response.ok) throw new Error(`API error: ${response.status}`)
     // 请求期间用户点了停止：丢弃结果，直接抛出中断
@@ -754,6 +853,12 @@ class AIService {
     // MiniMax 等推理模型会在 content 中输出 <think> 思考过程：剥离后再交给调用方（挖空 JSON 解析等依赖干净文本）
     if (typeof choice?.message?.content === 'string') {
       choice.message.content = stripThinkBlocks(choice.message.content)
+    }
+    if (this.logCallback) {
+      try {
+        const brief = String(choice?.message?.content || '').slice(0, 200)
+        this.logCallback('receive', `返回: ${brief}`)
+      } catch (e) {}
     }
     return choice
   }
@@ -783,7 +888,15 @@ class AIService {
       body.tools = tools
     }
 
-    const streamResponse = await this._fetchStream(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(body))
+    // 深度思考：按 baseURL 自动适配（OpenAI / DeepSeek / Qwen 等）
+    try {
+      const store = useDeepThinkingStore()
+      if (store && store.enabled) {
+        Object.assign(body, buildDeepThinkingParams(this.baseURL, store.effort))
+      }
+    } catch (e) { /* 跳过 */ }
+
+    const streamResponse = await this._fetchStream(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(body), this.profileId)
 
     if (!streamResponse.ok) {
       throw new Error(`API error: ${streamResponse.status}`)
@@ -917,7 +1030,7 @@ class AIService {
       tools
     }
 
-    const response = await this._fetchAPI(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(body))
+    const response = await this._fetchAPI(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(body), this.profileId)
 
     if (!response.ok) throw new Error(`API error: ${response.status}`)
     const data = await response.json()
@@ -952,7 +1065,7 @@ class AIService {
       temperature: this.temperature ?? 0.7
     }
 
-    const secondResponse = await this._fetchAPI(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(secondBody))
+    const secondResponse = await this._fetchAPI(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(secondBody), this.profileId)
 
     if (!secondResponse.ok) throw new Error(`API error: ${secondResponse.status}`)
     const secondData = await secondResponse.json()
@@ -970,6 +1083,15 @@ class AIService {
    *   - onBeforeRetry(hits)：自动工具发现兜底触发时回调（界面应清空已流式输出的首答），hits=[{name,desc}]
    */
   async chatWithCallbacks({ messages, tools, allTools, runToken, configOverride, toolMetadata }, callbacks = {}) {
+    // review #11: 打点 entry + durationMs
+    const __chatStartTime = Date.now()
+    let __chatLoggedEnd = false
+    const __logChatEnd = (status, extraMeta = {}) => {
+      if (__chatLoggedEnd) return
+      __chatLoggedEnd = true
+      try { addLogEvent('info', 'chat_request', 'AI 请求完成：' + status, { durationMs: Date.now() - __chatStartTime, ...extraMeta }) } catch (e) {}
+    }
+
     const { onChunk, onToolCall, onDone, onError, onPlan, onStepDone, onBeforeRetry } = callbacks
     await this.ensureInitialized()
     this._resetAbort()
@@ -977,11 +1099,11 @@ class AIService {
     const cfg = configOverride && configOverride.baseURL
       ? {
           baseURL: configOverride.baseURL,
-          apiKey: configOverride.apiKey || '',
+          profileId: configOverride.profileId || '',
           model: configOverride.model || this.model,
           autoComplete: configOverride.autoComplete !== false
         }
-      : { baseURL: this.baseURL, apiKey: this.apiKey, model: this.model, autoComplete: this.autoComplete }
+      : { baseURL: this.baseURL, profileId: this.profileId, model: this.model, autoComplete: this.autoComplete }
     // 登记新一代运行；传入 runToken 的旧循环在代际更新后自动判定过期
     const token = runToken ?? Symbol('run')
     this._activeRunToken = token
@@ -1042,35 +1164,68 @@ class AIService {
         }
         round++
 
-        // 循环内溢出保护：工具调用多轮后 currentMessages 会持续增长（assistant+tool result对），
-        // 若总字符数超过安全阈值，从最前面（跳过system）删除最早的 assistant+tool 对，保留最后几轮
-        const SAFE_CHARS = 280000 // ~70K tokens，留足响应空间
+        // 循环内溢出保护（review #9：用混合 token 估算替代字符数粗估）
+        // 工具调用多轮后 currentMessages 会持续增长（assistant+tool result 对），
+        // 计算所有非 system 消息的 token 总数；超过 70K 时按"最早的 assistant+tool 对"裁剪
+        const SAFE_TOKEN_THRESHOLD = 70000
+        const MIN_KEEP_MESSAGES = 6          // 消息数量下限（最后一轮上下文必须保留）
+        const SAFE_TAIL_KEEP = 3             // 末尾几条消息绝不裁剪（避免当前轮上下文被删）
+        const SAFE_CHARS = 400000            // 字符数兜底：极端 case 下 token 估算漏算时的二次保险
         const trimMessagesIfNeeded = (msgs) => {
-          const trySerialize = () => { try { return JSON.stringify(msgs); } catch { return '' } }
-          let serialized = trySerialize()
-          while (serialized.length > SAFE_CHARS && msgs.length > 6) {
-            // 找第一条非system消息开始的assistant，删除它及其后面的连续tool结果
+          const totalTokensOf = () => msgs.reduce(
+            (s, m) => s + estimateTokens(
+              typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '')
+            ),
+            0
+          )
+          // 1) 主路径：按 token 数裁剪
+          let safetyRounds = 0
+          while (msgs.length > MIN_KEEP_MESSAGES && safetyRounds < 100) {
+            safetyRounds++
+            if (totalTokensOf() <= SAFE_TOKEN_THRESHOLD) break
+            // 找第一条非 system 消息开始的 assistant，删除它及其后面的连续 tool 结果
             let startIdx = 0
             for (let i = 0; i < msgs.length; i++) {
               if (msgs[i].role !== 'system') { startIdx = i; break }
             }
-            // 从startIdx开始找第一个assistant
             let delEnd = -1
             for (let i = startIdx; i < msgs.length; i++) {
               if (msgs[i].role === 'assistant') {
-                // 找到这个assistant后面的连续tool结果
                 delEnd = i + 1
                 while (delEnd < msgs.length && msgs[delEnd].role === 'tool') delEnd++
-                // 不删除最后3条消息（保留当前轮）
-                if (delEnd >= msgs.length - 3) break
+                // 不删除末尾 N 条消息（保留当前轮上下文）
+                if (delEnd >= msgs.length - SAFE_TAIL_KEEP) break
                 msgs.splice(startIdx, delEnd - startIdx)
                 break
               }
             }
-            // 如果无法再删除（没有assistant或已到尾部），强制截断第一条非system消息的content
-            if (delEnd < 0 || msgs.length <= 6) break
-            serialized = trySerialize()
+            if (delEnd < 0 || msgs.length <= MIN_KEEP_MESSAGES) break
           }
+          // 2) 字符数兜底：极端 case 下 token 估算漏算时（极少见的超大 JSON）也强制截断
+          try {
+            const trySerialize = () => { try { return JSON.stringify(msgs); } catch { return '' } }
+            let serialized = trySerialize()
+            let charRounds = 0
+            while (serialized.length > SAFE_CHARS && msgs.length > MIN_KEEP_MESSAGES && charRounds < 50) {
+              charRounds++
+              let startIdx2 = 0
+              for (let i = 0; i < msgs.length; i++) {
+                if (msgs[i].role !== 'system') { startIdx2 = i; break }
+              }
+              let delEnd2 = -1
+              for (let i = startIdx2; i < msgs.length; i++) {
+                if (msgs[i].role === 'assistant') {
+                  delEnd2 = i + 1
+                  while (delEnd2 < msgs.length && msgs[delEnd2].role === 'tool') delEnd2++
+                  if (delEnd2 >= msgs.length - SAFE_TAIL_KEEP) break
+                  msgs.splice(startIdx2, delEnd2 - startIdx2)
+                  break
+                }
+              }
+              if (delEnd2 < 0) break
+              serialized = trySerialize()
+            }
+          } catch (e) { /* ignore */ }
           return msgs
         }
         trimMessagesIfNeeded(currentMessages)
@@ -1085,7 +1240,15 @@ class AIService {
           body.tools = activeTools
         }
 
-        const streamResponse = await this._fetchStream(buildChatURL(cfg.baseURL, cfg.autoComplete), JSON.stringify(body), cfg.apiKey)
+        // 深度思考：按 baseURL 自动适配（OpenAI 顶层 / DeepSeek thinking 对象 / 阿里百炼 enable_thinking 等）
+        try {
+          const store = useDeepThinkingStore()
+          if (store && store.enabled) {
+            Object.assign(body, buildDeepThinkingParams(cfg.baseURL, store.effort))
+          }
+        } catch (e) { /* 跳过 */ }
+
+        const streamResponse = await this._fetchStream(buildChatURL(cfg.baseURL, cfg.autoComplete), JSON.stringify(body), cfg.profileId)
 
         if (!streamResponse.ok) {
           throw new Error(`API error: ${streamResponse.status}`)
@@ -1300,8 +1463,32 @@ class AIService {
               arguments: tc.function.arguments
             }
           }
-          const result = await onToolCall(toolCallObj)
-
+          // 单工具软超时 + 用户停止即时检测：任一 race 先 resolve 即返回，旧 promise 后续 resolve 是 noop
+          let __stopChecker
+          const __abortSignal = new Promise((resolve) => {
+            __stopChecker = setInterval(() => {
+              if (this._abortedTokens.has(token) || isStale()) resolve('aborted')
+            }, 200)
+          })
+          const __timeoutSignal = new Promise((resolve) => setTimeout(() => resolve('timeout'), TOOL_TIMEOUT_MS))
+          const __callPromise = Promise.resolve().then(() => onToolCall(toolCallObj))
+          const __settled = await Promise.race([
+            __callPromise.then((v) => ({ kind: 'done', v })).catch((e) => ({ kind: 'err', e })),
+            __abortSignal.then((k) => ({ kind: k })),
+            __timeoutSignal.then((k) => ({ kind: k }))
+          ])
+          try { clearInterval(__stopChecker) } catch (e) {}
+          let result
+          if (__settled.kind === 'done') {
+            result = __settled.v
+          } else if (__settled.kind === 'err') {
+            result = { success: false, message: '工具执行异常：' + ((__settled.e && __settled.e.message) || String(__settled.e)) }
+          } else if (__settled.kind === 'aborted') {
+            result = { success: false, message: '用户已停止 AI 运行' }
+          } else {
+            // 'timeout'：软超时，不报错让 AI 换路径
+            result = { success: false, code: 'TOOL_TIMEOUT', message: '工具 ' + tc.function.name + ' 在 ' + Math.round(TOOL_TIMEOUT_MS / 1000) + ' 秒内未完成，已跳过。建议：① 简化任务量；② 改用其他等效工具；③ 让用户确认后再发起。' }
+          }
           // 动态工具激活：get_tool_definitions 返回 activatedTools，下一轮即可直接调用
           if (result && Array.isArray(result.activatedTools) && result.activatedTools.length > 0) {
             for (const n of result.activatedTools) {
@@ -1355,11 +1542,19 @@ class AIService {
       // 超过最大轮次（过期运行不回调，静默退出）
       if (!isStale() && onDone) onDone()
     } catch (error) {
+      try { __logChatEnd('error', { error: String((error && error.message) || error) }) } catch (e) {}
       // 过期运行的错误不渲染（会话已切换/新运行已启动，错误不属于当前界面）
       if (isStale()) return
       if (onError) onError(error)
       else throw error
     } finally {
+      // 兜底：所有出口过 finally（catch 路径已 log 'error'，flag 守护避免重复）
+      try {
+        if (!__chatLoggedEnd) {
+          __chatLoggedEnd = true
+          try { addLogEvent('info', 'chat_request', 'AI 请求完成：finished', { durationMs: Date.now() - __chatStartTime }) } catch (e) {}
+        }
+      } catch (e) {}
       this._inLoop = false
     }
   }
@@ -1367,5 +1562,11 @@ class AIService {
 
 export const aiService = new AIService()
 
+// 独立实例工厂：外部通道（定时任务/微信/飞书/外部 Agent）的后台任务各用独立实例，
+// 中断状态、运行令牌互不干扰，实现通道间真正并行（与主界面对话 aiService 单例隔离）
+export const createAIService = () => new AIService()
+
 export default aiService
+
+
 

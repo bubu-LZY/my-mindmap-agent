@@ -21,9 +21,8 @@ function genId() {
  */
 export function loadConversations() {
   try {
-    const raw = storage.get('ai_conversations', [])
-    if (!raw) return []
-    const list = JSON.parse(raw)
+    // storage.get 内部已做 JSON.parse，这里直接取数组，避免二次 parse 抛异常导致永远读不到历史
+    const list = storage.get('ai_conversations', [])
     return Array.isArray(list) ? list : []
   } catch {
     return []
@@ -46,15 +45,17 @@ function saveConversations(conversations) {
 
 /**
  * 创建新对话
+ * @param {string} [fileId] 绑定的文件路径（归一化后），用于切换文件时恢复对话
  * @returns {Object} 新对话对象
  */
-export function createConversation() {
+export function createConversation(fileId) {
   return {
     id: genId(),
     title: '新对话',
     messages: [],
     createdAt: Date.now(),
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    fileId: fileId || ''
   }
 }
 

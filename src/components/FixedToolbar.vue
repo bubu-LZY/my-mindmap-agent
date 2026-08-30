@@ -1,5 +1,20 @@
 <template>
-  <div v-if="mindMap" class="fixed-toolbar" ref="toolbarRef">
+  <div
+    v-if="mindMap"
+    class="fixed-toolbar"
+    :class="{ 'split-mode': splitMode, 'is-dragging': isDragging }"
+    ref="toolbarRef"
+    :style="{ transform: 'translate(calc(-50% + ' + dragOffset.x + 'px), ' + dragOffset.y + 'px)' }"
+    @mousedown.prevent
+  >
+    <!-- 抓手：拖动整个工具条（双击重置为默认位置） -->
+    <span
+      class="ft-drag-handle"
+      :class="{ active: isDragging }"
+      @pointerdown.stop.prevent="onDragHandleDown"
+      @dblclick.stop.prevent="onDragHandleDblClick"
+      title="按住可拖动工具条（双击重置位置）"
+    >⋮⋮</span>
     <!-- 抓手工具：开启后左键拖动画布，不触发节点选择/编辑 -->
     <button
       class="ft-btn"
@@ -91,6 +106,32 @@
             @click="onNodeBackground(c)"
           ></button>
           <button class="ft-swatch ft-swatch-reset" title="恢复默认背景" @click="onNodeBackground('')">✕</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 节点边框线 -->
+    <div class="ft-group">
+      <button
+        class="ft-btn"
+        :class="{ disabled: !hasSelection }"
+        title="节点边框线"
+        @click="togglePanel('nodeBorder')"
+      >
+        <span class="ft-node-border-icon"></span>
+        <span class="ft-caret"></span>
+      </button>
+      <div v-if="panel === 'nodeBorder'" class="ft-panel">
+        <div class="ft-panel-grid">
+          <button
+            v-for="c in nodeBorderColors"
+            :key="'nb' + c"
+            class="ft-swatch ft-swatch-border"
+            :style="{ borderColor: c }"
+            :title="c"
+            @click="onNodeBorder(c)"
+          ></button>
+          <button class="ft-swatch ft-swatch-reset" title="移除边框" @click="onNodeBorder('')">✕</button>
         </div>
       </div>
     </div>
@@ -326,13 +367,21 @@ import { toggleAllCloze, setAllClozeHidden, isClozeHiddenAll, setNodesClozeHidde
 import { wechatService } from '../services/wechatService'
 import { feishuService } from '../services/feishuService'
 import { buildInteractiveHtml } from '../utils/svgExport'
+import { buildGraphDataFromRaw, downloadGraphHtml } from '../utils/graphExport'
+import { buildTriModeHtml } from '../utils/triModeExport'
+import { safeExportSvg } from '../utils/safeExportSvg'
+import { useDraggableToolbar } from '../composables/useDraggableToolbar'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
-  activeNodes: { type: Array, default: () => [] }
+  activeNodes: { type: Array, default: () => [] },
+  // 分屏模式：为 true 时把工具条下移，避免遮住上方窗格的标题栏（文件名）
+  splitMode: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['node-note'])
+// 工具条拖动（review：把顶部固定工具条改为可拖动，默认位置不变，跨视图持久化）
+const { dragOffset, isDragging, onDragHandleDown, onDragHandleDblClick } = useDraggableToolbar('fixed-toolbar-offset')
 
 const toolbarRef = ref(null)
 const panel = ref(null) // 'color' | 'highlight' | 'font' | 'fontSize' | 'export' | null
@@ -431,6 +480,8 @@ const exportList = [
   { type: 'copy-md', label: '复制 Markdown 文本' },
   { type: 'png', label: 'PNG 图片' },
   { type: 'html', label: 'HTML 文件' },
+  { type: 'tri-html', label: '三模式 HTML（导图+大纲+关联图）' },
+  { type: 'graph-html', label: '关联图 HTML' },
   { type: 'pdf', label: 'PDF 文件' },
   { type: 'pdf-wechat', label: '导出 PDF 并发送到微信' },
   { type: 'pdf-feishu', label: '导出 PDF 并发送到飞书' },
@@ -512,6 +563,28 @@ const onNodeBackground = (color) => {
       console.error('[FixedToolbar] 设置节点背景失败:', e)
     }
   }
+  closePanel()
+}
+
+// 节点边框线颜色
+const nodeBorderColors = ['#007aff', '#f5222d', '#fa8c16', '#52c41a', '#722ed1', '#13c2c2', '#303133']
+
+const onNodeBorder = (color) => {
+  if (!hasSelection.value) return
+  const mm = props.mindMap
+  if (!mm) return
+  const style = color
+    ? { borderColor: color, borderWidth: 2 }
+    : { borderColor: 'transparent', borderWidth: 0 }
+  for (const node of props.activeNodes) {
+    try {
+      mm.execCommand('SET_NODE_STYLES', node, style)
+    } catch (e) {
+      console.error('[FixedToolbar] 设置节点边框失败:', e)
+    }
+  }
+  // 重新渲染触发布局引擎按新尺寸重新排布，实现相邻节点自动避让
+  try { mm.render() } catch (e) {}
   closePanel()
 }
 
@@ -676,6 +749,54 @@ const onExport = async (type) => {
     return
   }
 
+  // 关联图 HTML 导出
+  if (type === 'graph-html') {
+    exporting.value = true
+    try {
+      const rawData = mm.getData?.() || null
+      const graphData = buildGraphDataFromRaw(rawData)
+      if (!graphData.nodes.length) throw new Error('没有可导出的节点')
+      const name = exportFileName()
+      downloadGraphHtml(graphData, name)
+      ElMessage.success(`关联图已导出：${name}.html`)
+    } catch (e) {
+      console.error('[FixedToolbar] 关联图导出失败:', e)
+      ElMessage.error(`导出失败: ${e.message}`)
+    } finally {
+      exporting.value = false
+    }
+    return
+  }
+
+  // 三模式 HTML 导出（思维导图 + 大纲 + 关联图）
+  if (type === 'tri-html') {
+    exporting.value = true
+    try {
+      const rawData = mm.getData?.() || null
+      if (!rawData) throw new Error('没有可导出的数据')
+      const name = exportFileName()
+      const svgDataUrl = await safeExportSvg(mm, name)
+      const html = await buildTriModeHtml(svgDataUrl, rawData, name)
+      const fileName = `${name}-全视图模式`
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${fileName}.html`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      ElMessage.success(`三模式 HTML 已导出：${fileName}.html`)
+    } catch (e) {
+      console.error('[FixedToolbar] 三模式 HTML 导出失败:', e)
+      ElMessage.error(`导出失败: ${e.message}`)
+    } finally {
+      exporting.value = false
+    }
+    return
+  }
+
   if (!mm.doExport) return
   exporting.value = true
   const name = exportFileName()
@@ -825,6 +946,27 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.fixed-toolbar.is-dragging { box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
+.fixed-toolbar.is-dragging * { cursor: move !important; }
+.ft-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 28px;
+  margin: 0 6px 0 2px;
+  color: rgba(0,0,0,0.35);
+  font-size: 12px;
+  letter-spacing: -1px;
+  line-height: 1;
+  user-select: none;
+  cursor: move;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.ft-drag-handle:hover { background: rgba(0,0,0,0.05); color: rgba(0,0,0,0.55); }
+.ft-drag-handle.active { background: rgba(64,158,255,0.15); color: #409eff; }
 .fixed-toolbar {
   position: absolute;
   top: 8px;
@@ -841,6 +983,11 @@ onBeforeUnmount(() => {
   border-radius: 9px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
   user-select: none;
+}
+
+/* 分屏模式：工具条已放在 pane-body（标题栏之外）内，相对 pane 定位，无需再下移 */
+.fixed-toolbar.split-mode {
+  top: 8px;
 }
 
 .ft-group {
@@ -923,6 +1070,22 @@ onBeforeUnmount(() => {
   background:
     linear-gradient(135deg, transparent 48%, rgba(0, 0, 0, 0.14) 49%, rgba(0, 0, 0, 0.14) 51%, transparent 52%),
     #ffffff;
+}
+
+/* 节点边框图标：空心圆角矩形（仅描边） */
+.ft-node-border-icon {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1.5px solid currentColor;
+  background: transparent;
+}
+
+/* 边框色块：圆角方形，用边框色描边表示 */
+.ft-swatch-border {
+  border-radius: 4px;
+  background: #fff;
+  border: 2px solid;
 }
 
 /* 高亮图标：与节点选中文字后悬浮工具条(TextToolbar)的高亮图标保持一致 */

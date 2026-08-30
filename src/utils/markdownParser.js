@@ -114,6 +114,32 @@ function parseLines(lines, indentUnit) {
       continue
     }
 
+    // Markdown 表格：连续的 | ... | 行合并为一个节点（保留整体性，不拆成多行节点）
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      const tableLines = []
+      let j = i
+      while (j < lines.length) {
+        const cur = lines[j].trim()
+        if (cur && /^\s*\|.*\|\s*$/.test(cur)) {
+          tableLines.push(cur)
+          j++
+        } else {
+          break
+        }
+      }
+      // 去掉分隔行（|---|:--| 等）
+      const dataRows = tableLines.filter(l => !/^\|[\s:|-]+\|$/.test(l))
+      if (dataRows.length) {
+        const cellText = dataRows.map(r => {
+          const cells = r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim())
+          return cells.join('　|　')
+        })
+        nodes.push({ depth: currentHeadingDepth + 1, text: cellText.join('\n') })
+      }
+      i = j - 1
+      continue
+    }
+
     // 普通段落文本
     const plainMatch = line.match(/^([ \t]*)(.+)/)
     const depth = currentHeadingDepth + 1 + indentLevelOf(plainMatch ? plainMatch[1] : '')
@@ -157,6 +183,8 @@ function buildTree(nodes) {
  */
 function inlineMarkdownToHtml(escapedText) {
   let out = String(escapedText || '')
+  // 换行 → <br>（表格等多行内容合并到单节点时保留行结构）
+  out = out.replace(/\n/g, '<br>')
   // 粗体 **...** 或 __...__
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   out = out.replace(/__([^_]+)__/g, '<strong>$1</strong>')

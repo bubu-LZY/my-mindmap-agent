@@ -6,16 +6,92 @@ const path = require('path')
 const SUPPORTED_EXTENSIONS = /\.(smm|json|md|xmind)$/i
 
 // 最大扫描深度
-const MAX_SCAN_DEPTH = 3
+const MAX_SCAN_DEPTH = 5
 
 // 最大返回节点数
-const MAX_NODES = 200
+const MAX_NODES = 500
 
 /**
  * 获取默认保存目录
  */
 function getDefaultSaveDir() {
   return app.defaultSaveDir || path.join(app.getPath('documents'), 'MindMapAI')
+}
+
+// 路径安全校验（复用 fileManager 的安全策略）
+function assertSafePath(rawPath) {
+  const s = typeof rawPath === 'string' ? rawPath : ''
+  if (!s.trim()) throw new Error('路径无效')
+  if (s.includes('\0')) throw new Error('路径包含非法字符')
+  if (/[\x00-\x1f\x7f]/.test(s)) throw new Error('路径包含非法控制字符')
+  return path.normalize(s)
+}
+
+// 白名单根目录（与 fileManager.js 共享 fsGuard 注册的白名单）
+function getAllowedRoots() {
+  try {
+    const fileManager = require('./fileManager')
+    if (fileManager && fileManager.allowedPathRoots) return fileManager.allowedPathRoots
+  } catch (e) {}
+  return null
+}
+
+// 检查路径是否在安全范围内。
+// 优先复用 fileManager 的统一白名单（包含渲染层注册的 folderRoots 与活跃文件目录），
+// 保证布局恢复、引用文件读取等场景能访问用户已信任的自定义目录。
+function isPathAllowed(targetPath) {
+  try {
+    const fileManager = require('./fileManager')
+    if (fileManager && typeof fileManager.assertPathAllowed === 'function') {
+      try {
+        fileManager.assertPathAllowed(targetPath, { readOnly: true })
+        return true
+      } catch (e) {
+        return false
+      }
+    }
+  } catch (e) { /* fileManager 不可用时走兜底 */ }
+  // 兜底：独立硬编码白名单（fileManager 模块不可用时的保守策略）
+  const target = path.resolve(String(targetPath || ''))
+  // 永远放行 userData / temp
+  const safeRoots = [
+    path.normalize(app.getPath('userData')),
+    path.normalize(app.getPath('temp')),
+    path.normalize(require('os').tmpdir())
+  ]
+  for (const root of safeRoots) {
+    if (target === root || target.startsWith(root + path.sep)) return true
+  }
+  // 额外放行 documents/downloads/desktop
+  const extra = [app.getPath('documents'), app.getPath('downloads'), app.getPath('desktop')].filter(Boolean)
+  for (const dir of extra) {
+    const n = path.normalize(dir)
+    if (target === n || target.startsWith(n + path.sep)) return true
+  }
+  // 默认保存目录
+  const saveDir = getDefaultSaveDir()
+  if (saveDir) {
+    const n = path.normalize(saveDir)
+    if (target === n || target.startsWith(n + path.sep)) return true
+  }
+  return false
+}
+
+/**
+ * 归一化根目录列表：rootPath 可为字符串或字符串数组。
+ * 空值回退到默认保存目录。结果去重。
+ */
+function normalizeRootDirs(rootPath) {
+  const dirs = []
+  if (Array.isArray(rootPath)) {
+    dirs.push(...rootPath.filter(p => typeof p === 'string' && p))
+  } else if (typeof rootPath === 'string' && rootPath) {
+    dirs.push(rootPath)
+  }
+  if (dirs.length === 0) {
+    dirs.push(getDefaultSaveDir())
+  }
+  return [...new Set(dirs.filter(d => typeof d === 'string' && d))]
 }
 
 /**
@@ -149,11 +225,23 @@ function extractNodesFromMarkdown(content, filePath, fileName) {
  */
 ipcMain.handle('ref:scanFiles', async (event, rootPath) => {
   try {
-    const dir = rootPath || getDefaultSaveDir()
-    if (!fs.existsSync(dir)) {
-      return { success: true, files: [] }
+    const dirs = normalizeRootDirs(rootPath)
+    // 安全校验：每个目录都必须在允许范围内
+    for (const dir of dirs) {
+      assertSafePath(dir)
+      if (!isPathAllowed(dir)) {
+        return { success: false, error: '扫描目录不在允许范围内：' + dir }
+      }
     }
-    const files = await scanDir(dir)
+    const fileMap = new Map()
+    for (const dir of dirs) {
+      if (!fs.existsSync(dir)) continue
+      const files = await scanDir(dir)
+      for (const f of files) {
+        if (!fileMap.has(f.path)) fileMap.set(f.path, f)
+      }
+    }
+    const files = [...fileMap.values()]
     // 按修改时间排序
     files.sort((a, b) => new Date(b.mtime) - new Date(a.mtime))
     return { success: true, files }
@@ -165,14 +253,33 @@ ipcMain.handle('ref:scanFiles', async (event, rootPath) => {
 /**
  * 扫描文件并提取所有节点
  * 用于 # 节点引用模式
+ * 导图文件（.smm/.json/.xmind）优先，MD 文档标题靠后，避免导图节点被 MD 标题挤掉
  */
 ipcMain.handle('ref:scanNodes', async (event, rootPath) => {
   try {
-    const dir = rootPath || getDefaultSaveDir()
-    if (!fs.existsSync(dir)) {
-      return { success: true, nodes: [] }
+    const dirs = normalizeRootDirs(rootPath)
+    // 安全校验：每个目录都必须在允许范围内
+    for (const dir of dirs) {
+      assertSafePath(dir)
+      if (!isPathAllowed(dir)) {
+        return { success: false, error: '扫描目录不在允许范围内：' + dir }
+      }
     }
-    const files = await scanDir(dir)
+    const fileMap = new Map()
+    for (const dir of dirs) {
+      if (!fs.existsSync(dir)) continue
+      const files = await scanDir(dir)
+      for (const f of files) {
+        if (!fileMap.has(f.path)) fileMap.set(f.path, f)
+      }
+    }
+    const files = [...fileMap.values()].sort((a, b) => {
+      // 导图文件优先，其余按修改时间
+      const aMap = /\.(smm|json|xmind)$/i.test(a.name)
+      const bMap = /\.(smm|json|xmind)$/i.test(b.name)
+      if (aMap !== bMap) return aMap ? -1 : 1
+      return new Date(b.mtime) - new Date(a.mtime)
+    })
     const allNodes = []
 
     for (const file of files) {
@@ -203,6 +310,10 @@ ipcMain.handle('ref:scanNodes', async (event, rootPath) => {
  */
 ipcMain.handle('ref:readFile', async (event, filePath) => {
   try {
+    assertSafePath(filePath)
+    if (!isPathAllowed(filePath)) {
+      return { success: false, error: '文件不在允许的读取范围内：' + filePath }
+    }
     if (!fs.existsSync(filePath)) {
       return { success: false, error: '文件不存在' }
     }

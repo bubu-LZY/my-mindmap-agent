@@ -19,6 +19,34 @@ function escapeHtml(text) {
 }
 
 /**
+ * 安全 URL 协议白名单校验
+ * 仅允许 http/https/ftp/mailto/data:image 等安全协议
+ */
+const SAFE_URL_PROTOCOLS = ['http:', 'https:', 'ftp:', 'ftps:', 'mailto:', 'tel:']
+
+function isSafeUrl(url) {
+  if (!url || typeof url !== 'string') return false
+  const trimmed = url.trim()
+  // 相对路径或锚点是安全的
+  if (trimmed.startsWith('/') || trimmed.startsWith('#') || trimmed.startsWith('./') || trimmed.startsWith('../')) return true
+  try {
+    const u = new URL(trimmed, 'http://localhost')
+    if (SAFE_URL_PROTOCOLS.includes(u.protocol)) return true
+    // data: 协议仅允许 image 类型
+    if (u.protocol === 'data:') {
+      return /^data:image\//i.test(trimmed)
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+function sanitizeUrl(url) {
+  return isSafeUrl(url) ? url : 'about:blank'
+}
+
+/**
  * 渲染 Markdown 为 HTML
  * @param {string} markdown Markdown 文本
  * @returns {string} HTML
@@ -79,13 +107,14 @@ export function renderMarkdown(markdown) {
     const headers = splitCells(block[0])
     const colCount = headers.length
     if (colCount === 0) return null
-    // 对齐方式：--- 左 / :--: 中 / ---: 右
+    // 对齐方式：--- 默认居中（用户期望表格内文字居中）/ :-- 左 / :--: 中 / --: 右
     const aligns = splitCells(block[1]).map(c => {
       const left = c.startsWith(':')
       const right = c.endsWith(':')
       if (left && right) return 'center'
+      if (left) return 'left'
       if (right) return 'right'
-      return 'left'
+      return 'center'
     })
     const rows = []
     for (let r = 2; r < block.length; r++) {
@@ -212,12 +241,17 @@ export function renderMarkdown(markdown) {
   // 图片（![alt](url)）：先于链接规则处理，避免被链接规则吞掉
   html = html.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (match, alt, url) => {
     const safeAlt = alt.replace(/"/g, '&quot;')
-    const safeUrl = url.replace(/"/g, '&quot;')
-    return `<img src="${safeUrl}" alt="${safeAlt}" class="md-img" title="点击查看大图" />`
+    const rawUrl = url.replace(/"/g, '&quot;')
+    const safeUrl = sanitizeUrl(rawUrl)
+    return `<img src="${safeUrl}" alt="${safeAlt}" class="md-img" title="点击查看大图" loading="lazy" />`
   })
 
   // 链接（[text](url)）
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="md-link">$1</a>')
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
+    const safeText = text
+    const safeUrl = sanitizeUrl(url)
+    return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="md-link">${safeText}</a>`
+  })
 
   // 裸 URL 自动识别（不在 href 中、不在代码标签中的 URL）
   html = html.replace(/(?<!href="[^"]*|<code[^>]*>)(?<!<\/code>)(https?:\/\/[^\s<"]+)/g, '<a href="$1" target="_blank" rel="noopener" class="md-link">$1</a>')

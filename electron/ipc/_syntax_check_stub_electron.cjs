@@ -1,0 +1,1 @@
+module.exports = { ipcMain: { on:()=>{}, handle:()=>{}, removeListener:()=>{} }, BrowserWindow: { getAllWindows:()=>[] }, Notification: { isSupported:()=>false }, app: { getPath:()=>"", getAppPath:()=>"", getVersion:()=>"" }, net: { fetch:()=>{} }, shell: { openPath: async()=>"", openExternal: async()=>true } }

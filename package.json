@@ -1,13 +1,14 @@
 {
   "name": "mind-map-ai-agent",
-  "version": "1.0.0",
+  "version": "3.1.0",
   "description": "基于思维导图和大纲的 AI 智能体",
+  "author": "LZY",
   "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node tools/gen-integrity-manifest.js",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
-    "electron:build": "vite build && electron-builder",
+    "electron:build": "vite build && node tools/gen-integrity-manifest.js && electron-builder",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -16,7 +17,9 @@
     "@svgdotjs/svg.js": "^3.2.0",
     "electron-store": "^8.1.0",
     "element-plus": "^2.5.0",
+    "force-graph": "^1.51.4",
     "jszip": "^3.10.1",
+    "minisearch": "^7.2.0",
     "pdfjs-dist": "^4.10.38",
     "pinia": "^2.1.7",
     "qrcode": "^1.5.4",
@@ -29,19 +32,35 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@vitejs/plugin-vue": "^5.0.0",
     "concurrently": "^8.2.0",
     "cross-env": "^7.0.3",
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.1",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3",
+    "exceljs": "^4.4.0",
+    "mammoth": "^1.12.1",
+    "papaparse": "^5.7.0",
     "png-to-ico": "^3.0.2",
     "sharp": "^0.35.3",
+    "unpdf": "^1.8.1",
     "vite": "^5.0.0",
-    "wait-on": "^7.2.0"
+    "wait-on": "^7.2.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "build": {
     "appId": "com.mindmap.aiagent",
     "productName": "my-mindmap agent",
+    "asar": true,
+    "fileAssociations": [
+      {
+        "ext": "smm",
+        "name": "my-mindmap 思维导图文件",
+        "description": "my-mindmap 思维导图文件",
+        "icon": "electron/icons/icon.ico",
+        "role": "Editor"
+      }
+    ],
     "files": [
       "dist/**/*",
       "electron/**/*",

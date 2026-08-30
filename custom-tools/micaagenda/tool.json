@@ -1,0 +1,61 @@
+{
+  "id": "micaagenda",
+  "name": "MicaAgenda 桌面日历",
+  "description": "管理本地 MicaAgenda 桌面日历的任务。支持查询、添加、编辑、删除、标记完成、批量操作，以及一键同步复习计划到日历。Token 和端口自动从 %AppData%\\MicaAgenda\\ 读取，无需手动配置。同步复习计划请用 sync_review 操作，传入 reviewItems 数组（每项含 title 和 date）。",
+  "category": "Productivity",
+  "enabled": true,
+  "autoInvoke": true,
+  "readOnly": false,
+  "risk": "medium",
+  "timeoutMs": 15000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "description": "操作类型：query（查询任务）、add（添加任务）、update（编辑任务）、delete（删除任务）、complete（标记完成）、uncomplete（取消完成）、batch（批量操作）、sync_review（同步复习计划到日历，推荐）",
+        "enum": ["query", "add", "update", "delete", "complete", "uncomplete", "batch", "sync_review"]
+      },
+      "range": {
+        "type": "string",
+        "description": "【query 用】查询范围：today（今日）、week（本周）、month（本月）、year（本年）、all（全部），默认 today"
+      },
+      "date": {
+        "type": "string",
+        "description": "指定日期，格式 YYYY-MM-DD，优先级高于 range"
+      },
+      "title": {
+        "type": "string",
+        "description": "【add/update 用】任务标题"
+      },
+      "taskId": {
+        "type": "string",
+        "description": "【update/delete/complete/uncomplete 用】任务 ID"
+      },
+      "isImportant": {
+        "type": "boolean",
+        "description": "【add/update 用】是否重要"
+      },
+      "operations": {
+        "type": "array",
+        "description": "【batch 用】批量操作数组，每项含 action(add/create, update/edit, delete/remove, complete, uncomplete) 和可选的 id/title/date/isImportant",
+        "items": { "type": "object" }
+      },
+      "reviewItems": {
+        "type": "array",
+        "description": "【sync_review 用】复习任务数组，每项含 title(节点标题)、date(复习日期 YYYY-MM-DD)、cycle(周期，如'3天')、isOverdue(是否逾期)。从 get_review_schedule 或 get_today_review_status 获取后直接传入即可。",
+        "items": { "type": "object" }
+      },
+      "port": {
+        "type": "number",
+        "description": "API 端口，默认自动读取配置，无需传入"
+      },
+      "token": {
+        "type": "string",
+        "description": "API Token，默认自动读取配置，无需传入"
+      }
+    },
+    "required": ["action"]
+  },
+  "resultHint": "返回操作结果。query 返回任务列表；add/update/complete 返回任务详情；sync_review 返回同步统计。"
+}

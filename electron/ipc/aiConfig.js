@@ -30,6 +30,19 @@ function decryptKey(stored) {
   }
 }
 
+// 掩码显示：只暴露前 4 位 + **** + 后 4 位，绝不回传明文给渲染进程
+function maskKey(key) {
+  if (!key || typeof key !== 'string') return ''
+  if (key.length <= 8) return '****'
+  return key.slice(0, 4) + '****' + key.slice(-4)
+}
+
+// 掩码特征标记：命中该特征说明前端未修改 key（沿用旧值），set-ai-config 时保留原 key
+const MASK_MARK = '****'
+function isMaskedKey(value) {
+  return typeof value === 'string' && value.includes(MASK_MARK)
+}
+
 function decryptProfiles(config) {
   for (const p of (config && config.profiles) || []) {
     if (p && typeof p.apiKey === 'string') p.apiKey = decryptKey(p.apiKey)
@@ -94,7 +107,9 @@ function migrateConfig(raw) {
         model: p.model || '',
         type: p.type === 'vision' ? 'vision' : 'base',
         // URL 自动补全开关（旧配置无此字段 → 默认开启，行为不变）
-        autoComplete: p.autoComplete !== false
+        autoComplete: p.autoComplete !== false,
+        // 自定义 Files API 上传端点（留空则按厂商自动推导内置端点）
+        filesURL: p.filesURL || ''
       })
     }
   } else if (raw.baseURL || raw.apiKey || raw.model) {
@@ -176,6 +191,24 @@ function resolveActiveProfile(config) {
   return profile || { baseURL: '', apiKey: '', model: '' }
 }
 
+// 按 profileId 查明文 apiKey（仅供主进程 aiChat 注入 Authorization 使用，绝不暴露给渲染进程）
+function resolveApiKeyForProfile(profileId) {
+  if (!profileId) return ''
+  const config = readConfig()
+  const p = (config.profiles || []).find(x => x.id === profileId)
+  return p ? (p.apiKey || '') : ''
+}
+
+// 把 profiles 里的 apiKey 替换为掩码（返回新数组，不污染解密后的原配置）
+function maskProfiles(config) {
+  const profiles = (config.profiles || []).map(p => {
+    if (!p) return p
+    const has = !!p.apiKey
+    return { ...p, hasApiKey: has, apiKey: has ? maskKey(p.apiKey) : '' }
+  })
+  return { ...config, profiles }
+}
+
 // 解析多模态使用的配置档（独立的 type:'vision' 配置档，未配置返回 null）
 // 空值回退：多模态档 URL/Key 留空 → 沿用当前活跃基础档的 URL/Key（模型名仍需单独填写）
 // 地址继承时补全开关也一并沿用基础档，避免基础档关闭补全后多模态仍追加后缀
@@ -193,31 +226,62 @@ function resolveVisionProfile(config) {
   }
 }
 
-// 获取 AI 配置（返回完整结构 + 解析后的活跃字段，兼容旧版调用方）
+// 获取 AI 配置（只返回元信息 + 掩码，绝不返回 apiKey 明文，防止渲染进程 XSS 窃取）
 ipcMain.handle('get-ai-config', () => {
   try {
-    const config = readConfig()
-    const active = resolveActiveProfile(config)
+    const masked = maskProfiles(readConfig())
+    const active = resolveActiveProfile(readConfig())
+    // 暴露 safeStorage 可用性：当系统不支持加密时，UI 需明确提示用户 key 以明文存储（fallback）
+    let encryptionAvailable = true
+    try { encryptionAvailable = safeStorage && safeStorage.isEncryptionAvailable && safeStorage.isEncryptionAvailable() } catch (e) { encryptionAvailable = false }
     return {
-      ...config,
+      ...masked,
       baseURL: active.baseURL || '',
-      apiKey: active.apiKey || '',
+      apiKey: active.apiKey ? maskKey(active.apiKey) : '',
+      hasApiKey: !!active.apiKey,
       model: active.model || '',
-      autoComplete: active.autoComplete !== false
+      autoComplete: active.autoComplete !== false,
+      encryptionAvailable
     }
   } catch (error) {
-    return { ...DEFAULT_AI_CONFIG, baseURL: '', apiKey: '', model: '' }
+    return { ...DEFAULT_AI_CONFIG, baseURL: '', apiKey: '', hasApiKey: false, model: '', encryptionAvailable: false }
   }
 })
 
-// 保存 AI 配置（先规范化再加密落盘，保证结构一致）
+// 保存 AI 配置（先规范化再加密落盘）。
+// 前端对未修改的 apiKey 会回传掩码（含 ****），此时保留旧值，避免把掩码当成新 key 覆盖。
 ipcMain.handle('set-ai-config', (event, config) => {
   try {
-    writeConfig(config)
+    const raw = JSON.parse(JSON.stringify(config || {}))
+    const old = readConfig()
+    // profiles 里未修改的 key（掩码）→ 沿用旧值
+    if (Array.isArray(raw.profiles)) {
+      for (const p of raw.profiles) {
+        if (!p) continue
+        const oldP = (old.profiles || []).find(x => x.id === p.id)
+        if (oldP && (isMaskedKey(p.apiKey) || p.apiKey === '')) {
+          p.apiKey = oldP.apiKey
+        }
+      }
+    }
+    writeConfig(raw)
     return { success: true }
   } catch (error) {
     return { success: false, error: error.message }
   }
+})
+
+// 获取 AI 请求超时时长（秒），默认 300（5 分钟），限制 30 秒 ~ 1 小时
+ipcMain.handle('get-ai-timeout', () => {
+  const seconds = Number(store.get('aiTimeoutSeconds', 300)) || 300
+  return Math.min(Math.max(seconds, 30), 3600)
+})
+
+// 保存 AI 请求超时时长（秒）
+ipcMain.handle('set-ai-timeout', (event, seconds) => {
+  const s = Math.min(Math.max(Number(seconds) || 300, 30), 3600)
+  store.set('aiTimeoutSeconds', s)
+  return s
 })
 
 // 导出解析函数供其他模块使用（ocr-smart 等需要解析 profile 的场景）
@@ -231,7 +295,8 @@ function resolveProfileForVision() {
     baseURL: profile.baseURL || '',
     apiKey: profile.apiKey || '',
     model: profile.model || '',
-    autoComplete: profile.autoComplete !== false
+    autoComplete: profile.autoComplete !== false,
+    filesURL: profile.filesURL || ''
   }
 }
 
@@ -241,7 +306,7 @@ function isVisionEnabled() {
   return !!(p && p.baseURL && p.apiKey && p.model)
 }
 
-// 渲染进程查询多模态是否可用及连接信息（带图对话直接发多模态配置档）
+// 渲染进程查询多模态是否可用及连接信息（只返回掩码 + profileId，主进程按 id 注入 key）
 ipcMain.handle('ai:getVisionConfig', () => {
   try {
     const config = readConfig()
@@ -250,12 +315,19 @@ ipcMain.handle('ai:getVisionConfig', () => {
     if (!profile) return { available: false, reason: 'no_profile' }
     if (!profile.baseURL || !profile.apiKey) return { available: false, reason: 'incomplete' }
     if (!profile.model) return { available: false, reason: 'no_model' }
+    // 确定「真正持有 key」的档 id：多模态档自身有 key 用自身 id，否则回退基础档 id
+    // （resolveVisionProfile 的 apiKey 已做过空值回退，需按原始档判断归属，否则按多模态档 id 查不到 key）
+    const rawProfile = (config.profiles || []).find(p => p.id === profile.id)
+    const keyProfileId = rawProfile && rawProfile.apiKey ? rawProfile.id : (config.activeProfileId || '')
     return {
       available: true,
       baseURL: profile.baseURL,
-      apiKey: profile.apiKey,
+      profileId: keyProfileId,
+      apiKey: maskKey(profile.apiKey),
+      hasApiKey: !!profile.apiKey,
       model: profile.model,
-      autoComplete: profile.autoComplete !== false
+      autoComplete: profile.autoComplete !== false,
+      filesURL: profile.filesURL || ''
     }
   } catch (error) {
     return { available: false, reason: error.message }
@@ -287,15 +359,20 @@ function parseModelMeta(m) {
 
 // 通过主进程检测可用模型列表（避免 CORS 限制）
 // 返回 models（id 数组）+ details（含接口元数据识别的多模态标记与上下架状态）
-ipcMain.handle('ai:fetchModels', async (event, { baseURL, apiKey }) => {
+ipcMain.handle('ai:fetchModels', async (event, { baseURL, apiKey, profileId }) => {
   try {
     if (!baseURL) {
       return { success: false, error: '缺少 API 地址' }
     }
     const base = buildBaseURL(baseURL)
+    // apiKey 为掩码（未修改）时按 profileId 查真实 key；否则用前端新输入的明文
+    let key = apiKey || ''
+    if (isMaskedKey(key) && profileId) {
+      key = resolveApiKeyForProfile(profileId)
+    }
     const headers = {}
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey}`
+    if (key) {
+      headers['Authorization'] = `Bearer ${key}`
     }
     // base 已带版本号（/v1、/v4、/compatible-mode/v1 等）直接拼 /models，否则拼 /v1/models，避免双重路径
     const modelsUrl = /\/v\d+[a-z]*$/i.test(base) ? `${base}/models` : `${base}/v1/models`
@@ -371,10 +448,15 @@ function classifyVisionTestError(status, text) {
 }
 
 // 实测探测：向指定配置发送一张真实小图，验证模型是否真的可用于图片识别
-ipcMain.handle('ai:testVisionModel', async (event, { baseURL, apiKey, model, autoComplete }) => {
+ipcMain.handle('ai:testVisionModel', async (event, { baseURL, apiKey, profileId, model, autoComplete }) => {
   try {
     if (!baseURL || !model) {
       return { success: false, error: '缺少 API 地址或模型名称' }
+    }
+    // apiKey 为掩码（未修改）时按 profileId 查真实 key
+    let key = apiKey || ''
+    if (isMaskedKey(key) && profileId) {
+      key = resolveApiKeyForProfile(profileId)
     }
     const url = buildChatURL(baseURL, autoComplete !== false)
     const controller = new AbortController()
@@ -385,7 +467,7 @@ ipcMain.handle('ai:testVisionModel', async (event, { baseURL, apiKey, model, aut
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
+          ...(key ? { Authorization: `Bearer ${key}` } : {})
         },
         body: JSON.stringify({
           model,
@@ -421,4 +503,4 @@ ipcMain.handle('ai:testVisionModel', async (event, { baseURL, apiKey, model, aut
 })
 
 // 导出供 ocr.js 使用
-module.exports = { resolveProfileForVision, isVisionEnabled }
+module.exports = { resolveProfileForVision, isVisionEnabled, resolveApiKeyForProfile }

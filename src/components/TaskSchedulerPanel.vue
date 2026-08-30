@@ -42,6 +42,11 @@
           <span v-if="editingTaskId" class="editing-badge">编辑中</span>
         </div>
 
+        <!-- 权限提示：定时任务默认最高权限 -->
+        <div class="ts-permission-hint">
+          定时任务是最高权限：触发时可直接执行删除、覆盖、上传外发等危险操作，无需二次确认。
+        </div>
+
         <!-- 任务名称 -->
         <div class="form-row">
           <label>任务名称</label>
@@ -134,8 +139,16 @@
             取消
           </button>
           <button
+            class="btn-secondary btn-run-once"
+            @click="saveTask(true)"
+            :disabled="creating || !isFormValid"
+            title="创建任务并立即执行一次（该次执行不影响定时调度计划）"
+          >
+            {{ creating && runAfterSave ? '执行中...' : (editingTaskId ? '保存并立即执行' : '创建并立即执行') }}
+          </button>
+          <button
             class="btn-primary"
-            @click="saveTask"
+            @click="saveTask(false)"
             :disabled="creating || !isFormValid"
           >
             {{ creating
@@ -200,6 +213,14 @@
               {{ formatDatetime(task.datetime) }}
             </span>
             <div class="task-actions">
+              <button
+                class="btn-small btn-run"
+                @click="runTaskNow(task)"
+                :disabled="busyTaskId === task.taskId || runningTaskId === task.taskId"
+                title="立即执行一次（不影响定时调度计划，执行历史标记为手动触发）"
+              >
+                {{ runningTaskId === task.taskId ? '执行中…' : '立即执行' }}
+              </button>
               <button
                 class="btn-small btn-edit"
                 @click="editTask(task)"
@@ -271,7 +292,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'run-now'])
 
 // 面板运行日志（与 AI 对话运行日志同构）
 const runLogVisible = ref(false)
@@ -341,6 +362,9 @@ const syncing = ref(false)
 const syncResult = ref(null)
 // 正在执行删除/启停操作的任务 ID，防止重复点击
 const busyTaskId = ref('')
+// 正在"立即执行"的任务 ID；创建表单点击"创建并立即执行"的标志
+const runningTaskId = ref('')
+const runAfterSave = ref(false)
 
 // ========== 计算属性 ==========
 
@@ -464,10 +488,14 @@ function removePromptMcp(i) { promptMcps.value.splice(i, 1) }
 function removePromptTool(i) { promptTools.value.splice(i, 1) }
 
 function buildTaskPrompt() {
+  const clip = (text, max = 1200) => {
+    const s = String(text || '').trim()
+    return s.length > max ? `${s.slice(0, max)}\n…（内容过长已截断，执行时可用 get_skill/invoke_skill 按 id 读取完整指令）` : s
+  }
   const parts = [newTask.prompt.trim()]
-  if (promptSkills.value.length) parts.push(`【已选用 Skill】\n${promptSkills.value.map(s => `@${s.name}（id=${s.id}）\n${s.instructions || ''}`).join('\n\n')}`)
-  if (promptMcps.value.length) parts.push(`【已选择的 MCP 服务】\n${promptMcps.value.map(m => `#${m.name}${m.description ? '：' + m.description : ''}`).join('\n')}`)
-  if (promptTools.value.length) parts.push(`【已引用工具】\n${promptTools.value.map(t => `/${t.name}${t.description ? '：' + t.description : ''}`).join('\n')}`)
+  if (promptSkills.value.length) parts.push(`【已选用 Skill】\n${promptSkills.value.map(s => `@${s.name}（id=${s.id}）\n${clip(s.instructions, 1200)}`).join('\n\n')}`)
+  if (promptMcps.value.length) parts.push(`【已选择的 MCP 服务】\n${promptMcps.value.map(m => `#${m.name}${m.description ? '：' + clip(m.description, 500) : ''}`).join('\n')}`)
+  if (promptTools.value.length) parts.push(`【已引用工具】\n${promptTools.value.map(t => `/${t.name}${t.description ? '：' + clip(t.description, 500) : ''}`).join('\n')}`)
   return parts.filter(Boolean).join('\n')
 }
 
@@ -539,10 +567,12 @@ function cancelEdit() {
 
 /**
  * 保存任务：editingTaskId 存在时更新，否则新建
+ * @param {boolean} runNow - 保存成功后立即手动执行一次（与定时调度解耦）
  */
-async function saveTask() {
+async function saveTask(runNow = false) {
   if (!isFormValid.value) return
   creating.value = true
+  runAfterSave.value = !!runNow
   createResult.value = null
   const isEdit = !!editingTaskId.value
   const payload = {
@@ -552,15 +582,22 @@ async function saveTask() {
     cycle: newTask.cycle,
     enabled: newTask.enabled
   }
+  let savedTaskId = isEdit ? editingTaskId.value : ''
   try {
     const result = isEdit
       ? await taskSchedulerService.update({ ...payload, taskId: editingTaskId.value })
       : await taskSchedulerService.create(payload)
     if (result.success) {
+      if (result.taskId) savedTaskId = result.taskId
       createResult.value = { success: true, message: isEdit ? '任务已更新' : '任务创建成功' }
       panelLog('info', `${isEdit ? '更新' : '创建'}任务「${payload.name}」成功（${cycleLabel(payload.cycle)} ${payload.datetime}）`)
       resetForm()
       await loadTasks()
+      // 立即执行：与定时调度解耦的手动触发，不改变首次调度时间
+      if (runNow && savedTaskId) {
+        const saved = tasks.value.find(t => t.taskId === savedTaskId)
+        if (saved) runTaskNow(saved)
+      }
     } else {
       const action = isEdit ? '更新' : '创建'
       createResult.value = { success: false, message: `${action}失败: ${briefError(result.error)}` }
@@ -575,6 +612,7 @@ async function saveTask() {
     panelLog('error', `${action}任务「${payload.name}」失败: ${briefError(err.message)}`)
   } finally {
     creating.value = false
+    runAfterSave.value = false
   }
 }
 
@@ -647,6 +685,24 @@ async function toggleTask(task) {
   } finally {
     busyTaskId.value = ''
   }
+}
+
+/**
+ * 立即执行一次任务（手动触发）
+ * 与定时调度完全解耦：不经过 schtasks、不改变首次调度时间/周期起始点，
+ * 执行结果只写入定时端运行日志并标记为"手动触发"。
+ */
+function runTaskNow(task) {
+  if (!task || !task.taskId) return
+  if (runningTaskId.value) return
+  runningTaskId.value = task.taskId
+  panelLog('info', `手动触发任务「${task.name}」开始执行（不影响定时调度计划）`)
+  emit('run-now', task.taskId)
+  // 执行状态由 App 层异步完成，这里只负责防止重复点击；
+  // 10 秒后自动恢复按钮，避免 UI 永久卡在"执行中…"
+  setTimeout(() => {
+    if (runningTaskId.value === task.taskId) runningTaskId.value = ''
+  }, 10000)
 }
 
 /**
@@ -933,6 +989,17 @@ onMounted(() => {
   border-radius: var(--radius-full);
 }
 
+.ts-permission-hint {
+  margin: 2px 0 10px 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8a5a00;
+  background-color: rgba(255, 149, 0, 0.08);
+  border: 1px solid rgba(255, 149, 0, 0.3);
+  border-radius: 6px;
+}
+
 .sync-hint {
   font-size: 12px;
   color: var(--text-secondary);
@@ -1153,6 +1220,25 @@ input[type="datetime-local"].form-input {
 .btn-edit:hover {
   background-color: rgba(0, 122, 255, 0.1);
   color: var(--apple-blue);
+}
+
+.btn-run {
+  color: var(--apple-green);
+}
+
+.btn-run:hover {
+  background-color: rgba(52, 199, 89, 0.1);
+  color: var(--apple-green);
+}
+
+/* 表单区"创建并立即执行"次按钮：绿色描边，与主按钮区分 */
+.btn-run-once {
+  color: var(--apple-green);
+  border: 1px solid rgba(52, 199, 89, 0.45);
+}
+
+.btn-run-once:hover {
+  background-color: rgba(52, 199, 89, 0.1);
 }
 
 .btn-danger {

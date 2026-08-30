@@ -13,12 +13,37 @@
  */
 const { ipcMain, BrowserWindow } = require('electron')
 const crypto = require('crypto')
+const fs = require('fs')
+const path = require('path')
 const store = require('../utils/store')
+const { encryptString, decryptString } = require('../utils/secureStore')
 
 const WECHAT_CONFIG_KEY = 'wechat_config'
 const WECHAT_CONTACTS_KEY = 'wechat_contacts'
 // getupdates 游标持久化：对齐官方插件 sync-buf，重启后从断点续收，避免监听间隙的消息丢失
 const WECHAT_SYNC_BUF_KEY = 'wechat_sync_buf'
+
+// 文件路径安全校验（防止路径遍历和空字节注入）
+function assertSafeFilePath(filePath, maxSizeMB = 100) {
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    throw new Error('文件路径无效')
+  }
+  if (filePath.includes('\0') || /[\x00-\x1f\x7f]/.test(filePath)) {
+    throw new Error('路径包含非法字符')
+  }
+  const resolved = path.resolve(filePath)
+  if (!fs.existsSync(resolved)) {
+    throw new Error('文件不存在: ' + resolved)
+  }
+  const stat = fs.statSync(resolved)
+  if (!stat.isFile()) {
+    throw new Error('路径不是文件')
+  }
+  if (stat.size > maxSizeMB * 1024 * 1024) {
+    throw new Error(`文件过大（超过 ${maxSizeMB}MB）`)
+  }
+  return resolved
+}
 
 // 官方 openclaw-weixin 插件协议常量
 const FIXED_BASE_URL = 'https://ilinkai.weixin.qq.com'
@@ -28,7 +53,7 @@ const ILINK_APP_ID = 'bot'
 // iLink-App-ClientVersion：0x00MMNNPP（2.4.6 → 131072+1024+6）
 const ILINK_APP_CLIENT_VERSION = 132102
 const CHANNEL_VERSION = '2.4.6'
-const BOT_AGENT = 'MindMapAgent/1.0.0'
+const BOT_AGENT = 'MindMapAgent/2.0.0'
 
 // 扫码状态接口为长轮询（服务端 hold 最长约 35 秒），客户端超时需大于它
 const QR_POLL_TIMEOUT_MS = 40_000
@@ -38,7 +63,7 @@ const API_TIMEOUT_MS = 15_000
 /* ========== 配置与联系人存取 ========== */
 
 function getConfig() {
-  return store.get(WECHAT_CONFIG_KEY) || {
+  const config = store.get(WECHAT_CONFIG_KEY) || {
     enabled: false,
     token: '',
     botId: '',
@@ -47,16 +72,26 @@ function getConfig() {
     loginTime: '',
     defaultContactId: ''
   }
+  if (typeof config.token === 'string') config.token = decryptString(config.token)
+  return config
 }
 
 function saveConfig(patch) {
   const config = { ...getConfig(), ...patch }
+  // bot token 使用 safeStorage 加密落盘
+  if (typeof config.token === 'string') config.token = encryptString(config.token)
   store.set(WECHAT_CONFIG_KEY, config)
   return config
 }
 
 function getContacts() {
-  return store.get(WECHAT_CONTACTS_KEY) || {}
+  const contacts = store.get(WECHAT_CONTACTS_KEY) || {}
+  // contextToken 密文 → 解密返回
+  for (const uid of Object.keys(contacts)) {
+    const c = contacts[uid]
+    if (c && typeof c.contextToken === 'string') c.contextToken = decryptString(c.contextToken)
+  }
+  return contacts
 }
 
 function saveContact(userId, contextToken, name) {
@@ -67,6 +102,11 @@ function saveContact(userId, contextToken, name) {
     name: name || contacts[userId]?.name || '',
     contextToken: contextToken || contacts[userId]?.contextToken || '',
     lastTime: Date.now()
+  }
+  // contextToken 明文 → 加密落盘
+  for (const uid of Object.keys(contacts)) {
+    const c = contacts[uid]
+    if (c && typeof c.contextToken === 'string') c.contextToken = encryptString(c.contextToken)
   }
   store.set(WECHAT_CONTACTS_KEY, contacts)
 }
@@ -437,12 +477,8 @@ async function uploadMediaToCDN(buf, mediaType, toUserId, sizeLimitBytes, sizeLa
  * @param {string} filePath 本地图片路径
  */
 async function sendImageMessage(toUserId, filePath) {
-  const fs = require('fs')
-  const path = require('path')
-  if (!filePath || !fs.existsSync(filePath)) {
-    throw new Error('图片文件不存在')
-  }
-  const buf = fs.readFileSync(filePath)
+  const safePath = assertSafeFilePath(filePath, 10)
+  const buf = fs.readFileSync(safePath)
 
   const contacts = getContacts()
   const target = toUserId && contacts[toUserId]
@@ -491,7 +527,7 @@ async function sendImageMessage(toUserId, filePath) {
     success: true,
     to: target.userId,
     messageId: resp.message_id || '',
-    fileName: path.basename(filePath)
+    fileName: path.basename(safePath)
   }
 }
 
@@ -501,12 +537,8 @@ async function sendImageMessage(toUserId, filePath) {
  * @param {string} filePath 本地文件路径
  */
 async function sendFileMessage(toUserId, filePath) {
-  const fs = require('fs')
-  const path = require('path')
-  if (!filePath || !fs.existsSync(filePath)) {
-    throw new Error('文件不存在')
-  }
-  const buf = fs.readFileSync(filePath)
+  const safePath = assertSafeFilePath(filePath, 30)
+  const buf = fs.readFileSync(safePath)
 
   const contacts = getContacts()
   const target = toUserId && contacts[toUserId]
@@ -541,7 +573,7 @@ async function sendFileMessage(toUserId, filePath) {
             aes_key: Buffer.from(aeskeyHex).toString('base64'),
             encrypt_type: 1
           },
-          file_name: path.basename(filePath),
+          file_name: path.basename(safePath),
           md5: crypto.createHash('md5').update(buf).digest('hex'),
           len: String(filesize)
         }
@@ -583,12 +615,13 @@ function processViaRenderer(text, fromUserId, senderName) {
   const msgId = `wechat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   const replyPromise = new Promise((resolve, reject) => {
     pendingMessages.set(msgId, { resolve, reject })
+    const timeoutMs = store.getAiTimeoutMs()
     setTimeout(() => {
       if (pendingMessages.has(msgId)) {
         pendingMessages.delete(msgId)
-        reject(new Error('AI 处理超时（120秒）'))
+        reject(new Error(`AI 处理超时（${Math.round(timeoutMs / 1000)}秒）`))
       }
-    }, 120000)
+    }, timeoutMs)
   })
 
   const sender = getRendererSender()

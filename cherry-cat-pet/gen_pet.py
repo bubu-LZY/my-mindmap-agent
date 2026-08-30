@@ -358,7 +358,7 @@ def gen_look_directions(atlas, row_idx):
 
 
 def main():
-    ws = r'C:\Users\lizhu\Desktop\my-mindmap agent 2608200101\cherry-cat-pet'
+    ws = os.path.dirname(os.path.abspath(__file__))
     atlas = Image.new('RGBA', (ATLAS_W, ATLAS_H), TRANSPARENT)
     
     print("Generating idle (row 0)...")

@@ -1,6 +1,20 @@
 <template>
   <!-- mousedown.prevent：点击工具栏不夺走节点编辑焦点，否则 blur 先于 click 清空目标节点导致按钮禁用 -->
-  <div class="fixed-toolbar" ref="toolbarRef" @mousedown.prevent>
+  <div
+    class="fixed-toolbar"
+    :class="{ 'is-dragging': isDragging }"
+    ref="toolbarRef"
+    :style="{ transform: 'translate(calc(-50% + ' + dragOffset.x + 'px), ' + dragOffset.y + 'px)' }"
+    @mousedown.prevent
+  >
+    <!-- 抓手：拖动整个工具条（双击重置为默认位置） -->
+    <span
+      class="ft-drag-handle"
+      :class="{ active: isDragging }"
+      @pointerdown.stop.prevent="onDragHandleDown"
+      @dblclick.stop.prevent="onDragHandleDblClick"
+      title="按住可拖动工具条（双击重置位置）"
+    >⋮⋮</span>
     <!-- 文字颜色 -->
     <div class="ft-group">
       <button class="ft-btn" :class="{ disabled }" title="文字颜色" @click="togglePanel('color')">
@@ -153,6 +167,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { textColors, highlightColors } from '../utils/textStyle'
+import { useDraggableToolbar } from '../composables/useDraggableToolbar'
 
 const props = defineProps({
   disabled: { type: Boolean, default: true },
@@ -162,6 +177,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['apply', 'note', 'gen', 'toggle-cloze', 'hide-cloze', 'show-cloze', 'export', 'format-painter'])
+// 工具条拖动（review：把顶部固定工具条改为可拖动，默认位置不变，跨视图持久化）
+const { dragOffset, isDragging, onDragHandleDown, onDragHandleDblClick } = useDraggableToolbar('outline-toolbar-offset')
 
 const toolbarRef = ref(null)
 const panel = ref(null)
@@ -183,7 +200,9 @@ const fontSizeList = [12, 14, 16, 18, 20, 24, 28, 32, 40, 48]
 
 const exportList = [
   { type: 'copy-md', label: '复制 Markdown 文本' },
-  { type: 'html', label: 'HTML 文件' },
+  { type: 'html', label: '大纲 HTML 文件' },
+  { type: 'tri-html', label: '三模式 HTML（导图+大纲+关联图）' },
+  { type: 'graph-html', label: '关联图 HTML' },
   { type: 'pdf', label: 'PDF 文件' },
   { type: 'json', label: 'JSON 数据' },
   { type: 'smm', label: 'SMM 导图文件' },
@@ -232,6 +251,29 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 </script>
 
 <style scoped>
+/* 工具条拖动：抓手与拖动态 */
+.fixed-toolbar.is-dragging { box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
+.fixed-toolbar.is-dragging * { cursor: move !important; }
+.ft-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 28px;
+  margin: 0 6px 0 2px;
+  color: rgba(0,0,0,0.35);
+  font-size: 12px;
+  letter-spacing: -1px;
+  line-height: 1;
+  user-select: none;
+  cursor: move;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.ft-drag-handle:hover { background: rgba(0,0,0,0.05); color: rgba(0,0,0,0.55); }
+.ft-drag-handle.active { background: rgba(64,158,255,0.15); color: #409eff; }
+
 .fixed-toolbar {
   position: relative;
   z-index: 50;

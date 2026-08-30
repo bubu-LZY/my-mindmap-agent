@@ -52,16 +52,26 @@ async function uniquePath(p) {
 
 // 判断是否为支持的文件类型
 function isSupportFile(name) {
-  return /\.(smm|md|json)$/i.test(name)
+  // 文档类（PDF/Word/Excel/CSV/纯文本）在目录树中可见，点击用文档查看器原样打开
+  return /\.(smm|md|json|pdf|docx|xlsx|xls|csv|tsv|txt|log|html|xml)$/i.test(name)
 }
 
-// 路径安全校验：拒绝空字节注入；破坏性操作（删除/移动/重命名）额外拦截系统关键目录
+// 路径安全校验：
+// 1. 拒绝空字节注入
+// 2. 拒绝换行符、制表符等控制字符
+// 3. 破坏性操作（删除/移动/重命名）额外拦截系统关键目录
 function assertSafePath(rawPath, opts = {}) {
   const s = typeof rawPath === 'string' ? rawPath : ''
   if (!s.trim()) throw new Error('路径无效')
+  // 空字节注入
   if (s.includes('\0')) throw new Error('路径包含非法字符')
-  // 只对非空、已解析出根目录的绝对路径做关键目录拦截（相对路径交给上层 join 后再判断）
+  // 控制字符检测（换行、回车、制表符等不应出现在路径中）
+  if (/[\x00-\x1f\x7f]/.test(s)) throw new Error('路径包含非法控制字符')
+
+  const normalized = path.normalize(s)
   const target = path.resolve(s)
+
+  // 只对非空、已解析出根目录的绝对路径做关键目录拦截（相对路径交给上层 join 后再判断）
   if (opts.destructive && path.isAbsolute(target)) {
     const lower = target.toLowerCase()
     const root = path.parse(target).root.toLowerCase()
@@ -80,12 +90,135 @@ function assertSafePath(rawPath, opts = {}) {
       }
     }
   }
-  return path.normalize(s)
+  return normalized
 }
+
+// ============ 路径白名单（review C.1：fs IPC 路径安全加固）============
+// 渲染层每次"打开 .smm"或用户选文件后，主进程把该目录加入 allowedPaths。
+// 写/删除类破坏性操作仅限：当前激活 .smm 所在目录 + userData + 临时目录。
+// 读操作额外允许 userData / documents / downloads / desktop / 选中文件的目录。
+// 没注册任何 allowedPaths 时保持原行为（向后兼容），但仍拦截破坏性关键系统目录。
+
+const __allowedPathRoots = new Set()  // 渲染层注册的白名单根目录（绝对路径，已 normalize + lowercase Windows）
+let __activeFileDir = ''              // 当前激活 .smm 文件所在目录
+
+// 把绝对路径 normalize 成统一的比较形式（Windows 大小写不敏感）
+function normalizeRoot(p) {
+  try {
+    const r = path.resolve(String(p || ''))
+    return process.platform === 'win32' ? r.toLowerCase().replace(/\\/g, '/') : r
+  } catch (e) { return '' }
+}
+
+function pathIsUnder(child, parent) {
+  if (!child || !parent) return false
+  const a = normalizeRoot(child)
+  const b = normalizeRoot(parent)
+  if (!a || !b) return false
+  // 必须以 parent + '/' 开头（避免 /a/bc 命中 /a/b）
+  return a === b || a.startsWith(b + '/')
+}
+
+const __safeAlwaysRoots = new Set([
+  normalizeRoot(app.getPath('userData')),
+  normalizeRoot(app.getPath('temp')),
+  normalizeRoot(require('os').tmpdir())
+])
+
+function isUnderSafeAlways(p) {
+  if (!p) return false
+  for (const root of __safeAlwaysRoots) {
+    if (pathIsUnder(p, root)) return true
+  }
+  return false
+}
+
+function isUnderAllowedRoots(p) {
+  if (!p) return false
+  for (const root of __allowedPathRoots) {
+    if (pathIsUnder(p, root)) return true
+  }
+  return false
+}
+
+// 主进程 / 渲染层注册 API
+ipcMain.handle('fsGuard:setActiveFileDir', (_event, dir) => {
+  __activeFileDir = normalizeRoot(String(dir || ''))
+  if (__activeFileDir) __allowedPathRoots.add(__activeFileDir)
+  return { ok: true, activeFileDir: __activeFileDir }
+})
+ipcMain.handle('fsGuard:addAllowed', (_event, dirs) => {
+  const list = Array.isArray(dirs) ? dirs : [dirs]
+  for (const d of list) {
+    const n = normalizeRoot(String(d || ''))
+    if (n) __allowedPathRoots.add(n)
+  }
+  return { ok: true, count: __allowedPathRoots.size }
+})
+ipcMain.handle('fsGuard:reset', () => {
+  __allowedPathRoots.clear()
+  __activeFileDir = ''
+  return { ok: true }
+})
+
+/**
+ * 第二道防线：路径白名单检查（review C.1）
+ * - opts.readOnly=true：放行 userData 全部 + 临时 + 活跃 .smm 所在目录 + 注册的 allowedRoots + 桌面/下载/文档
+ * - opts.destructive=true（默认）：仅放行 userData + 临时 + 活跃 .smm 所在目录
+ * - opts.skipGuard=true：跳过（向后兼容给现有已信任路径用）
+ */
+function assertPathAllowed(rawPath, opts = {}) {
+  if (opts.skipGuard) return
+  const p = String(rawPath || '')
+  if (!p) return
+  const target = path.resolve(p)
+  // 1. 永远放行 userData / temp / 系统临时（应用自有空间）
+  if (isUnderSafeAlways(target)) return
+  // 2. 没注册任何白名单：保持向后兼容（assertSafePath 仍会拦住系统关键目录）
+  if (__allowedPathRoots.size === 0 && !__activeFileDir) return
+  // 3. 注册过的目录 / 活跃 .smm 所在目录：放行
+  if (opts.destructive) {
+    if (__activeFileDir && pathIsUnder(target, __activeFileDir)) return
+    if (isUnderAllowedRoots(target)) return
+    // 破坏性操作：沙盒内未通过则拒绝
+    throw new Error('不在允许的写入范围内：' + p + '（仅允许写入到当前打开的导图所在目录、用户数据目录或系统临时目录）')
+  }
+  // read-only: 额外放行 documents/downloads/desktop
+  const extra = [app.getPath('documents'), app.getPath('downloads'), app.getPath('desktop')].filter(Boolean)
+  for (const dir of extra) {
+    if (pathIsUnder(target, normalizeRoot(dir))) return
+  }
+  if (__activeFileDir && pathIsUnder(target, __activeFileDir)) return
+  if (isUnderAllowedRoots(target)) return
+  throw new Error('不在允许的读取范围内：' + p + '（请确认文件所属目录已被本应用信任）')
+}
+
 
 // 保存文件（用户手动保存 / 自动保存 / AI 工具链共用）
 // overwrite=true：用户保存与自动保存，覆盖原文件（正常保存语义）
 // overwrite 缺省：AI 工具保存，目标已存在时自动改名（"文件名 (1)"），避免静默覆盖用户的同名旧文件
+// 版本快照：覆盖保存前把旧版本备份到 <目录>/.smm_versions/<文件名>/，保留最近 N 个
+const VERSION_DIR = '.smm_versions'
+const MAX_VERSIONS = 5
+
+async function backupFileVersion(filePath) {
+  try {
+    const dir = path.dirname(filePath)
+    const base = path.basename(filePath)
+    const versionDir = path.join(dir, VERSION_DIR, base)
+    if (!fs.existsSync(versionDir)) fs.mkdirSync(versionDir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const backupPath = path.join(versionDir, `${base}.${stamp}.bak`)
+    await fs.promises.copyFile(filePath, backupPath)
+    // 清理超过上限的旧版本（按文件名时间戳排序，删最旧的）
+    const files = (await fs.promises.readdir(versionDir)).filter(f => f.endsWith('.bak')).sort()
+    while (files.length > MAX_VERSIONS) {
+      const oldest = files.shift()
+      try { await fs.promises.unlink(path.join(versionDir, oldest)) } catch {}
+    }
+  } catch { /* 备份失败不影响保存 */ }
+}
+
 ipcMain.handle('save-file', async (event, { filename, data, overwrite }) => {
   let filePath = ''
   try {
@@ -98,9 +231,16 @@ ipcMain.handle('save-file', async (event, { filename, data, overwrite }) => {
       filePath = path.join(defaultDir, filename)
     }
     assertSafePath(filePath, { destructive: true })
+    // 路径白名单检查
+    try { assertPathAllowed(filePath, { destructive: true }) } catch (e) { throw new Error('写入被拒绝: ' + e.message) }
 
     if (!overwrite && (await exists(filePath))) {
       filePath = await uniquePath(filePath)
+    }
+
+    // 覆盖保存前备份旧版本，便于误改后回滚
+    if (overwrite && (await exists(filePath))) {
+      await backupFileVersion(filePath)
     }
 
     const fileDir = path.dirname(filePath)
@@ -114,6 +254,32 @@ ipcMain.handle('save-file', async (event, { filename, data, overwrite }) => {
     return { success: true, filePath }
   } catch (error) {
     return { success: false, error: `${error.message}（写入目标：${filePath || filename}）` }
+  }
+})
+
+// 列出文件的版本快照（覆盖保存时自动备份的历史版本）
+ipcMain.handle('list-file-versions', async (event, filePath) => {
+  try {
+    const dir = path.dirname(filePath)
+    const base = path.basename(filePath)
+    const versionDir = path.join(dir, VERSION_DIR, base)
+    if (!fs.existsSync(versionDir)) return []
+    const files = (await fs.promises.readdir(versionDir)).filter(f => f.endsWith('.bak')).sort().reverse()
+    return files.map(f => ({ name: f, path: path.join(versionDir, f) }))
+  } catch {
+    return []
+  }
+})
+
+// 恢复某个版本快照（把备份内容复制回原文件）
+ipcMain.handle('restore-file-version', async (event, filePath, versionPath) => {
+  try {
+    assertSafePath(filePath, { destructive: true })
+    assertSafePath(versionPath, { destructive: true })
+    await fs.promises.copyFile(versionPath, filePath)
+    return { success: true, filePath }
+  } catch (error) {
+    return { success: false, error: error.message }
   }
 })
 
@@ -131,6 +297,8 @@ ipcMain.handle('save-binary-file', async (event, { filename, base64 }) => {
       filePath = path.join(defaultDir, filename)
     }
     assertSafePath(filePath, { destructive: true })
+    // 路径白名单检查
+    try { assertPathAllowed(filePath, { destructive: true }) } catch (e) { throw new Error('写入被拒绝: ' + e.message) }
 
     if (await exists(filePath)) {
       filePath = await uniquePath(filePath)
@@ -153,6 +321,9 @@ ipcMain.handle('save-binary-file', async (event, { filename, base64 }) => {
 // 打开/读取文件
 ipcMain.handle('open-file', async (event, { filePath }) => {
   try {
+    assertSafePath(filePath)
+    // 路径白名单检查（读操作）
+    try { assertPathAllowed(filePath, { readOnly: true }) } catch (e) { throw new Error('读取被拒绝: ' + e.message) }
     const ext = path.extname(filePath).toLowerCase()
     let data, isMarkdown = false, isXmind = false
     if (ext === '.xmind') {
@@ -324,6 +495,9 @@ ipcMain.handle('fs:selectFolder', async () => {
 // 列出目录内容（懒加载）
 ipcMain.handle('fs:listDir', async (event, dirPath) => {
   try {
+    assertSafePath(dirPath)
+    // 路径白名单检查（读操作）
+    try { assertPathAllowed(dirPath, { readOnly: true }) } catch (e) { throw new Error('访问被拒绝: ' + e.message) }
     const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
     const dirs = []
     const files = []
@@ -338,7 +512,7 @@ ipcMain.handle('fs:listDir', async (event, dirPath) => {
       }
     }
     const byName = (a, b) => a.name.localeCompare(b.name, 'zh-CN')
-    return [...dirs.sort(byName), ...files.sort(byName)] // 文件夹在前
+    return [...files.sort(byName), ...dirs.sort(byName)] // 文件在前，文件夹在后
   } catch (error) {
     console.error('列出目录失败:', error)
     return []
@@ -348,15 +522,32 @@ ipcMain.handle('fs:listDir', async (event, dirPath) => {
 // 读取文件
 ipcMain.handle('fs:readFile', async (event, filePath) => {
   try {
+    assertSafePath(filePath)
+    // 路径白名单检查（读操作）
+    try { assertPathAllowed(filePath, { readOnly: true }) } catch (e) { throw new Error('读取被拒绝: ' + e.message) }
     return await fs.promises.readFile(filePath, 'utf8')
   } catch (error) {
     throw new Error('读取文件失败: ' + error.message)
   }
 })
 
+// 文件元信息（mtime 供知识库索引判断是否需要重建）
+ipcMain.handle('fs:stat', async (event, filePath) => {
+  try {
+    assertSafePath(filePath)
+    const stat = await fs.promises.stat(filePath)
+    return { success: true, mtime: stat.mtime.toISOString(), size: stat.size }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
 // 读取二进制文件（docx/pdf 等，返回 base64 供渲染进程解压解析）
 ipcMain.handle('fs:readBinary', async (event, filePath) => {
   try {
+    assertSafePath(filePath)
+    // 路径白名单检查（读操作）
+    try { assertPathAllowed(filePath, { readOnly: true }) } catch (e) { throw new Error('读取被拒绝: ' + e.message) }
     const stat = await fs.promises.stat(filePath)
     // 上限 64MB，防御异常大文件撑爆 IPC
     if (stat.size > 64 * 1024 * 1024) {
@@ -372,6 +563,9 @@ ipcMain.handle('fs:readBinary', async (event, filePath) => {
 // 写入文件
 ipcMain.handle('fs:writeFile', async (event, filePath, content) => {
   try {
+        // review C.1: 路径白名单检查（防御 XSS 渗透后跨目录写文件）
+    try { assertPathAllowed(filePath, { destructive: true }) } catch (e) { throw new Error('写入被拒绝: ' + e.message) }
+    assertSafePath(filePath, { destructive: true })
     assertSafePath(filePath, { destructive: true })
     await fs.promises.writeFile(filePath, content, 'utf8')
     return true
@@ -383,6 +577,9 @@ ipcMain.handle('fs:writeFile', async (event, filePath, content) => {
 // 写入二进制文件（base64 → 磁盘）
 ipcMain.handle('fs:writeBinary', async (event, filePath, base64Data) => {
   try {
+        // review C.1
+    try { assertPathAllowed(filePath, { destructive: true }) } catch (e) { throw new Error('写入被拒绝: ' + e.message) }
+    assertSafePath(filePath, { destructive: true })
     assertSafePath(filePath, { destructive: true })
     const buffer = Buffer.from(base64Data, 'base64')
     await fs.promises.writeFile(filePath, buffer)
@@ -407,6 +604,9 @@ ipcMain.handle('fs:getTempDir', async () => {
 // 重命名
 ipcMain.handle('fs:rename', async (event, oldPath, newPath) => {
   try {
+        // review C.1: 重命名也对路径做白名单
+    try { assertPathAllowed(newPath, { destructive: true }) } catch (e) { throw new Error('重命名被拒绝: ' + e.message) }
+    assertSafePath(newPath, { destructive: true })
     assertSafePath(oldPath, { destructive: true })
     assertSafePath(newPath, { destructive: true })
     if (await exists(newPath)) throw new Error('目标名称已存在')
@@ -472,6 +672,8 @@ ipcMain.handle('fs:remove', async (event, rawPath) => {
 ipcMain.handle('fs:mkdir', async (event, dirPath) => {
   try {
     assertSafePath(dirPath, { destructive: true })
+    // 路径白名单检查
+    try { assertPathAllowed(dirPath, { destructive: true }) } catch (e) { throw new Error('创建被拒绝: ' + e.message) }
     const target = await uniquePath(path.normalize(dirPath))
     await fs.promises.mkdir(target, { recursive: true })
     return target
@@ -484,8 +686,13 @@ ipcMain.handle('fs:mkdir', async (event, dirPath) => {
 ipcMain.handle('fs:createFile', async (event, filePath, content) => {
   try {
     assertSafePath(filePath, { destructive: true })
+    // 路径白名单检查
+    try { assertPathAllowed(filePath, { destructive: true }) } catch (e) { throw new Error('创建被拒绝: ' + e.message) }
     const target = await uniquePath(path.normalize(filePath))
-    const defaultContent = content || JSON.stringify({ data: { text: '<p><span>中心主题</span></p>', uid: 'root-' + Date.now(), richText: true }, children: [] }, null, 2)
+    // 根节点默认用文件名（不带扩展名），而非「中心主题」
+    const rootName = (path.basename(target, path.extname(target)) || '中心主题')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const defaultContent = content || JSON.stringify({ data: { text: `<p><span>${rootName}</span></p>`, uid: 'root-' + Date.now(), richText: true }, children: [] }, null, 2)
     await fs.promises.writeFile(target, defaultContent, 'utf8')
     return target
   } catch (error) {
@@ -498,6 +705,9 @@ ipcMain.handle('fs:move', async (event, src, destDir) => {
   try {
     assertSafePath(src, { destructive: true })
     assertSafePath(destDir, { destructive: true })
+    // 路径白名单检查（源和目标都需通过）
+    try { assertPathAllowed(src, { destructive: true }) } catch (e) { throw new Error('移动被拒绝: ' + e.message) }
+    try { assertPathAllowed(destDir, { destructive: true }) } catch (e) { throw new Error('移动被拒绝: ' + e.message) }
     const target = path.join(destDir, path.basename(src))
     if (path.resolve(target) === path.resolve(src)) return src
     if (await exists(target)) throw new Error('目标位置已存在同名文件或文件夹')
@@ -510,6 +720,11 @@ ipcMain.handle('fs:move', async (event, src, destDir) => {
 
 // 检查路径是否存在
 ipcMain.handle('fs:exists', async (event, filePath) => {
+  try {
+    assertSafePath(filePath)
+  } catch {
+    return false
+  }
   return await exists(filePath)
 })
 
@@ -559,12 +774,15 @@ ipcMain.handle('fs:findFile', async (event, opts) => {
         searchRoots.push(p)
       }
     }
-    try { addRoot(app.getPath('desktop')) } catch {}
-    try { addRoot(app.getPath('documents')) } catch {}
-    try { addRoot(app.getPath('downloads')) } catch {}
-    addRoot(getDefaultSaveDir())
-    addRoot(process.cwd())
-    addRoot(path.join(os.homedir(), 'Desktop'))
+    // onlyDirs=true：只用 opts.dirs 作为搜索根（MCP 等场景限定访问范围为目录树内），不追加桌面/文档/下载等默认目录
+    if (!opts?.onlyDirs) {
+      try { addRoot(app.getPath('desktop')) } catch {}
+      try { addRoot(app.getPath('documents')) } catch {}
+      try { addRoot(app.getPath('downloads')) } catch {}
+      addRoot(getDefaultSaveDir())
+      addRoot(process.cwd())
+      addRoot(path.join(os.homedir(), 'Desktop'))
+    }
     if (Array.isArray(opts.dirs)) opts.dirs.forEach(d => addRoot(String(d)))
 
     const results = []
@@ -607,3 +825,11 @@ ipcMain.handle('fs:findFile', async (event, opts) => {
     return { success: false, error: error.message }
   }
 })
+
+// 导出白名单检查函数，供其他 IPC 模块（如 referenceManager）复用统一的白名单逻辑
+module.exports = {
+  assertPathAllowed,
+  isUnderAllowedRoots,
+  getDefaultSaveDir,
+  get allowedPathRoots() { return __allowedPathRoots }
+}

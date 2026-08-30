@@ -177,7 +177,7 @@ function createScheduledTask(task) {
         resolve({ success: false, error: '任务元数据保存失败: ' + e.message })
         return
       }
-      resolve({ success: true, skipped: true })
+      resolve({ success: true, skipped: true, taskId: task.taskId })
       return
     }
 
@@ -223,7 +223,7 @@ function createScheduledTask(task) {
         resolve({ success: false, error: '任务元数据保存失败: ' + e.message })
         return
       }
-      resolve({ success: true })
+      resolve({ success: true, taskId: task.taskId })
     })
   })
 }
