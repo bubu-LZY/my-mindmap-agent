@@ -1,0 +1,230 @@
+/* ============================================
+   Apple Design System - CSS Variables
+   ============================================ */
+
+:root {
+  /* --- Brand Colors --- */
+  --apple-blue: #007AFF;
+  --apple-green: #34C759;
+  --apple-orange: #FF9500;
+  --apple-red: #FF3B30;
+  --apple-purple: #AF52DE;
+  --apple-pink: #FF2D55;
+  --apple-teal: #5AC8FA;
+  --apple-indigo: #5856D6;
+
+  /* --- Backgrounds --- */
+  --sidebar-bg: rgba(245, 245, 247, 0.8);
+  --main-bg: #FFFFFF;
+  --ai-panel-bg: rgba(255, 255, 255, 0.9);
+  --navbar-bg: rgba(245, 245, 247, 0.8);
+  --status-bar-bg: rgba(245, 245, 247, 0.8);
+  --card-bg: rgba(255, 255, 255, 0.72);
+  --overlay-bg: rgba(0, 0, 0, 0.4);
+  --input-bg: rgba(0, 0, 0, 0.03);
+
+  /* --- Text Colors --- */
+  --text-primary: #1D1D1F;
+  --text-secondary: #86868B;
+  --text-tertiary: #AEAEB2;
+  --text-on-blue: #FFFFFF;
+
+  /* --- Borders --- */
+  --border-color: rgba(0, 0, 0, 0.06);
+  --border-color-strong: rgba(0, 0, 0, 0.1);
+  --border-color-focus: var(--apple-blue);
+
+  /* --- Chat Bubbles --- */
+  --bubble-user: #007AFF;
+  --bubble-ai: #E9E9EB;
+
+  /* --- Blur & Glass --- */
+  --blur-amount: blur(20px);
+  --blur-saturate: saturate(180%);
+
+  /* --- Shadows --- */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  --shadow-elevated: 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
+  --shadow-floating: 0 8px 32px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
+  --shadow-modal: 0 20px 60px rgba(0, 0, 0, 0.15), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+
+  /* --- Focus Ring --- */
+  --focus-ring: 0 0 0 3px rgba(0, 122, 255, 0.12);
+
+  /* --- Radius --- */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-full: 9999px;
+
+  /* --- Transitions --- */
+  --transition-fast: 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --transition-standard: 0.3s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --transition-bounce: 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* --- Font --- */
+  --font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text',
+    'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+
+  /* --- Layout Dimensions --- */
+  --navbar-height: 30px;
+  --sidebar-width: 300px;
+  --sidebar-width-review: 400px;
+  --ai-panel-width: 360px;
+  --status-bar-height: 28px;
+}
+
+/* ============================================
+   Global Reset
+   ============================================ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font-family);
+  font-size: 14px;
+  color: var(--text-primary);
+  background-color: var(--main-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+/* ============================================
+   Selection Style
+   ============================================ */
+
+::selection {
+  background-color: rgba(0, 122, 255, 0.2);
+  color: var(--text-primary);
+}
+
+::-moz-selection {
+  background-color: rgba(0, 122, 255, 0.2);
+  color: var(--text-primary);
+}
+
+/* ============================================
+   Scrollbar Style (macOS-like thin scrollbar)
+   ============================================ */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.15);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.25);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: rgba(0, 0, 0, 0.35);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+
+/* ============================================
+   Utility: Glass effect
+   ============================================ */
+
+.glass {
+  background-color: var(--sidebar-bg);
+  -webkit-backdrop-filter: var(--blur-amount) var(--blur-saturate);
+  backdrop-filter: var(--blur-amount) var(--blur-saturate);
+}
+
+/* ============================================
+   Element Plus Overrides (global)
+   ============================================ */
+
+/* Dialog */
+.el-dialog {
+  border-radius: var(--radius-md) !important;
+  box-shadow: var(--shadow-modal) !important;
+  overflow: hidden;
+}
+
+.el-dialog__header {
+  padding: 20px 24px 12px !important;
+  margin-right: 0 !important;
+}
+
+.el-dialog__title {
+  font-size: 17px !important;
+  font-weight: 600 !important;
+  color: var(--text-primary) !important;
+}
+
+.el-dialog__body {
+  padding: 8px 24px 20px !important;
+}
+
+.el-dialog__footer {
+  padding: 12px 24px 20px !important;
+}
+
+.el-overlay {
+  background-color: var(--overlay-bg) !important;
+  -webkit-backdrop-filter: var(--blur-amount);
+  backdrop-filter: var(--blur-amount);
+}
+
+/* Message */
+.el-message {
+  border-radius: var(--radius-md) !important;
+  box-shadow: var(--shadow-elevated) !important;
+  -webkit-backdrop-filter: var(--blur-amount) var(--blur-saturate);
+  backdrop-filter: var(--blur-amount) var(--blur-saturate);
+  background-color: rgba(255, 255, 255, 0.9) !important;
+  border: none !important;
+}
+
+/* MessageBox */
+.el-message-box {
+  border-radius: var(--radius-md) !important;
+  box-shadow: var(--shadow-modal) !important;
+}
+
+/* Tree */
+.el-tree {
+  background: transparent !important;
+  --el-tree-node-hover-bg-color: rgba(0, 0, 0, 0.04);
+}
