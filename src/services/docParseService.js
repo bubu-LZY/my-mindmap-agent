@@ -6,6 +6,7 @@
  */
 import mammoth from 'mammoth'
 import Papa from 'papaparse'
+import JSZip from 'jszip'
 
 const escapeHtml = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -198,6 +199,51 @@ async function parsePdf(filePath) {
   }
 }
 
+// PPTX 文本提取：pptx = zip 包，内含 ppt/slides/slideN.xml 等。
+// 解析每张幻灯片的 <a:t> 文本节点拼接为段落；旧版 .ppt（二进制）不支持。
+async function parsePptx(filePath) {
+  const buf = await readBinaryBuffer(filePath)
+  let zip
+  try {
+    zip = await JSZip.loadAsync(new Uint8Array(buf))
+  } catch (e) {
+    return { success: false, error: 'PPTX 文件解析失败：文件损坏或不是合法的 zip 包' }
+  }
+  // 仅解析 ppt/slides/slide*.xml，按文件名数字排序保证顺序
+  const slidePaths = Object.keys(zip.files)
+    .filter(p => /^ppt\/slides\/slide\d+\.xml$/i.test(p))
+    .sort((a, b) => {
+      const na = Number((a.match(/slide(\d+)\.xml/i) || [])[1] || 0)
+      const nb = Number((b.match(/slide(\d+)\.xml/i) || [])[1] || 0)
+      return na - nb
+    })
+  if (!slidePaths.length) return { success: false, error: 'PPTX 中没有幻灯片内容' }
+  const parts = []
+  for (let i = 0; i < slidePaths.length; i++) {
+    const xml = await zip.files[slidePaths[i]].async('string')
+    // 抓 <a:t>...</a:t> 文本节点（保留段落分隔）
+    const segs = []
+    const re = /<a:t[^>]*>([\s\S]*?)<\/a:t>/gi
+    let m
+    while ((m = re.exec(xml)) !== null) {
+      const txt = String(m[1] || '')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+        .trim()
+      if (txt) segs.push(txt)
+    }
+    if (segs.length) parts.push(`【第 ${i + 1} 页】\n${segs.join('\n')}`)
+  }
+  const text = parts.join('\n\n').trim()
+  if (!text) return { success: false, error: 'PPTX 幻灯片中未提取到文本（可能只含图片）' }
+  return {
+    success: true,
+    type: 'pptx',
+    text,
+    meta: { slides: slidePaths.length }
+  }
+}
+
 /**
  * 解析入口。返回 { success, type, text, html?, meta }
  * @param {string} filePath 绝对路径
@@ -211,6 +257,8 @@ export async function parseDocument(filePath, opts = {}) {
     if (ext === 'xlsx') return await parseXlsx(filePath)
     if (ext === 'xls') return await parseXls(filePath)
     if (ext === 'csv' || ext === 'tsv') return await parseCsv(filePath, ext)
+    if (ext === 'pptx') return await parsePptx(filePath)
+    if (ext === 'ppt') return { success: false, error: '旧版 .ppt（二进制）暂不支持；请另存为 .pptx 后再读取' }
     if (['txt', 'md', 'markdown', 'json', 'log', 'html', 'xml'].includes(ext)) {
       const text = await window.electronAPI.fs.readFile(filePath)
       return { success: true, type: ext === 'md' || ext === 'markdown' ? 'md' : 'text', text, meta: { chars: text.length } }

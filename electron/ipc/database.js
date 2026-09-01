@@ -27,11 +27,17 @@ async function initDatabase() {
   }
 
   // sql.js 的 WASM 构建不含 FTS5 模块，使用普通表 + LIKE 实现关键词检索
-  // 清理历史遗留的 FTS5 虚拟表（建表失败时可能存在残留）
+  // 仅当 search_index 是 FTS5 虚拟表时才删除（旧版本遗留），普通表必须保留
   try {
-    db.run('DROP TABLE IF EXISTS search_index')
+    const vtabCheck = db.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='search_index'")
+    if (vtabCheck.length && vtabCheck[0].values.length) {
+      const sql = String(vtabCheck[0].values[0][0] || '')
+      if (sql.toUpperCase().includes('VIRTUAL TABLE') && sql.toUpperCase().includes('FTS5')) {
+        db.run('DROP TABLE IF EXISTS search_index')
+      }
+    }
   } catch (e) {
-    // 旧虚拟表无法 DROP 时忽略
+    // 旧虚拟表无法 DROP 时忽略；普通表查询失败不影响主流程
   }
 
   db.run(`
@@ -387,9 +393,15 @@ function registerDatabaseHandlers() {
       if (!Array.isArray(chunks) || !chunks.length) return { success: false, error: '没有可索引的内容' }
 
       // 同文件且未修改则跳过重索引
+      // 但如果 search_index 里没有该文件的索引条目（历史 bug：files 表被写过但 chunks 没写入），
+      // 必须强制重新索引，否则永远无法入库
       if (mtime) {
         const prev = queryRows('SELECT mtime FROM files WHERE file_path = ?', [filePath])
-        if (prev.length && prev[0].mtime === String(mtime)) return { success: true, skipped: true, indexed: 0 }
+        if (prev.length && prev[0].mtime === String(mtime)) {
+          const chunkCount = (queryRows('SELECT COUNT(*) as c FROM search_index WHERE file_path = ?', [filePath])[0] || {}).c || 0
+          if (chunkCount > 0) return { success: true, skipped: true, indexed: 0 }
+          // files 存在但 search_index 为空 → 强制重新索引
+        }
       }
 
       db.run('DELETE FROM search_index WHERE file_path = ?', [filePath])
@@ -432,6 +444,32 @@ function registerDatabaseHandlers() {
     }
   })
 
+  // 删除目录下所有文件的索引（递归子目录）
+  ipcMain.handle('db:removeDir', async (event, { dirPath }) => {
+    try {
+      await initDatabase()
+      if (!dirPath) return { success: false, error: '缺少目录路径' }
+      const prefix = dirPath.replace(/\\/g, '/').replace(/\/+$/, '') + '/'
+      // 用 LIKE 匹配前缀（Windows 下路径分隔符可能是 \\，所以两种都要考虑）
+      const rows = queryRows("SELECT file_path FROM files WHERE file_path LIKE ? OR file_path LIKE ?", [
+        prefix + '%',
+        prefix.replace(/\//g, '\\') + '%'
+      ])
+      const removed = []
+      for (const r of rows) {
+        const fp = r.file_path
+        db.run('DELETE FROM search_index WHERE file_path = ?', [fp])
+        db.run('DELETE FROM files WHERE file_path = ?', [fp])
+        miniRemoveFile(fp)
+        removed.push(fp)
+      }
+      if (removed.length > 0) saveDatabase()
+      return { success: true, removed: removed.length, files: removed }
+    } catch (e) {
+      return { success: false, error: e.message, removed: 0, files: [] }
+    }
+  })
+
   ipcMain.handle('db:getStats', async () => {
     try {
       await initDatabase()
@@ -450,6 +488,20 @@ function registerDatabaseHandlers() {
       return queryRows('SELECT file_path, file_name, file_type, mtime, indexed_at FROM files ORDER BY indexed_at DESC')
     } catch (e) {
       return []
+    }
+  })
+
+  // 获取某个文件的所有索引条目（用于向量重建）
+  ipcMain.handle('db:getFileEntries', async (event, { filePath }) => {
+    try {
+      await initDatabase()
+      const rows = queryRows(
+        'SELECT content, node_uid, file_type FROM search_index WHERE file_path = ? ORDER BY rowid ASC',
+        [filePath]
+      )
+      return { success: true, entries: rows }
+    } catch (e) {
+      return { success: false, error: e.message, entries: [] }
     }
   })
 }

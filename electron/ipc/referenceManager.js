@@ -1,9 +1,12 @@
 const { ipcMain, app } = require('electron')
 const fs = require('fs')
 const path = require('path')
+const store = require('../utils/store')
 
-// 支持的文件扩展名
-const SUPPORTED_EXTENSIONS = /\.(smm|json|md|xmind)$/i
+// 支持的文件扩展名（搜索/索引用）：思维导图 + 常见文档类型
+// 修复 review：原列表只覆盖 .smm/.json/.md/.xmind，导致 rebuildSearchIndex 扫不到 PDF/Excel/TXT/PPT 等文档，
+// 用户用 search_knowledge_base 检索时只能匹配到思维导图，无法命中已存在的文档内容
+const SUPPORTED_EXTENSIONS = /\.(smm|json|md|xmind|markdown|txt|log|html|xml|csv|tsv|docx|xlsx|xls|pdf|pptx|ppt)$/i
 
 // 最大扫描深度
 const MAX_SCAN_DEPTH = 5
@@ -12,10 +15,19 @@ const MAX_SCAN_DEPTH = 5
 const MAX_NODES = 500
 
 /**
- * 获取默认保存目录
+ * 获取默认保存目录（与 fileManager 保持一致，优先用户指定的保存目录）
  */
 function getDefaultSaveDir() {
-  return app.defaultSaveDir || path.join(app.getPath('documents'), 'MindMapAI')
+  let saved = ''
+  try {
+    saved = store.get('saveDir') || ''
+  } catch {
+    saved = ''
+  }
+  if (saved && path.isAbsolute(saved) && fs.existsSync(saved)) {
+    return saved
+  }
+  return app.defaultSaveDir || app.getPath('desktop')
 }
 
 // 路径安全校验（复用 fileManager 的安全策略）

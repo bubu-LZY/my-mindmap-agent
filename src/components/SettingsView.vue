@@ -300,6 +300,141 @@
       </p>
     </div>
 
+    <!-- Embedding 向量化配置 -->
+    <div id="sec-embedding" class="settings-section">
+      <h3>Embedding 向量化（语义检索）</h3>
+      <p class="vision-desc">
+        用于语义搜索和知识库检索。优先使用你配置的 Embedding API（效果更好），不可用时自动降级到本地小模型（离线可用，速度稍慢）。
+      </p>
+
+      <div class="vision-row">
+        <span class="vision-row-label">启用 Embedding API</span>
+        <el-switch v-model="embeddingConfig.enabled" />
+      </div>
+
+      <template v-if="embeddingConfig.enabled">
+        <el-form label-position="top" class="settings-form">
+          <el-form-item label="复用基础大模型配置">
+            <div class="vision-row" style="margin: 0;">
+              <el-switch v-model="embeddingConfig.useBaseConfig" />
+              <span class="form-inline-hint">
+                开启后，API 地址和 API Key 直接使用上方「基础模型配置」的设置，只需填写模型名称
+              </span>
+            </div>
+          </el-form-item>
+
+          <template v-if="!embeddingConfig.useBaseConfig">
+            <el-form-item label="API 地址 (Base URL)">
+              <el-input
+                v-model="embeddingConfig.baseURL"
+                placeholder="如 https://api.openai.com/v1 或 https://your-proxy.com"
+              />
+              <div class="url-switch-row">
+                <span class="url-switch-label">自动补全路径（/v1/embeddings）</span>
+                <el-switch v-model="embeddingConfig.autoComplete" size="small" />
+              </div>
+            </el-form-item>
+
+            <el-form-item label="API Key">
+              <el-input
+                v-model="embeddingConfig.apiKey"
+                type="password"
+                show-password
+                placeholder="sk-..."
+              />
+            </el-form-item>
+          </template>
+
+          <el-form-item label="Embedding 模型名称">
+            <el-select
+              v-model="embeddingConfig.model"
+              filterable
+              allow-create
+              placeholder="选择或输入模型名称"
+              :loading="detectingEmbedding"
+              @visible-change="onEmbeddingDropdownOpen"
+            >
+              <el-option
+                v-for="m in embeddingFetchedModels"
+                :key="m"
+                :label="m"
+                :value="m"
+              />
+            </el-select>
+            <div v-if="embeddingFetchedModels.length > 0" class="model-hint">
+              已检测到 {{ embeddingFetchedModels.length }} 个 Embedding 模型
+            </div>
+            <div v-else-if="!detectingEmbedding && embeddingConfig.model" class="model-hint manual-hint">
+              未自动检测到模型，可手动输入（如 text-embedding-3-small、text-embedding-v3、bge-large-zh-v1.5 等）
+            </div>
+          </el-form-item>
+        </el-form>
+
+        <div class="settings-actions">
+          <el-button @click="testEmbeddingConfig" :loading="testingEmbedding">测试配置</el-button>
+          <el-button type="primary" @click="saveConfig('embedding')">保存配置</el-button>
+        </div>
+
+        <!-- 测试结果 -->
+        <div
+          v-if="embeddingTestResult"
+          :class="['test-result', embeddingTestResult.success ? 'success' : 'error']"
+        >
+          {{ embeddingTestResult.message }}
+        </div>
+
+        <!-- 向量索引管理 -->
+        <div class="vector-manage-block">
+          <div class="vector-manage-title">向量索引管理</div>
+          <div class="vector-manage-desc">
+            为所有已索引的文件（思维导图节点 + 文档分块）重建向量索引。
+            切换 Embedding 模型后需要重建，否则维度不匹配会导致语义搜索退化为关键词搜索。
+          </div>
+          <div class="vector-stats-row">
+            <span v-if="vectorStats.files > 0">
+              当前向量库：{{ vectorStats.files }} 个文件 / {{ vectorStats.vectors }} 条向量
+              <template v-if="vectorStats.smmFiles">（{{ vectorStats.smmFiles }} 个思维导图）</template>
+            </span>
+            <span v-else>当前向量库为空</span>
+          </div>
+          <div v-if="vectorStats.unindexed > 0" class="vector-stats-row vector-stats-warning">
+            ⚠ {{ vectorStats.unindexed }} 个文件未向量化（语义搜索效果会受影响），可点击「重建向量索引」补全
+          </div>
+          <div class="settings-actions">
+            <el-button @click="refreshVectorStats" :disabled="rebuildingVectors">刷新统计</el-button>
+            <el-button type="warning" @click="onRebuildVectors" :loading="rebuildingVectors">
+              {{ rebuildingVectors ? '重建中...' : '重建向量索引' }}
+            </el-button>
+          </div>
+          <div v-if="rebuildingVectors" class="rebuild-progress">
+            <el-progress :percentage="rebuildPercent" :status="rebuildFinished ? 'success' : ''" />
+            <div class="rebuild-progress-text">
+              {{ rebuildCurrentFile || '准备中...' }}（{{ rebuildDoneCount }}/{{ rebuildTotalCount }}）
+            </div>
+            <div class="rebuild-actions">
+              <el-button size="small" @click="onCancelRebuild">取消重建</el-button>
+            </div>
+          </div>
+          <div v-if="rebuildFinished && rebuildResult" :class="['test-result', rebuildResult.cancelled ? 'error' : 'success']">
+            <template v-if="rebuildResult.cancelled">
+              已取消重建：成功 {{ rebuildResult.successCount }} / {{ rebuildResult.total }} 个文件（失败 {{ rebuildResult.failedCount }} 个）
+            </template>
+            <template v-else-if="rebuildResult.failedCount > 0">
+              重建完成：成功 {{ rebuildResult.successCount }} / {{ rebuildResult.total }} 个文件（失败 {{ rebuildResult.failedCount }} 个，可点击「重建向量索引」重试失败项）
+            </template>
+            <template v-else>
+              重建完成：成功 {{ rebuildResult.successCount }} / {{ rebuildResult.total }} 个文件
+            </template>
+          </div>
+        </div>
+
+        <p class="vision-tip">
+          提示：未启用或 API 不可用时，语义搜索将自动使用本地小模型（Xenova/multilingual-e5-small），
+          首次使用会自动下载模型（约 100MB），离线也能用。
+        </p>
+      </template>
+    </div>
+
     <!-- AI 安全与记忆 -->
     <div id="sec-safety" class="settings-section">
       <h3>AI 安全与记忆</h3>
@@ -1809,6 +1944,21 @@ const visionConfig = ref({
   enabled: false,
   activeProfileId: ''
 })
+
+// Embedding 向量化配置：优先走 API，失败降级本地模型
+const embeddingConfig = ref({
+  enabled: false,
+  useBaseConfig: true,
+  baseURL: '',
+  apiKey: '',
+  model: '',
+  autoComplete: true
+})
+const embeddingFetchedModels = ref([])
+const detectingEmbedding = ref(false)
+const testingEmbedding = ref(false)
+const embeddingTestResult = ref(null)
+let embeddingLastFetchSig = ''
 // 上次已保存配置的快照：分区保存时，另一区域的配置档沿用快照内容，不被当前 UI 中未保存的修改带走
 const savedSnapshot = ref(null)
 const visionProfiles = computed(() =>
@@ -1950,6 +2100,16 @@ const loadConfig = async () => {
         enabled: !!savedVision.enabled,
         activeProfileId: savedVision.activeProfileId || ''
       }
+      // 加载 Embedding 向量化配置
+      const savedEmb = saved.embedding || {}
+      embeddingConfig.value = {
+        enabled: !!savedEmb.enabled,
+        useBaseConfig: savedEmb.useBaseConfig !== false,
+        baseURL: savedEmb.baseURL || '',
+        apiKey: savedEmb.apiKey || '',
+        model: savedEmb.model || '',
+        autoComplete: savedEmb.autoComplete !== false
+      }
       // 尝试匹配已知提供商
       if (activeProfile.value) {
         const match = providers.find((p) => p.baseURL === activeProfile.value.baseURL)
@@ -1965,7 +2125,8 @@ const loadConfig = async () => {
       savedSnapshot.value = {
         profiles: JSON.parse(JSON.stringify(config.value.profiles)),
         activeProfileId: config.value.activeProfileId,
-        vision: { enabled: !!visionConfig.value.enabled, activeProfileId: visionConfig.value.activeProfileId || '' }
+        vision: { enabled: !!visionConfig.value.enabled, activeProfileId: visionConfig.value.activeProfileId || '' },
+        embedding: JSON.parse(JSON.stringify(embeddingConfig.value))
       }
     }
   } catch (e) {
@@ -2306,9 +2467,10 @@ const onVisionDropdownOpen = (visible) => {
 }
 
 /**
- * 保存配置（分区提交，两类模型档互不影响；其余设置项均有各自的自动保存）
- * - 'base'（基础模型区按钮）：只提交基础档；多模态档与其开关沿用上次已保存内容
- * - 'vision'（多模态区按钮）：只提交多模态档与启用开关；基础档沿用上次已保存内容
+ * 保存配置（分区提交，配置档互不影响；其余设置项均有各自的自动保存）
+ * - 'base'（基础模型区按钮）：只提交基础档；多模态/embedding 沿用上次已保存内容
+ * - 'vision'（多模态区按钮）：只提交多模态档与启用开关；基础档/embedding 沿用上次已保存内容
+ * - 'embedding'（向量化区按钮）：只提交 embedding 配置；基础档/多模态沿用上次已保存内容
  */
 const saveConfig = async (scope = 'base') => {
   try {
@@ -2327,30 +2489,42 @@ const saveConfig = async (scope = 'base') => {
     const uiVision = uiProfiles.filter(p => p.type === 'vision')
     const snap = savedSnapshot.value
     const hasSnap = !!(snap && Array.isArray(snap.profiles))
-    let profiles, activeProfileId, visionState
-    if (scope === 'vision' && hasSnap) {
+    let profiles, activeProfileId, visionState, embeddingState
+
+    if (scope === 'embedding' && hasSnap) {
+      // embedding 保存：基础档和多模态档都取快照
+      profiles = [...snap.profiles]
+      activeProfileId = snap.activeProfileId || uiBase[0]?.id || ''
+      visionState = snap.vision || { enabled: false, activeProfileId: '' }
+      embeddingState = JSON.parse(JSON.stringify(embeddingConfig.value))
+    } else if (scope === 'vision' && hasSnap) {
       // 多模态保存：基础档取快照（UI 中未保存的基础修改不被带走）
       profiles = [...snap.profiles.filter(p => p.type !== 'vision'), ...uiVision]
       activeProfileId = snap.activeProfileId || uiBase[0]?.id || ''
       visionState = { enabled: !!visionConfig.value.enabled, activeProfileId: visionConfig.value.activeProfileId || '' }
+      embeddingState = snap.embedding || { enabled: false, useBaseConfig: true, baseURL: '', apiKey: '', model: '', autoComplete: true }
     } else if (hasSnap) {
       // 基础保存：多模态档与开关取快照（UI 中未保存的多模态修改不被带走）
       profiles = [...uiBase, ...snap.profiles.filter(p => p.type === 'vision')]
       activeProfileId = config.value.activeProfileId
       visionState = snap.vision || { enabled: false, activeProfileId: '' }
+      embeddingState = snap.embedding || { enabled: false, useBaseConfig: true, baseURL: '', apiKey: '', model: '', autoComplete: true }
     } else {
-      // 无快照的极端情况退回全量保存，避免误清另一类配置档
+      // 无快照的极端情况退回全量保存，避免误清其他配置
       profiles = uiProfiles
       activeProfileId = config.value.activeProfileId
       visionState = { enabled: !!visionConfig.value.enabled, activeProfileId: visionConfig.value.activeProfileId || '' }
+      embeddingState = JSON.parse(JSON.stringify(embeddingConfig.value))
     }
     // 深克隆为纯数据：profiles 可能携带 Vue 响应式 Proxy，IPC 结构化克隆无法处理
     // （会抛 "An object could not be cloned"）；配置字段均为字符串/布尔，JSON 序列化无损失
-    const savedConfig = JSON.parse(JSON.stringify({ profiles, activeProfileId, vision: visionState }))
+    const savedConfig = JSON.parse(JSON.stringify({ profiles, activeProfileId, vision: visionState, embedding: embeddingState }))
     await window.electronAPI.setAIConfig(savedConfig)
     savedSnapshot.value = JSON.parse(JSON.stringify(savedConfig))
-    // 只回写本次作用域的配置档；另一作用域 UI 中未保存的修改保持原样，等待各自按钮提交
-    if (scope === 'vision' && hasSnap) {
+    // 只回写本次作用域的配置档；其他作用域 UI 中未保存的修改保持原样，等待各自按钮提交
+    if (scope === 'embedding' && hasSnap) {
+      // embedding 保存不影响 profiles，只更新快照里的 embedding
+    } else if (scope === 'vision' && hasSnap) {
       config.value.profiles = [...config.value.profiles.filter(p => p.type !== 'vision'), ...uiVision]
     } else if (hasSnap) {
       config.value.profiles = [...uiBase, ...config.value.profiles.filter(p => p.type === 'vision')]
@@ -2358,7 +2532,8 @@ const saveConfig = async (scope = 'base') => {
       config.value.profiles = uiProfiles
     }
     aiService.resetConfig()
-    ElMessage.success(scope === 'vision' ? '多模态配置已保存' : '基础模型配置已保存')
+    const msgMap = { base: '基础模型配置已保存', vision: '多模态配置已保存', embedding: 'Embedding 配置已保存' }
+    ElMessage.success(msgMap[scope] || '配置已保存')
     emit('saved')
   } catch (e) {
     ElMessage.error('保存失败: ' + e.message)
@@ -2414,6 +2589,215 @@ const saveAiTimeout = async () => {
 }
 
 const saveVisionConfig = () => saveConfig('vision')
+
+// ========== Embedding 向量化配置 ==========
+function getEmbeddingEffectiveConfig() {
+  if (embeddingConfig.value.useBaseConfig && activeProfile.value) {
+    return {
+      baseURL: activeProfile.value.baseURL || '',
+      apiKey: activeProfile.value.apiKey || '',
+      model: embeddingConfig.value.model || '',
+      autoComplete: activeProfile.value.autoComplete !== false,
+      profileId: activeProfile.value.id || ''
+    }
+  }
+  return {
+    baseURL: embeddingConfig.value.baseURL || '',
+    apiKey: embeddingConfig.value.apiKey || '',
+    model: embeddingConfig.value.model || '',
+    autoComplete: embeddingConfig.value.autoComplete !== false,
+    profileId: ''
+  }
+}
+
+function embeddingFetchSignature() {
+  const cfg = getEmbeddingEffectiveConfig()
+  return `${cfg.baseURL}|${cfg.apiKey ? cfg.apiKey.slice(0, 8) : ''}`
+}
+
+const onEmbeddingDropdownOpen = async (visible) => {
+  if (!visible) return
+  const sig = embeddingFetchSignature()
+  if (!sig || !sig.split('|')[0]) {
+    ElMessage.warning('请先填写 API 地址再检测模型')
+    return
+  }
+  if (embeddingFetchedModels.value.length > 0 && sig === embeddingLastFetchSig) return
+  await detectEmbeddingModels(true)
+}
+
+const detectEmbeddingModels = async (silent = false) => {
+  if (!(window.electronAPI && window.electronAPI.listEmbeddingModels)) {
+    if (!silent) ElMessage.warning('当前为浏览器模式，无法检测 Embedding 模型')
+    return
+  }
+  const cfg = getEmbeddingEffectiveConfig()
+  if (!cfg.baseURL) {
+    if (!silent) ElMessage.warning('请先填写 API 地址')
+    return
+  }
+  detectingEmbedding.value = true
+  try {
+    const res = await window.electronAPI.listEmbeddingModels(cfg.baseURL, cfg.apiKey, cfg.profileId, cfg.autoComplete)
+    if (res.success) {
+      embeddingFetchedModels.value = res.models || []
+      embeddingLastFetchSig = embeddingFetchSignature()
+      if (!silent) {
+        if (res.models.length > 0) {
+          ElMessage.success(`检测到 ${res.models.length} 个 Embedding 模型`)
+        } else {
+          ElMessage.warning('未检测到 Embedding 模型，可手动输入模型名称')
+        }
+      }
+    } else {
+      embeddingFetchedModels.value = []
+      if (!silent) ElMessage.error('检测失败: ' + (res.error || '未知错误'))
+    }
+  } catch (e) {
+    embeddingFetchedModels.value = []
+    if (!silent) ElMessage.error('检测失败: ' + e.message)
+  } finally {
+    detectingEmbedding.value = false
+  }
+}
+
+const testEmbeddingConfig = async () => {
+  if (!(window.electronAPI && window.electronAPI.testEmbedding)) {
+    ElMessage.warning('当前为浏览器模式，无法测试')
+    return
+  }
+  const cfg = getEmbeddingEffectiveConfig()
+  if (!cfg.baseURL) {
+    ElMessage.warning('请先填写 API 地址')
+    return
+  }
+  if (!cfg.model) {
+    ElMessage.warning('请先选择或输入模型名称')
+    return
+  }
+  testingEmbedding.value = true
+  embeddingTestResult.value = null
+  try {
+    const res = await window.electronAPI.testEmbedding(cfg.baseURL, cfg.apiKey, cfg.model, cfg.autoComplete, cfg.profileId)
+    if (res.success) {
+      embeddingTestResult.value = {
+        success: true,
+        message: `配置可用！向量维度：${res.dimension}，模型：${res.model || cfg.model}`
+      }
+    } else {
+      embeddingTestResult.value = {
+        success: false,
+        message: '测试失败：' + (res.error || '未知错误')
+      }
+    }
+  } catch (e) {
+    embeddingTestResult.value = {
+      success: false,
+      message: '测试失败：' + e.message
+    }
+  } finally {
+    testingEmbedding.value = false
+  }
+}
+
+// ========== 向量索引管理 ==========
+const vectorStats = ref({ files: 0, vectors: 0, docFiles: 0, smmFiles: 0, unindexed: 0 })
+const rebuildingVectors = ref(false)
+const rebuildPercent = ref(0)
+const rebuildDoneCount = ref(0)
+const rebuildTotalCount = ref(0)
+const rebuildCurrentFile = ref('')
+const rebuildFinished = ref(false)
+const rebuildResult = ref(null)
+
+const refreshVectorStats = async () => {
+  try {
+    const { searchService } = await import('../services/searchService')
+    const stats = await searchService.getVectorStats()
+    vectorStats.value = {
+      files: stats.files || 0,
+      vectors: stats.vectors || 0,
+      docFiles: stats.docFiles || 0,
+      smmFiles: stats.smmFiles || 0,
+      unindexed: stats.unindexed || 0
+    }
+  } catch (e) {
+    console.warn('获取向量统计失败:', e)
+  }
+}
+
+let rebuildController = null
+
+const onRebuildVectors = async () => {
+  if (rebuildingVectors.value) return
+  try {
+    await ElMessageBox.confirm(
+      '确定要重建全部向量索引吗？\n\n重建过程可能需要较长时间（取决于文件数量和 Embedding 速度），期间可以继续使用软件，但语义搜索结果可能不完整。',
+      '重建向量索引',
+      {
+        confirmButtonText: '开始重建',
+        cancelButtonText: '取消',
+        type: 'warning',
+        dangerouslyUseHTMLString: false
+      }
+    )
+  } catch {
+    return
+  }
+
+  rebuildingVectors.value = true
+  rebuildFinished.value = false
+  rebuildResult.value = null
+  rebuildPercent.value = 0
+  rebuildDoneCount.value = 0
+  rebuildTotalCount.value = 0
+  rebuildCurrentFile.value = ''
+  rebuildController = { cancelled: false }
+
+  try {
+    const { searchService } = await import('../services/searchService')
+    const result = await searchService.rebuildAllVectors((current, total, fileName) => {
+      rebuildDoneCount.value = current
+      rebuildTotalCount.value = total
+      rebuildCurrentFile.value = fileName
+      rebuildPercent.value = total > 0 ? Math.round((current / total) * 100) : 0
+    }, rebuildController)
+    rebuildResult.value = result
+    rebuildFinished.value = true
+    if (result.cancelled) {
+      rebuildPercent.value = rebuildTotalCount.value > 0
+        ? Math.round((rebuildDoneCount.value / rebuildTotalCount.value) * 100)
+        : 0
+      ElMessage.info('已取消重建')
+    } else {
+      rebuildPercent.value = 100
+      if (result.success && result.failedCount === 0) {
+        ElMessage.success(`向量索引重建完成（${result.successCount}/${result.total}）`)
+      } else if (result.success) {
+        ElMessage.warning(`重建完成，${result.failedCount} 个文件失败（${result.successCount} 个成功）`)
+      } else {
+        ElMessage.error('重建失败：' + (result.error || '未知错误'))
+      }
+    }
+    await refreshVectorStats()
+  } catch (e) {
+    ElMessage.error('重建失败：' + e.message)
+  } finally {
+    rebuildingVectors.value = false
+    rebuildController = null
+  }
+}
+
+const onCancelRebuild = () => {
+  if (rebuildController) {
+    rebuildController.cancelled = true
+  }
+}
+
+// 进入设置页时加载一次向量统计
+const loadVectorStatsOnMount = () => {
+  if (window.electronAPI?.vector) refreshVectorStats()
+}
 
 // ========== MCP 管理 ==========
 const mcpServers = ref([])
@@ -2792,6 +3176,7 @@ const tocSections = [
   { id: 'sec-ai-config', label: 'AI 模型配置' },
   { id: 'sec-temperature', label: 'AI temperature 设置' },
   { id: 'sec-vision', label: '多模态识别' },
+  { id: 'sec-embedding', label: 'Embedding 向量化' },
   { id: 'sec-safety', label: 'AI 安全与记忆' },
   { id: 'sec-system', label: '系统' },
   { id: 'sec-token', label: '全局 Token 管理' },
@@ -2862,6 +3247,8 @@ onMounted(() => {
   loadSkills()
   loadCustomTools()
   setupTocObserver()
+  // 加载向量库统计
+  if (window.electronAPI?.vector) refreshVectorStats()
 })
 
 onBeforeUnmount(() => {
@@ -3550,6 +3937,63 @@ onBeforeUnmount(() => {
   background: rgba(255, 59, 48, 0.08);
   color: #d70015;
   border: 1px solid rgba(255, 59, 48, 0.15);
+}
+
+.vector-manage-block {
+  margin-top: 24px;
+  padding: 16px;
+  background: var(--settings-card-bg);
+  border: 1px solid var(--settings-card-border);
+  border-radius: 12px;
+}
+
+.vector-manage-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--settings-text-primary);
+  margin-bottom: 6px;
+}
+
+.vector-manage-desc {
+  font-size: 12px;
+  color: var(--settings-text-secondary);
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+.vector-stats-row {
+  font-size: 13px;
+  color: var(--settings-text-secondary);
+  margin-bottom: 10px;
+}
+
+.vector-stats-warning {
+  color: var(--el-color-warning, #e6a23c);
+  font-size: 12px;
+}
+
+.rebuild-progress {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: var(--settings-input-bg);
+  border-radius: 8px;
+  border: 1px solid var(--settings-input-border);
+}
+
+.rebuild-progress {
+  margin-top: 12px;
+}
+
+.rebuild-progress-text {
+  font-size: 12px;
+  color: var(--settings-text-secondary);
+  margin-top: 6px;
+  text-align: center;
+}
+
+.rebuild-actions {
+  text-align: center;
+  margin-top: 8px;
 }
 
 @keyframes fadeIn {

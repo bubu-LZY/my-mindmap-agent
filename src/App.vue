@@ -110,7 +110,7 @@
 
         <!-- 文件树（始终挂载，仅切换可见性，避免 v-if 导致组件销毁重建后数据丢失） -->
         <div class="file-tree-wrapper" v-show="viewMode !== 'review' && viewMode !== 'tag'">
-          <SearchBar ref="searchBarRef" @open-file="onSearchOpenFile" />
+          <SearchBar ref="searchBarRef" :current-file-path="currentFilePath" @open-file="onSearchOpenFile" />
           <FileTree
             ref="fileTreeRef"
             :currentFilePath="currentFilePath"
@@ -1842,7 +1842,7 @@ const onExternalFileCreated = () => {
 
 // AI 撤销后删除了本轮生成的文件，刷新目录树让这些文件消失。
 // 左侧目录树删除当前文件时，filePath 为被删除文件；关闭对应 Tab 并解绑 AI 任务。
-const onFileDeleted = (filePath = '') => {
+const onFileDeleted = (filePath = '', isDir = false) => {
   if (filePath) {
     const fid = normalizeFileId(filePath)
     const store = useMindMapStore()
@@ -1853,6 +1853,14 @@ const onFileDeleted = (filePath = '') => {
     // 清理该文件的复习计划与标签（删除后残留会指向不存在的文件）
     try { removeOrphanReviewItems() } catch (e) {}
     try { getTagsByFilePath(filePath).length && removeTagsByFilePath(filePath) } catch (e) {}
+    // 清理搜索索引与向量索引（删除后残留会导致搜索结果出现已删除文件）
+    try {
+      if (isDir) {
+        searchService.removeDir(filePath)
+      } else {
+        searchService.removeFile(filePath)
+      }
+    } catch (e) { console.warn('清理搜索索引失败:', e) }
     // 文件已删除：清除其脏标记，避免关闭窗口时把已删除文件重新写回磁盘
     markClean(null, fid)
     const idx = tabs.value.findIndex(t => t.fileId === fid)
@@ -3535,10 +3543,10 @@ const openSettings = () => {
 }
 
 // 设置保存回调（保存后不关闭弹窗，便于继续配置其他分区）
-const onSettingsSaved = () => {
-  // 通知 ChatPanel 重新加载模型名称
+const onSettingsSaved = async () => {
+  // 通知 ChatPanel 重新加载模型名称（await 确保拿到主进程最新数据，避免 race 导致仍显示旧档模型）
   if (chatPanelRef.value && chatPanelRef.value.reloadModel) {
-    chatPanelRef.value.reloadModel()
+    try { await chatPanelRef.value.reloadModel() } catch (e) { /* ignore */ }
   }
   // 默认保存目录与左侧目录树保存位置共用同一数据：设置变化后同步目录树根目录
   nextTick(async () => {
@@ -3942,13 +3950,13 @@ const handleKeyDown = (e) => {
     return
   }
 
-  // Ctrl+F: 全屏（思维导图/大纲）下打开节点搜索框；否则聚焦左侧搜索栏
+  // Ctrl+F: 用户需求 - 全局只有一个搜索入口（左上角 SearchBar）。
+  // 不管当前是导图/大纲/文档/全屏，Ctrl+F 都聚焦左上角全局搜索栏，由它做关键词搜索；
+  // 用户可手动切到「语义」tab 触发 AI 扩展，不再自动跑 AI 语义检索。
   if (key === 'f') {
     e.preventDefault()
-    if (textCtx === 'input') return // 输入框内放行，不抢占节点搜索
-    if ((mmFullscreen.value || outlineFullscreen.value) && (viewMode.value === 'mindmap' || viewMode.value === 'outline')) {
-      openNodeSearch()
-    } else if (searchBarRef.value && searchBarRef.value.focus) {
+    if (textCtx === 'input') return // 输入框内放行，不抢占全局搜索
+    if (searchBarRef.value && searchBarRef.value.focus) {
       searchBarRef.value.focus()
     }
     return
@@ -3956,17 +3964,76 @@ const handleKeyDown = (e) => {
 }
 
 // 启动时后台重建搜索索引（覆盖从未打开过的文件，静默执行不打扰用户）
+// 修复 review：原实现仅索引 type==='json' 的思维导图，PDF/Excel/TXT/PPT/MD 等文档完全不会被索引，
+// 导致 search_knowledge_base / semantic_search 只能匹配到导图，无法命中已存在的文档内容。
+// 修复后按扩展名分支：思维导图走 indexFile，文档走 indexDocument（统一 parseDocument）。
+// 内存保护：
+//   1) 文档数量 > 50 时只索引文件名 + 前 2KB 摘要（避免大库一次加载爆内存）
+//   2) 解析单个文档失败立即跳过，绝不抛错影响主流程
+//   3) 不在启动时跑向量化（indexDocumentVectors），留给用户在 AI 读取文件或 DocViewer 打开时按需触发
 const rebuildSearchIndex = async () => {
   try {
     if (!searchService.isAvailable() || !window.electronAPI?.refScanFiles) return
-    // refScanFiles 返回 { success, files } 对象，而非数组
-    const res = await window.electronAPI.refScanFiles()
+    // 扫描所有文件夹根目录（与 FileTree 保持一致），不只是默认保存目录
+    const ROOTS_KEY = 'MINDMAP_FOLDER_ROOTS'
+    let roots = []
+    try {
+      const stored = localStorage.getItem(ROOTS_KEY)
+      if (stored) roots = JSON.parse(stored) || []
+    } catch {}
+    // refScanFiles 接收数组；若为空数组则内部回退到默认保存目录
+    const res = await window.electronAPI.refScanFiles(roots.length > 0 ? roots : undefined)
     if (!res?.success || !Array.isArray(res.files)) return
-    for (const f of res.files.slice(0, 200)) {
+    // 文档类型扩展名（与 toolHandler.docExts 保持一致）
+    const DOC_EXTS = new Set(['txt', 'md', 'markdown', 'json', 'log', 'html', 'xml', 'csv', 'tsv', 'docx', 'xlsx', 'xls', 'pdf', 'pptx', 'ppt'])
+    const isDoc = (name) => {
+      const m = /\.([a-z0-9]+)$/i.exec(name || '')
+      return !!(m && DOC_EXTS.has(m[1].toLowerCase()))
+    }
+    // 文档数量阈值：超过此值只入库文件名+小摘要，避免大库启动时内存/磁盘抖动
+    const DOC_FULL_INDEX_LIMIT = 50
+    const files = res.files.slice(0, 300)
+    const docCount = files.filter(f => isDoc(f.name)).length
+    const fullIndexDocs = docCount <= DOC_FULL_INDEX_LIMIT
+    let processed = 0
+    for (const f of files) {
       try {
-        const r = await window.electronAPI.refReadFile(f.path)
-        if (r?.success && r.type === 'json' && r.data) {
-          await searchService.indexFile(f.path, r.fileName || f.name, r.data)
+        if (isDoc(f.name)) {
+          // 大库场景：只入库文件名（filename 命中已能匹配搜索意图，跳过全文解析省内存）
+          if (!fullIndexDocs) {
+            await searchService.indexDocument(f.path, f.name || '', 'doc',
+              [`<mark>${f.name || ''}</mark>（文件名命中：文档较多，启动时仅索引文件名，未做全文入库；用 read_local_file 读取后将自动全文索引）`],
+              f.mtime || '')
+            processed++
+            if (processed % 10 === 0) await new Promise(r => setTimeout(r, 0))
+            continue
+          }
+          // 常规场景：解析全文 → 切块 → 知识库索引
+          const { parseDocument, chunkText } = await import('./services/docParseService')
+          const parsed = await parseDocument(f.path)
+          if (!parsed.success || !parsed.text) continue
+          // 单文档文本超 200KB 时只取前 200KB，避免超大 PDF/PowerPoint 一次性入库
+          let text = parsed.text
+          const MAX_TEXT_CHARS = 200 * 1024
+          if (text.length > MAX_TEXT_CHARS) text = text.slice(0, MAX_TEXT_CHARS) + '\n\n[已截断：原文超过 200KB]'
+          const chunks = chunkText(text)
+          if (!chunks.length) continue
+          let mtime = ''
+          if (window.electronAPI?.fs?.stat) {
+            try {
+              const st = await window.electronAPI.fs.stat(f.path)
+              if (st?.success) mtime = st.mtime || ''
+            } catch {}
+          }
+          await searchService.indexDocument(f.path, f.name || '', 'doc', chunks, mtime)
+          processed++
+          // 每处理 3 个文档让出一次主线程，避免连续解析卡 UI
+          if (processed % 3 === 0) await new Promise(r => setTimeout(r, 0))
+        } else {
+          const r = await window.electronAPI.refReadFile(f.path)
+          if (r?.success && r.type === 'json' && r.data) {
+            await searchService.indexFile(f.path, r.fileName || f.name, r.data)
+          }
         }
       } catch (e) {
         // 单个文件索引失败忽略
@@ -4128,6 +4195,23 @@ onMounted(() => {
   setTimeout(() => { checkOrphanReviewItems() }, 1500)
   // 每日复习定时提醒（30 秒轮询，跨天/修改配置自动生效）
   startReviewReminder()
+
+  // 监听大图未自动建向量提示（整个会话只提示一次）
+  if (searchService.on) {
+    searchService.on((event, payload) => {
+      if (event === 'large-map') {
+        ElMessageBox.alert(
+          `当前思维导图有 ${payload.nodeCount} 个节点，为避免卡顿未自动构建向量索引。\n\n如需使用语义搜索，请前往「设置 → Embedding 向量化 → 重建向量索引」手动构建。`,
+          '提示',
+          {
+            confirmButtonText: '知道了',
+            type: 'info',
+            dangerouslyUseHTMLString: false
+          }
+        ).catch(() => {})
+      }
+    })
+  }
 
   // 双击 .smm 文件拉起应用：接收主进程转发的文件路径并打开
   if (window.electronAPI?.onOpenFile) {

@@ -47,12 +47,20 @@ function decryptProfiles(config) {
   for (const p of (config && config.profiles) || []) {
     if (p && typeof p.apiKey === 'string') p.apiKey = decryptKey(p.apiKey)
   }
+  // 解密 embedding apiKey
+  if (config && config.embedding && typeof config.embedding.apiKey === 'string') {
+    config.embedding.apiKey = decryptKey(config.embedding.apiKey)
+  }
   return config
 }
 
 function encryptProfiles(config) {
   for (const p of (config && config.profiles) || []) {
     if (p && typeof p.apiKey === 'string') p.apiKey = encryptKey(p.apiKey)
+  }
+  // 加密 embedding apiKey
+  if (config && config.embedding && typeof config.embedding.apiKey === 'string') {
+    config.embedding.apiKey = encryptKey(config.embedding.apiKey)
   }
   return config
 }
@@ -76,6 +84,14 @@ const DEFAULT_AI_CONFIG = {
   vision: {
     enabled: false,
     activeProfileId: ''  // 当前启用的多模态配置档（type: 'vision'）
+  },
+  embedding: {
+    enabled: false,
+    useBaseConfig: true,  // 是否复用基础大模型的 URL/Key（只填模型名）
+    baseURL: '',
+    apiKey: '',
+    model: '',            // 如 text-embedding-3-small、text-embedding-v3 等
+    autoComplete: true
   }
 }
 
@@ -90,7 +106,8 @@ function migrateConfig(raw) {
     profiles: [],
     activeProfileId: '',
     temperature: 0.7,
-    vision: { enabled: false, activeProfileId: '' }
+    vision: { enabled: false, activeProfileId: '' },
+    embedding: { enabled: false, useBaseConfig: true, baseURL: '', apiKey: '', model: '', autoComplete: true }
   }
   if (!raw || typeof raw !== 'object') return config
 
@@ -181,6 +198,15 @@ function migrateConfig(raw) {
     if (first) config.vision.activeProfileId = first.id
   }
 
+  // embedding 配置迁移
+  const oldEmb = raw.embedding || {}
+  config.embedding.enabled = !!oldEmb.enabled
+  config.embedding.useBaseConfig = oldEmb.useBaseConfig !== false
+  config.embedding.baseURL = String(oldEmb.baseURL || '')
+  config.embedding.apiKey = String(oldEmb.apiKey || '')
+  config.embedding.model = String(oldEmb.model || '')
+  config.embedding.autoComplete = oldEmb.autoComplete !== false
+
   return config
 }
 
@@ -226,11 +252,29 @@ function resolveVisionProfile(config) {
   }
 }
 
+// 解析 embedding 最终使用的配置
+// useBaseConfig=true 时，URL/Key 复用基础大模型配置，只使用独立的 model 名称
+function resolveEmbeddingConfig(config) {
+  const emb = (config && config.embedding) || {}
+  if (!emb.enabled) return null
+  const base = resolveActiveProfile(config)
+  const useBase = emb.useBaseConfig !== false
+  return {
+    enabled: true,
+    baseURL: useBase ? (base.baseURL || '') : (emb.baseURL || ''),
+    apiKey: useBase ? (base.apiKey || '') : (emb.apiKey || ''),
+    model: emb.model || '',
+    autoComplete: useBase ? (base.autoComplete !== false) : (emb.autoComplete !== false)
+  }
+}
+
 // 获取 AI 配置（只返回元信息 + 掩码，绝不返回 apiKey 明文，防止渲染进程 XSS 窃取）
 ipcMain.handle('get-ai-config', () => {
   try {
-    const masked = maskProfiles(readConfig())
-    const active = resolveActiveProfile(readConfig())
+    const cfg = readConfig()
+    const masked = maskProfiles(cfg)
+    const active = resolveActiveProfile(cfg)
+    const emb = cfg.embedding || {}
     // 暴露 safeStorage 可用性：当系统不支持加密时，UI 需明确提示用户 key 以明文存储（fallback）
     let encryptionAvailable = true
     try { encryptionAvailable = safeStorage && safeStorage.isEncryptionAvailable && safeStorage.isEncryptionAvailable() } catch (e) { encryptionAvailable = false }
@@ -241,10 +285,20 @@ ipcMain.handle('get-ai-config', () => {
       hasApiKey: !!active.apiKey,
       model: active.model || '',
       autoComplete: active.autoComplete !== false,
+      // embedding 配置（apiKey 掩码）
+      embedding: {
+        enabled: !!emb.enabled,
+        useBaseConfig: emb.useBaseConfig !== false,
+        baseURL: emb.baseURL || '',
+        apiKey: emb.apiKey ? maskKey(emb.apiKey) : '',
+        hasApiKey: !!emb.apiKey,
+        model: emb.model || '',
+        autoComplete: emb.autoComplete !== false
+      },
       encryptionAvailable
     }
   } catch (error) {
-    return { ...DEFAULT_AI_CONFIG, baseURL: '', apiKey: '', hasApiKey: false, model: '', encryptionAvailable: false }
+    return { ...DEFAULT_AI_CONFIG, baseURL: '', apiKey: '', hasApiKey: false, model: '', embedding: DEFAULT_AI_CONFIG.embedding, encryptionAvailable: false }
   }
 })
 
@@ -264,10 +318,73 @@ ipcMain.handle('set-ai-config', (event, config) => {
         }
       }
     }
+    // embedding apiKey 掩码 → 沿用旧值
+    if (raw.embedding && typeof raw.embedding.apiKey === 'string') {
+      const oldEmb = old.embedding || {}
+      if (isMaskedKey(raw.embedding.apiKey) && oldEmb.apiKey) {
+        raw.embedding.apiKey = oldEmb.apiKey
+      }
+    }
     writeConfig(raw)
     return { success: true }
   } catch (error) {
     return { success: false, error: error.message }
+  }
+})
+
+/**
+ * Embedding 向量化（主进程代理，apiKey 由主进程注入，不暴露给渲染层）
+ * 优先使用用户配置的 embedding API；未配置/失败时返回 null，由渲染层降级到本地模型
+ */
+ipcMain.handle('ai:embed', async (event, { texts, type }) => {
+  try {
+    const config = readConfig()
+    const emb = resolveEmbeddingConfig(config)
+    if (!emb || !emb.baseURL || !emb.model) {
+      return { success: false, error: 'embedding 未配置或不完整', fallback: true }
+    }
+
+    const url = buildEmbeddingURL(emb.baseURL, emb.autoComplete !== false)
+    const input = Array.isArray(texts) ? texts : [String(texts || '')]
+    if (!input.length) return { success: true, vectors: [] }
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 30000)
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${emb.apiKey}`
+        },
+        body: JSON.stringify({ model: emb.model, input }),
+        signal: controller.signal
+      })
+      if (!resp.ok) {
+        const text = await resp.text()
+        return { success: false, error: `HTTP ${resp.status}: ${text.slice(0, 200)}`, fallback: true }
+      }
+      const data = await resp.json()
+      const rawData = data.data || []
+      // 按 index 排序（保证与输入顺序一致）
+      rawData.sort((a, b) => (a.index || 0) - (b.index || 0))
+      const vectors = rawData.map(item => {
+        const vec = item.embedding || []
+        // 归一化（余弦相似度需要）
+        let norm = 0
+        for (let i = 0; i < vec.length; i++) norm += vec[i] * vec[i]
+        norm = Math.sqrt(norm) || 1
+        return vec.map(v => v / norm)
+      })
+      return { success: true, vectors }
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      return { success: false, error: '请求超时（30 秒）', fallback: true }
+    }
+    return { success: false, error: error.message, fallback: true }
   }
 })
 
@@ -503,4 +620,151 @@ ipcMain.handle('ai:testVisionModel', async (event, { baseURL, apiKey, profileId,
 })
 
 // 导出供 ocr.js 使用
-module.exports = { resolveProfileForVision, isVisionEnabled, resolveApiKeyForProfile }
+module.exports = { resolveProfileForVision, isVisionEnabled, resolveApiKeyForProfile, resolveEmbeddingConfig }
+
+/* ============ Embedding 向量化配置 ============ */
+
+// 构建 embeddings API URL（OpenAI 兼容格式：/v1/embeddings）
+function buildEmbeddingURL(baseURL, autoComplete = true) {
+  if (!baseURL) return ''
+  let url = baseURL.trim().replace(/\/+$/, '')
+  if (autoComplete === false) return url
+  // 去掉 chat/completions 等多余后缀
+  url = url.replace(/\/(chat\/completions|completions)$/i, '')
+  if (/\/embeddings$/i.test(url)) return url
+  // 已带版本号（/v1、/v4 等）→ 只补 /embeddings
+  if (/\/v\d+[a-z]*$/i.test(url)) return url + '/embeddings'
+  return url + '/v1/embeddings'
+}
+
+// 判断模型名是否为 embedding 模型（根据常见命名规则）
+function isEmbeddingModel(name) {
+  if (!name) return false
+  const n = String(name).toLowerCase()
+  // 常见 embedding 模型关键词
+  const embKeywords = [
+    'embedding', 'embed', 'text-embedding',
+    'bge', 'm3e', 'e5', 'gte',
+    'bge-', 'm3e-', 'gte-',
+    'multilingual-e5', 'all-minilm', 'paraphrase-',
+    'contriever', 'specter', 'simcse',
+    'baai', 'zhinao',  // 智源、阿里
+    'text2vec', 'ernie-text'
+  ]
+  for (const kw of embKeywords) {
+    if (n.includes(kw)) return true
+  }
+  return false
+}
+
+// 检测 embedding 可用模型列表
+ipcMain.handle('ai:listEmbeddingModels', async (event, { baseURL, apiKey, profileId, autoComplete }) => {
+  try {
+    if (!baseURL) return { success: false, error: '缺少 API 地址' }
+    let key = apiKey || ''
+    if (isMaskedKey(key) && profileId) {
+      key = resolveApiKeyForProfile(profileId)
+    }
+    const base = buildBaseURL(baseURL)
+    const headers = {}
+    if (key) headers['Authorization'] = `Bearer ${key}`
+    // 超时保护
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15000)
+    let models = []
+    try {
+      const modelsUrl = /\/v\d+[a-z]*$/i.test(base) ? `${base}/models` : `${base}/v1/models`
+      const resp = await fetch(modelsUrl, { headers, signal: controller.signal })
+      if (resp.ok) {
+        const data = await resp.json()
+        if (data.data && Array.isArray(data.data)) {
+          for (const m of data.data) {
+            if (!m || !m.id) continue
+            if (isEmbeddingModel(m.id)) models.push(m.id)
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    clearTimeout(timer)
+    // 如果 /models 没找到，试试 Ollama 格式 /api/tags
+    if (models.length === 0) {
+      try {
+        const resp = await fetch(`${base}/api/tags`, { headers })
+        if (resp.ok) {
+          const data = await resp.json()
+          if (data.models && Array.isArray(data.models)) {
+            for (const m of data.models) {
+              if (m.name && isEmbeddingModel(m.name)) models.push(m.name)
+            }
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    if (models.length > 0) {
+      return { success: true, models }
+    }
+    return { success: false, error: '未自动检测到 embedding 模型，可手动输入模型名称（如 text-embedding-3-small、bge-large-zh-v1.5 等）' }
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      return { success: false, error: '请求超时（15 秒），请检查 API 地址是否可访问' }
+    }
+    return { success: false, error: error.message }
+  }
+})
+
+// 测试 embedding 配置是否可用（发一次小请求验证）
+ipcMain.handle('ai:testEmbedding', async (event, { baseURL, apiKey, profileId, model, autoComplete }) => {
+  try {
+    if (!baseURL || !model) {
+      return { success: false, error: '缺少 API 地址或模型名称' }
+    }
+    let key = apiKey || ''
+    if (isMaskedKey(key) && profileId) {
+      key = resolveApiKeyForProfile(profileId)
+    }
+    const url = buildEmbeddingURL(baseURL, autoComplete !== false)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15000)
+    let resp
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(key ? { 'Authorization': `Bearer ${key}` } : {})
+        },
+        body: JSON.stringify({ model, input: 'test' }),
+        signal: controller.signal
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+    const text = await resp.text()
+    if (resp.ok) {
+      try {
+        const data = JSON.parse(text)
+        const emb = data.data?.[0]?.embedding
+        const dims = Array.isArray(emb) ? emb.length : 0
+        return { success: true, message: `Embedding 配置可用（向量维度：${dims}）`, dimension: dims, dimensions: dims }
+      } catch {
+        return { success: true, message: 'Embedding 配置可用（响应格式未检测到维度信息）' }
+      }
+    }
+    // 常见错误分类
+    if (resp.status === 401 || /Unauthorized|invalid api key|AccessDenied/i.test(text)) {
+      return { success: false, error: 'API Key 无效或无权限，请检查 Key 是否正确' }
+    }
+    if (resp.status === 404 || /does not exist|model not found|not found/i.test(text)) {
+      return { success: false, error: '模型不存在，请确认模型名称是否正确' }
+    }
+    if (/Insufficient Balance|余额不足|insufficient_quota|billing/i.test(text)) {
+      return { success: false, error: '账户余额不足或未开通按量计费，请充值或更换 API Key' }
+    }
+    return { success: false, error: `请求失败（HTTP ${resp.status}）：${text.slice(0, 150)}` }
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      return { success: false, error: '请求超时（15 秒），请检查 API 地址是否可访问' }
+    }
+    return { success: false, error: error.message }
+  }
+})

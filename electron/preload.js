@@ -90,6 +90,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 实测探测多模态模型可用性（发真实小图验证）
   testVisionModel: (baseURL, apiKey, model, autoComplete, profileId) => ipcRenderer.invoke('ai:testVisionModel', { baseURL, apiKey, model, autoComplete, profileId }),
   getVisionConfig: () => ipcRenderer.invoke('ai:getVisionConfig'),
+  // Embedding 向量化模型
+  listEmbeddingModels: (baseURL, apiKey, profileId, autoComplete) => ipcRenderer.invoke('ai:listEmbeddingModels', { baseURL, apiKey, profileId, autoComplete }),
+  testEmbedding: (baseURL, apiKey, model, autoComplete, profileId) => ipcRenderer.invoke('ai:testEmbedding', { baseURL, apiKey, model, autoComplete, profileId }),
+  aiEmbed: (texts, type) => ipcRenderer.invoke('ai:embed', { texts, type }),
 
   // AI 对话请求（通过主进程代理，避免 CORS；apiKey 由主进程按 profileId 注入，渲染进程不持有明文）
   aiChat: (url, headers, body, profileId) => ipcRenderer.invoke('ai:chat', { url, headers, body, profileId }),
@@ -459,14 +463,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('db:indexFile', { filePath, fileName, treeData, mtime }),
     indexDocument: (opts) => ipcRenderer.invoke('db:indexDocument', opts),
     removeFile: (filePath) => ipcRenderer.invoke('db:removeFile', { filePath }),
+    removeDir: (dirPath) => ipcRenderer.invoke('db:removeDir', { dirPath }),
     getStats: () => ipcRenderer.invoke('db:getStats'),
-    listFiles: () => ipcRenderer.invoke('db:listFiles')
+    listFiles: () => ipcRenderer.invoke('db:listFiles'),
+    getFileEntries: (filePath) => ipcRenderer.invoke('db:getFileEntries', { filePath })
   },
 
   // 文档向量库（本地语义检索，模型在渲染进程推理）
   vector: {
     indexDocument: (opts) => ipcRenderer.invoke('vector:indexDocument', opts),
+    indexMindMap: (opts) => ipcRenderer.invoke('vector:indexMindMap', opts),
     remove: (filePath) => ipcRenderer.invoke('vector:remove', { filePath }),
+    clearAll: () => ipcRenderer.invoke('vector:clearAll'),
+    listFiles: () => ipcRenderer.invoke('vector:listFiles'),
     search: (queryVector, topK) => ipcRenderer.invoke('vector:search', { queryVector, topK }),
     getStats: () => ipcRenderer.invoke('vector:getStats')
   },

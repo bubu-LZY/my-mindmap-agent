@@ -2986,7 +2986,7 @@ async function extractLocalDocTextCached(filePath, ext) {
   let result = { success: false, error: '不支持的格式' }
   try {
     // 统一走 docParseService：PDF(pdfjs) / DOCX(mammoth) / XLSX(exceljs) / CSV·TSV(papaparse) / 文本直读
-    if (['txt', 'md', 'markdown', 'json', 'log', 'csv', 'tsv', 'html', 'xml', 'docx', 'pdf', 'xlsx', 'xls'].includes(ext)) {
+    if (['txt', 'md', 'markdown', 'json', 'log', 'csv', 'tsv', 'html', 'xml', 'docx', 'pdf', 'xlsx', 'xls', 'pptx'].includes(ext)) {
       const res = await parseDocument(filePath)
       result = res.success
         ? { success: true, text: res.text, source: res.type, meta: res.meta }
@@ -3010,7 +3010,7 @@ export function warmLocalDocTextCache(filePath, ext, text, meta) {
 async function indexDocumentInBackground(filePath, fileName, ext, text) {
   try {
     if (!searchService.isAvailable()) return
-    const docExts = ['docx', 'xlsx', 'xls', 'csv', 'tsv', 'pdf', 'txt', 'md', 'markdown', 'json', 'log', 'html', 'xml']
+    const docExts = ['docx', 'xlsx', 'xls', 'csv', 'tsv', 'pdf', 'pptx', 'ppt', 'txt', 'md', 'markdown', 'json', 'log', 'html', 'xml']
     if (!docExts.includes(ext)) return
     const chunks = chunkText(String(text || ''))
     if (!chunks.length) return
@@ -8557,8 +8557,8 @@ ${block}`
           }
           text = treeToText(treeData)
           source = '思维导图大纲文本'
-        } else if (['docx', 'xlsx', 'xls', 'csv', 'tsv'].includes(ext)) {
-          // 统一解析器：docx(mammoth) / xlsx(exceljs) / xls(SheetJS) / csv·tsv(papaparse)；优先命中缓存
+        } else if (['docx', 'xlsx', 'xls', 'csv', 'tsv', 'pptx'].includes(ext)) {
+          // 统一解析器：docx(mammoth) / xlsx(exceljs) / xls(SheetJS) / csv·tsv(papaparse) / pptx(jszip+xml)；优先命中缓存
           const res = await extractLocalDocTextCached(filePath, ext)
           if (!res.success) return { success: false, message: `${ext} 解析失败: ${res.error}` }
           text = res.text
@@ -8568,7 +8568,9 @@ ${block}`
               ? `Excel 表格（${res.meta.sheets} 个工作表 / ${res.meta.rows} 行）`
               : ext === 'xls'
                 ? `Excel 表格·旧版 xls（${res.meta.sheets} 个工作表 / ${res.meta.rows} 行）`
-                : `${ext.toUpperCase()} 表格（${res.meta.rows} 行）`
+                : ext === 'pptx'
+                  ? `PowerPoint 演示文稿（${res.meta.slides} 张幻灯片）`
+                  : `${ext.toUpperCase()} 表格（${res.meta.rows} 行）`
         } else if (ext === 'pdf') {
           // 优先走 files API 多模态：无论扫描版/图片型 PDF，都先发给视觉模型直读
           const visionRes = await readLocalFileViaVisionAPI(filePath, fileName, 'application/pdf',
@@ -8676,7 +8678,7 @@ ${block}`
             }
             source = `代码文件（${ext}）`
           } else {
-            return { success: false, message: `不支持的文件类型 .${ext}。支持：txt/md/json/log/html/xml/docx/xlsx/xls/csv/tsv/pdf/smm 及常见图片（OCR），以及代码文件：${codeExts.join('/')}` }
+            return { success: false, message: `不支持的文件类型 .${ext}。支持：txt/md/json/log/html/xml/docx/xlsx/xls/csv/tsv/pdf/pptx/ppt/smm 及常见图片（OCR），以及代码文件：${codeExts.join('/')}` }
           }
         }
 

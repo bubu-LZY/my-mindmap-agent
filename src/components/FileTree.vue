@@ -1121,7 +1121,7 @@ const removeNode = (data) => {
         tree.remove(node)
       }
       // 通知父组件：被删除的文件可能有打开的标签，需要同步关闭
-      emit('file-deleted', data.path)
+      emit('file-deleted', data.path, data.isDir)
     } catch (error) {
       ElMessage.error('删除失败: ' + error.message)
     }

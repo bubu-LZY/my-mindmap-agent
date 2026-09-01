@@ -1,6 +1,6 @@
 {
   "name": "mind-map-ai-agent",
-  "version": "3.2.0",
+  "version": "3.2.2",
   "description": "基于思维导图和大纲的 AI 智能体",
   "author": "LZY",
   "main": "electron/main.js",

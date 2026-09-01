@@ -2234,12 +2234,20 @@ watch(currentConversation, (conv) => {
 
 /**
  * 加载当前 AI 配置中的模型名称
+ * 双保险：除了顶层 model，再用 activeProfileId 找一遍对应 profile 的 model，
+ * 防止主进程返回的 model 字段与 activeProfileId 不一致时仍显示旧档模型
  */
 const loadCurrentModel = async () => {
   try {
     if (window.electronAPI && window.electronAPI.getAIConfig) {
       const config = await window.electronAPI.getAIConfig()
-      currentModelName.value = config.model || ''
+      let model = config.model || ''
+      const pid = config.activeProfileId
+      if (pid && Array.isArray(config.profiles)) {
+        const p = config.profiles.find(x => x.id === pid)
+        if (p && p.model) model = p.model
+      }
+      currentModelName.value = model
       // 配置已切换：清空已缓存的模型列表，下次打开下拉框重新检测新配置档的模型
       availableModels.value = []
       // 确保 aiService 下次发消息时重新从主进程加载新配置档（baseURL/profileId/model）
@@ -3948,8 +3956,17 @@ const sendMessage = async (overrideText = null) => {
               toolName: toolCall.function.name,
               error: e.message
             }, currentConversation.value?.id)
-            emit('log-updated')
+            // review bug fix：工具调用失败时，立即把错误推到 aiMsg.content（消息列表可见）。
+            // 之前只在 tcEntry.status / addLog 记录错误，AI 继续对话时用户只能在日志面板看到，
+            // 而且若 AI 继续成功完成本轮，错误信息永远不会出现在消息气泡里。
+            if (!aiMsg.content) {
+              aiMsg.content = `⚠️ 工具 ${toolNameMap[toolName] || toolName} 调用失败：${e.message || '未知错误'}`
+            } else if (!aiMsg.content.includes(`工具 ${toolNameMap[toolName] || toolName} 调用失败`)) {
+              // 不重复追加同一工具的失败信息（同一轮 AI 可能反复重试同一工具）
+              aiMsg.content = aiMsg.content + `\n\n⚠️ 工具 ${toolNameMap[toolName] || toolName} 调用失败：${e.message || '未知错误'}`
+            }
             scrollToBottom()
+            emit('log-updated')
             return { success: false, message: `工具调用失败: ${e.message}` }
           }
         },
@@ -4154,7 +4171,13 @@ const sendMessage = async (overrideText = null) => {
             return
           }
           console.error('AI 服务错误:', error)
-          aiMsg.content = fullResponse || `错误: ${error.message || 'AI 服务异常'}`
+          // review bug fix：错误消息末尾追加"工具失败摘要"——之前如果 aiMsg.content 已被前面工具失败的 catch 设了值，
+          // 这里会被覆盖；现在改成"fullResponse 优先，错误信息附加，工具失败摘要追加"
+          const failedTools = (aiMsg.toolCalls || []).filter(tc => tc.status === 'error' && tc.errorBrief)
+          const failedSummary = failedTools.length
+            ? '\n\n—— 工具调用失败明细 ——\n' + failedTools.map(tc => `• ${tc.displayName || tc.name}: ${tc.errorBrief}`).join('\n')
+            : ''
+          aiMsg.content = (fullResponse || `错误: ${error.message || 'AI 服务异常'}`) + failedSummary
           aiStatus.value = 'error'
           emit('tool-call-status', 'error')
           aiService.resetAbort()
