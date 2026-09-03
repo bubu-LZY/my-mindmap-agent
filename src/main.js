@@ -10,6 +10,9 @@ import { runLegacyMigration } from './utils/legacyMigrate'
 runLegacyMigration().finally(() => {
   const app = createApp(App)
 
+  // Electron <webview> 不是 Vue 组件，标记为原生元素避免编译警告
+  app.config.compilerOptions.isCustomElement = (tag) => tag === 'webview'
+
   app.use(createPinia())
   app.use(ElementPlus)
 

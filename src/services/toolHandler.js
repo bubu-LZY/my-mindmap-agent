@@ -11,10 +11,6 @@ import { searchWeb, readWebpage, aiService } from './aiService'
 import { searchService } from './searchService'
 import { applyTextStyleToNodes, applyTextStyleToTextRanges, analyzeNodeTextStyles, copyRichTextStyles, colorNameToFamily, applyTextStyleToTextRangesByColor, normalizeTextColor, normalizeHighlightColor, normalizeNodeFillColor } from '../utils/textStyle'
 import { addMemoryFact, getMemoryFacts, removeMemoryFact } from '../utils/aiMemory'
-// review #1：持久记忆工具（基于 utils/memoryStore.js）
-import { addMemory, searchMemory, listMemory, deleteMemory, toggleMemory } from '../utils/memoryStore'
-// review #5：对原文本快照（在改写前留下原内容供用户对照）
-import { snapshotBeforeTextChange } from '../utils/nodeSnapshot'
 import { taskSchedulerService } from './taskSchedulerService'
 import {
   getReviewPlan, getToday, CYCLES, isInReviewPlan,
@@ -28,6 +24,8 @@ import {
 import { useMindMapStore } from '../stores/mindMapStore'
 import { parseDocument, chunkText } from './docParseService'
 import { pdfToImages } from '../utils/pdfToImage'
+import { classifyMindMap, mindMapTypePrompt } from '../utils/mindMapType'
+import { runDeskCalendarSyncOnce } from './deskCalendarSync'
 import { listAllContextWindows, queryContextWindow, setContextWindow, deleteContextWindow } from '../utils/contextWindow'
 import { parseOpmlToTree, parseFreemindToTree } from '../utils/xmlOutlineParser'
 import { parseXmindBase64 } from '../utils/xmindParser'
@@ -37,17 +35,11 @@ import { buildTriModeHtml } from '../utils/triModeExport'
 import { renderSvgFromData } from '../utils/offscreenRender'
 import { safeExportSvg } from '../utils/safeExportSvg'
 import { uploadFileForProvider } from './fileUploadService'
+import { toolRegistry, TIMEOUT_PRESETS } from '../tools/ToolRegistry'
+import { registerAllNewTools, runCodeTool } from '../tools'
 
-// review L-7：代码文件扩展名公共常量。read_local_file 与 retrieve_local_file 共用一份，
-// 避免两份独立维护造成不一致（之前 read_local_file 多 bash/zsh，retrieve_local_file 缺）。
-const COMMON_CODE_EXTS = [
-  'py', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'vue',
-  'sh', 'bash', 'zsh',
-  'rb', 'go', 'rs', 'java', 'kt', 'swift',
-  'c', 'cpp', 'cc', 'h', 'hpp', 'cs', 'php', 'scala',
-  'sql', 'yaml', 'yml', 'toml', 'ini', 'conf',
-  'gradle', 'groovy', 'lua', 'perl', 'pl', 'r', 'dart'
-]
+// 注册所有新版格式工具（如 run_code）
+registerAllNewTools()
 
 // 中文别名映射：把常见中文意图词翻译成英文关键词，用于 activate_tools / semantic_tool_search 的中文匹配
 // 覆盖：飞书/微信/导出/挖空/复习/定时/知识库/云盘/图片/搜索/布局/样式等高频领域
@@ -115,12 +107,12 @@ async function readLocalFileViaVisionAPI(filePath, fileName, mimeType, readPromp
   })
   if (!up || !up.success || !up.ref) return null
 
-  const systemPrompt = '你是文档内容提取助手，请忠实、完整地提取文件中的文字内容；若是扫描版或图片，先识别文字再输出。不要添加解释、前言或总结。'
+  const systemPrompt = '你是文档内容提取助手，请忠实、完整地提取文件中的文字内容；若是扫描版或图片，先识别文字再输出。不要添加解释、前言或总结。若文件内容为空或无法识别，请输出空字符串，不要编造。'
   const choice = await aiService.chat(
     [{ type: 'text', text: readPrompt }, up.ref],
     systemPrompt,
     null,
-    { configOverride: visionOverride }
+    { configOverride: visionOverride, thinking: false }
   )
   const outText = String(choice?.message?.content || '').trim()
   if (!outText) return null
@@ -239,16 +231,6 @@ const toolCatalog = [
   { name: 'send_wechat_file', category: 'Push', desc: 'Send a file (any format like PDF/Excel, ≤30MB) to WeChat (default contact); use when the user wants to send a file to WeChat; filePath = local file path' },
   { name: 'send_feishu_file', category: 'Push', desc: 'Send a file (any format like PDF/Excel, ≤30MB) to a Feishu group chat (default push chat, or a named chat); use when the user wants to send a file to Feishu; filePath = local file path' },
   { name: 'delete_local_file', category: 'File', desc: 'Delete a file on the local disk (to system trash or permanently). Use when the user asks to delete a local mindmap file / local file; always confirm with the user first' },
-  // 编辑外部文档（任何格式：JSON / Markdown / 代码 / txt / csv 等纯文本类文件）
-  { name: 'edit_local_file', category: 'File', desc: 'Edit a local text file in place (JSON / Markdown / code / txt / csv / etc). Use when the user wants to modify the content of an external file. Supports two modes: (1) replace_in_file (precise old_text → new_text, safest); (2) write_full_file (overwrite entire file). Auto-creates the file if it does not exist when write_full_file is used' },
-  { name: 'append_local_file', category: 'File', desc: 'Append content to the end of a local text file. Use when the user wants to add new lines / entries without overwriting existing content (e.g. append to a log, list, CSV row). Auto-creates the file if it does not exist' },
-  { name: 'read_local_file_lines', category: 'File', desc: 'Read a specific line range of a local text file (start_line / end_line, 1-based, inclusive). Use for large files when only a small section needs to be viewed' },
-  // 代码执行 / 部署（路径 A：主进程新增 shell:exec / shell:spawn IPC，binary 走白名单）
-  { name: 'run_shell', category: 'Shell', desc: 'Run an allowed command on the local machine (synchronous, up to 10 minutes). Allowed binaries: node/npm/npx/pnpm/yarn/python/python3/pip/git/cmd/powershell/go/rustc/cargo/make/docker etc. cwd must be inside an allowed directory (userData / temp / open-file-dir / desktop / downloads / documents). Returns stdout / stderr / exitCode.' },
-  { name: 'run_node', category: 'Shell', desc: 'Run a local Node.js script: pass script_path (absolute) and optional args. Equivalent to `node script_path [args]`' },
-  { name: 'run_python', category: 'Shell', desc: 'Run a local Python script: pass script_path (absolute) and optional args. Equivalent to `python script_path [args]`' },
-  { name: 'spawn_shell', category: 'Shell', desc: 'Spawn a long-running command as a background job (e.g. dev server). Returns a handle to subscribe stdout/stderr/exit via shell events. Use shell:kill(handle) to terminate.' },
-  { name: 'shell_get_env', category: 'Shell', desc: 'Read whitelisted environment variables (PATH / NODE_ENV / PYTHONPATH etc). Other env vars are blocked for security.' },
   { name: 'clear_mindmap', category: 'Edit', desc: 'Clear all nodes of the current mindmap, keeping one empty root (confirm with the user before clearing)' },
   { name: 'ai_continue_children', category: 'AI', desc: 'AI continue children: AI generates child nodes and attaches them for the selected node (or the whole map with scope=root); depth per user request, default 2~5, max 6; keeps original text; Ctrl+Z undoable' },
   { name: 'ai_recite_rewrite', category: 'AI', desc: 'AI recitation rewrite: 【memory shorthand】+summary; short original text is preserved verbatim, longer text summarized; natural homophones only; targets (uids/keyword/mode) sets rewrite scope; Ctrl+Z undoable' },
@@ -282,10 +264,8 @@ const toolCatalog = [
   { name: 'list_mcp_servers', category: 'MCP', desc: 'List configured MCP servers (id, name, transport, url/command, enabled)' },
   { name: 'list_mcp_tools', category: 'MCP', desc: 'List tools exposed by one MCP server' },
   { name: 'mcp_call_tool', category: 'MCP', desc: 'Call a tool on a configured MCP server' },
-  { name: 'update_mcp_server', category: 'MCP', desc: 'Update a configured MCP server (name/url/command/args/env/headers/enabled/transport)' },
   { name: 'list_custom_tools', category: 'Custom', desc: 'List custom tools placed in the custom-tools directory' },
   { name: 'call_custom_tool', category: 'Custom', desc: 'Call a custom tool by id' },
-  { name: 'update_custom_tool', category: 'Custom', desc: 'Update a custom tool (name/description/enabled/autoInvoke)' },
   { name: 'list_skills', category: 'Skills', desc: 'List saved skills (name, description, enabled, autoInvoke)' },
   { name: 'get_skill', category: 'Skills', desc: 'Get one saved skill including its full instructions' },
   { name: 'invoke_skill', category: 'Skills', desc: 'Invoke a saved skill by returning its full instructions for immediate execution' },
@@ -309,125 +289,23 @@ const toolCatalog = [
   { name: 'format_painter', category: 'Style', desc: 'Format painter: copy the source node format onto a target node set; optionally copy text-level styles too' },
   { name: 'merge_mindmap_files', category: 'Mindmap', desc: 'Merge another .smm map file (or a given branch of it) under a node of the current map; cross-file knowledge consolidation' },
   { name: 'export_subtree', category: 'Export', desc: 'Export the selected/given subtree: smm=standalone map file; png/jpg/svg=image (jpg saved as png; saved to default dir and sent into chat); ask the user first if the format is unspecified' },
-  { name: 'export_to_markdown', category: 'Export', desc: 'SMM → .md FILE only (saves to default save dir). NEVER call this just because the user said "markdown表格/列表/代码块" in chat — those are inline reply formats, not file exports. Only call when user explicitly asks to save/export/conver the map to a file (导出/保存/转成 md 文件/save as markdown/export markdown). For inline markdown replies, just answer with markdown directly.' },
+  { name: 'export_to_markdown', category: 'Export', desc: 'SMM to Markdown: export the whole map as a .md file (default save dir; can read a file by path without opening it)' },
   { name: 'export_mindmap_html', category: 'Export', desc: 'Map to interactive HTML: single mindmap view, or full-view 3-mode HTML (mindmap+outline+graph); can read a file by path without opening it' },
   { name: 'export_mindmap_pdf', category: 'Export', desc: 'Map to PDF: export the whole mindmap (canvas graphic) as a .pdf file (default save dir)' },
   { name: 'export_outline_pdf', category: 'Export', desc: 'Outline to PDF: typeset the indented outline text into a PDF doc (default save dir), good for printing' },
   { name: 'save_text_file', category: 'Export', desc: 'Save arbitrary generated text/markdown/HTML/JSON content directly to the default save dir. Use whenever the AI has composed a document (e.g. quiz HTML) that should be exported as a file instead of printed in chat' },
   { name: 'find_related', category: 'KB', desc: 'Related content: find things related to a keyword in the local KB and current map, and suggest how to link them into the current map' },
   { name: 'memory', category: 'Memory', desc: 'Long-term memory: save (only for explicit long-term intent), get (list all), forget (delete by id)' },
-  { name: 'add_memory', category: 'Memory', desc: 'Add a long-term memory item (review #1). Prefer this over the legacy memory tool: content (text, ≤500 chars), category in (preference|fact|context|instruction), source optional auto|manual. Returns success or error.' },
-  { name: 'search_memory', category: 'Memory', desc: 'Search long-term memory by keyword (review #1): query (string), limit optional int (default 8). Returns up to N items with content + category.' },
-  { name: 'list_memory', category: 'Memory', desc: 'List long-term memory items (review #1). Optional filters: category (preference|fact|context|instruction), enabledOnly (bool), limit (int). Returns total + items.' },
-  { name: 'delete_memory', category: 'Memory', desc: 'Delete a long-term memory item by id (review #1). Use sparingly; usually list_memory first to find the id.' },
-  { name: 'toggle_memory', category: 'Memory', desc: 'Enable/disable a long-term memory item by id (review #1). Disabled items are skipped in search_memory and not auto-injected as system context.' },
-  { name: 'read_local_file', category: 'KB', desc: 'Read a local document in full: txt/md/json direct, docx/xlsx/xls/csv/tsv/pdf text extraction, images auto-OCR, .smm to outline text; required when analyzing local files the user references' },
-  { name: 'retrieve_local_file', category: 'KB', desc: 'Fast semantic retrieval inside a local document: extract text once (cached) then return only the chunks most relevant to the user query; use for large PDF/docx/xlsx/txt instead of reading the whole file' },
+  { name: 'read_local_file', category: 'KB', desc: 'Read a local document in full: txt/md/json direct, docx/pptx/xlsx/xls/csv/tsv/pdf text extraction, images auto-OCR, .smm to outline text; required when analyzing local files the user references' },
+  { name: 'retrieve_local_file', category: 'KB', desc: 'Fast semantic retrieval inside a local document: extract text once (cached) then return only the chunks most relevant to the user query; use for large PDF/docx/pptx/xlsx/txt instead of reading the whole file' },
   { name: 'list_directory', category: 'File', desc: 'List entries of a local folder (subfolders + files with dates); default = folder of the current file' },
   { name: 'find_local_file', category: 'KB', desc: 'Search local common dirs (Desktop/Documents/Downloads/default save dir/app dir) by filename keyword, returns full paths; use when only the filename is known or a read reports "not found"' },
   { name: 'import_file_as_mindmap', category: 'Mindmap', desc: 'Import an external-format file as a mindmap and save .smm: Markdown/OPML/FreeMind(.mm)/XMind/txt' },
+  { name: 'convert_doc_to_mindmap', category: 'Mindmap', desc: 'Read a local document (PDF/DOCX/PPTX/XLSX/XLS/CSV/MD/TXT) and generate a new .smm mindmap file without overwriting the current map; use when user explicitly asks to convert a document to a mindmap' },
   { name: 'list_references', category: 'Refs', desc: 'Reference list & broken-link check: list @file/#node references in the current map (or all files) and verify the referenced file/node still exists' },
   { name: 'scheduled_task', category: 'Scheduler', desc: 'AI scheduled tasks: create / list / update / delete (action param)' },
+  { name: 'run_code', category: 'AI', desc: 'Execute JavaScript code in a sandbox with full tool access. Use for batch operations, complex logic, or combining multiple tool calls into one script. Tools available via await tools.toolName(args). Requires user confirmation before execution.' },
 ]
-
-
-// ============ 容错 JSON 解析（review 修复：AI 出题返回被 max_tokens 截断时仍能尽量提取题目） ============
-function parseQuizResponse(raw) {
-  if (!raw) return []
-  const trimmed = String(raw).trim()
-  if (!trimmed) return []
-
-  // 栈式闭合：按 LIFO 顺序补齐未闭合的字符串/数组/对象（review 修复：处理被 max_tokens 截断的不完整 JSON）
-  function heal(text) {
-    const stack = []
-    let inStr = false, strCh = '', esc = false
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i]
-      if (inStr) {
-        if (esc) { esc = false; continue }
-        if (ch === String.fromCharCode(92)) { esc = true; continue }
-        if (ch === strCh) inStr = false
-        continue
-      }
-      if (ch === '"' || ch === "'") { inStr = true; strCh = ch; continue }
-      if (ch === '{' || ch === '[') stack.push(ch)
-      else if (ch === '}' || ch === ']') {
-        if (stack.length) {
-          const top = stack[stack.length - 1]
-          if ((ch === '}' && top === '{') || (ch === ']' && top === '[')) stack.pop()
-        }
-      }
-    }
-    let suffix = ''
-    if (inStr) suffix += strCh
-    while (stack.length) {
-      const t = stack.pop()
-      suffix += (t === '{' ? '}' : ']')
-    }
-    return text + suffix
-  }
-
-  function extractQs(p) {
-    if (Array.isArray(p)) return p.filter(function (q) { return q && q.question })
-    if (p && Array.isArray(p.questions)) return p.questions.filter(function (q) { return q && q.question })
-    return []
-  }
-
-  // 1) 完整解析
-  try { return extractQs(JSON.parse(trimmed)) } catch (e) {}
-
-  const first = trimmed.indexOf('{')
-  if (first < 0) return []
-
-  // 2) 从末尾倒数找最近的 '}' 切片再尝试 heal
-  for (let end = trimmed.length; end > first; end--) {
-    if (trimmed[end - 1] !== '}') continue
-    const sub = trimmed.slice(first, end)
-    try { return extractQs(JSON.parse(sub)) } catch (e) {}
-    try { return extractQs(JSON.parse(heal(sub))) } catch (e) {}
-  }
-
-  // 3) per-object salvage：从最外层每个 {...} 拉出来单独 parse，无法解析的通过 heal 修复
-  const out = []
-  let depth = 0, start = -1, inStr2 = false, strCh2 = '', esc2 = false
-  for (let i = 0; i < trimmed.length; i++) {
-    const ch = trimmed[i]
-    if (inStr2) {
-      if (esc2) { esc2 = false; continue }
-      if (ch === String.fromCharCode(92)) { esc2 = true; continue }
-      if (ch === strCh2) inStr2 = false
-      continue
-    }
-    if (ch === '"') { inStr2 = true; strCh2 = '"'; continue }
-    if (ch === '{') {
-      if (depth === 0) start = i
-      depth++
-    } else if (ch === '}') {
-      depth--
-      if (depth === 0 && start >= 0) {
-        const objStr = trimmed.slice(start, i + 1)
-        try {
-          const obj = JSON.parse(objStr)
-          if (obj && obj.question) out.push(obj)
-        } catch (e) {}
-        start = -1
-      }
-    }
-  }
-  // 还残留未闭合的顶层对象 → heal 后再试
-  if (depth > 0 && start >= 0) {
-    const objStr = trimmed.slice(start)
-    try {
-      const obj = JSON.parse(heal(objStr))
-      if (obj && obj.question) out.push(obj)
-    } catch (e) {}
-  }
-  return out
-}
-
-
-
-
 
 
 // 工具调度元数据：不随 OpenAI tools schema 发给模型，避免供应商拒绝未知字段；调度器用它在本地决策。
@@ -570,22 +448,12 @@ export const CORE_TOOL_NAMES = [
   'outer_frame',
   'rename_mindmap_file',
   'delete_local_file',
-  'edit_local_file',
-  'append_local_file',
-  'read_local_file_lines',
-  'run_shell',
-  'run_node',
-  'run_python',
-  'spawn_shell',
-  'shell_get_env',
   'list_directory',
   'list_mcp_servers',
   'list_mcp_tools',
   'mcp_call_tool',
-  'update_mcp_server',
   'list_custom_tools',
   'call_custom_tool',
-  'update_custom_tool',
   'list_skills',
   'get_skill',
   'invoke_skill',
@@ -624,6 +492,7 @@ export const CORE_TOOL_NAMES = [
   'generate_mindmap',
   'ai_continue_children',
   'parallel_ai_workers',
+  'run_code',
   // 高频批处理（避免逐节点 select_node 循环的关键工具）
   'add_child_nodes',
   'expand_node',
@@ -661,11 +530,20 @@ export const DANGEROUS_TOOLS = {
   send_wechat_file: '发送文件到微信联系人（对外发送）',
   send_feishu_file: '发送文件到飞书群聊（对外发送）',
   research_to_mindmap: '生成研究导图会覆盖当前画布（未保存内容将丢失）',
-  import_file_as_mindmap: '导入外部文件并打开时会覆盖当前画布（未保存内容将丢失）'
+  import_file_as_mindmap: '导入外部文件并打开时会覆盖当前画布（未保存内容将丢失）',
+  run_code: '执行自定义 JavaScript 代码，可操作文件、修改导图、调用外部工具，请确认代码内容安全后再执行'
 }
 
 // ========== AI 工具定义（OpenAI function calling 格式） ==========
 export const aiTools = [
+  {
+    type: 'function',
+    function: {
+      name: 'sync_desk_calendar',
+      description: 'Manually sync my-mindmap agent review plan to desktop_todo_Calendar now: push due review items (future 31 days), pull completion status back, and deduplicate same date+title tasks. Use when the user asks to sync/refresh review plan with desktop todo calendar.',
+      parameters: { type: 'object', properties: {}, required: [] }
+    }
+  },
   {
     type: 'function',
     function: {
@@ -1238,9 +1116,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'export_to_markdown',
-      // review B3：原描述歧义——AI 把"用 markdown 表格输出"误识别为"导出当前导图为 MD 文件"。
-// 强化：明确"仅当用户明确要求导出/保存为文件时才调用本工具；用户说 markdown 表格 / 列表 / 代码块时直接用文字回答"。
-description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .md file on disk. Do NOT call it just because the user said "用 markdown 表格 / 列表 / 代码块输出" in chat — those are inline reply formats, not file exports. Call this tool ONLY when the user explicitly asks to save/export/convert the map to a markdown file (e.g. 导出/保存/转成 md 文件/save as markdown/export markdown). By default exports the currently open map; pass file_path to export any .smm file WITHOUT opening it (MCP/external calls). Returns the saved path and a content preview.',
+      description: 'Convert a mindmap (SMM doc) to a Markdown file saved to the default save dir. By default exports the currently open map; pass file_path to export any .smm file WITHOUT opening it (MCP/external calls). Use when the user says SMM转markdown/导出markdown/转成md文件. Returns the saved path and a content preview.',
       parameters: {
         type: 'object',
         properties: {
@@ -1254,8 +1130,7 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
     type: 'function',
     function: {
       name: 'export_mindmap_html',
-      // review B3：同上 export_to_markdown 的强约束
-      description: '⚠️ IMPORTANT: ONLY call this tool when the user explicitly asks to save/export the mindmap as an HTML file on disk (导出HTML/导出全视图/三模式HTML). Do NOT call when user wants an HTML snippet as inline chat reply. mode=single = single mindmap view (zoom/pan + cloze toggle); mode=full = full-view 3-mode HTML (mindmap + outline + graph tabs). By default exports the currently open map; pass file_path to export any .smm file WITHOUT opening it. Returns the saved path.',
+      description: 'Export a mindmap as a self-contained interactive HTML file. mode=single = single mindmap view (zoom/pan + cloze toggle); mode=full = full-view 3-mode HTML (mindmap + outline + graph tabs). By default exports the currently open map; pass file_path to export any .smm file WITHOUT opening it. Use when the user says 导出HTML/导出全视图/三模式HTML. Returns the saved path.',
       parameters: {
         type: 'object',
         properties: {
@@ -1270,8 +1145,7 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
     type: 'function',
     function: {
       name: 'export_mindmap_pdf',
-      // review B3：同上
-      description: '⚠️ IMPORTANT: ONLY call when user explicitly asks to export the mindmap as a PDF file on disk (导图转pdf/导图导出pdf). Export the current mindmap (canvas graphic with full nodes and links) as a PDF file saved to the default save dir.',
+      description: 'Export the current mindmap (canvas graphic with full nodes and links) as a PDF file saved to the default save dir. Use when the user says 导图转pdf/导图导出pdf.',
       parameters: {
         type: 'object',
         properties: {
@@ -1284,8 +1158,7 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
     type: 'function',
     function: {
       name: 'export_outline_pdf',
-      // review B3：同上
-      description: '⚠️ IMPORTANT: ONLY call when user explicitly asks to export the outline as a PDF file on disk (大纲转pdf/大纲导出pdf). Export the outline of the current map (indented hierarchy text, not the canvas graphic) as a typeset PDF document saved to the default save dir, good for printing and reading.',
+      description: 'Export the outline of the current map (indented hierarchy text, not the canvas graphic) as a typeset PDF document saved to the default save dir, good for printing and reading. Use when the user says 大纲转pdf/大纲导出pdf.',
       parameters: {
         type: 'object',
         properties: {
@@ -1826,138 +1699,6 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
   {
     type: 'function',
     function: {
-      name: 'edit_local_file',
-      description: 'Edit a local text file in place. Two modes: (1) replace_in_file — precise old_text → new_text replacement (safest, requires the old_text to match exactly once; use unique surrounding context to disambiguate); (2) write_full_file — overwrite the entire file with new content. Works on any text file (JSON / Markdown / code / txt / csv / log / etc). For binary files (PDF/Excel/Word/images), use save_text_file / send_wechat_file etc instead.',
-      parameters: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string', description: 'Absolute path of the local file to edit' },
-          mode: { type: 'string', enum: ['replace_in_file', 'write_full_file'], description: 'replace_in_file = partial edit (default, safest); write_full_file = overwrite the entire file' },
-          old_text: { type: 'string', description: 'For replace_in_file: the exact existing text to replace (must match exactly once in the file). Include enough surrounding context to be unique' },
-          new_text: { type: 'string', description: 'For replace_in_file: the text to insert in place of old_text. For write_full_file: the complete new file content' }
-        },
-        required: ['file_path', 'mode', 'new_text']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'append_local_file',
-      description: 'Append content to the end of a local text file. Auto-creates the file if it does not exist. Use when the user wants to add new lines / entries without overwriting existing content (e.g. append to a log, list, CSV row).',
-      parameters: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string', description: 'Absolute path of the local file to append to' },
-          content: { type: 'string', description: 'Content to append at the end of the file' },
-          newline: { type: 'boolean', description: 'If true (default), prepend a newline before content so the appended text starts on a new line' }
-        },
-        required: ['file_path', 'content']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'read_local_file_lines',
-      description: 'Read a specific line range of a local text file (start_line / end_line, 1-based, inclusive). Use for large files when only a small section needs to be viewed (returns up to max_chars chars).',
-      parameters: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string', description: 'Absolute path of the local text file' },
-          start_line: { type: 'number', description: 'First line to read (1-based, default 1)' },
-          end_line: { type: 'number', description: 'Last line to read (inclusive, default: end of file)' },
-          max_chars: { type: 'number', description: 'Max chars returned, default 50000' }
-        },
-        required: ['file_path']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_shell',
-      description: 'Run an allowed command synchronously (up to 10 minutes). Allowed binaries include: node / npm / npx / pnpm / yarn / python / python3 / pip / git / cmd / powershell / go / rustc / cargo / make / docker / bash / sh. cwd must be inside an allowed directory (userData / temp / open-file-dir / desktop / downloads / documents). Returns stdout / stderr / exitCode. To run a script, prefer run_node or run_python.',
-      parameters: {
-        type: 'object',
-        properties: {
-          binary: { type: 'string', description: 'Allowed binary name (e.g. "npm", "git", "python")' },
-          args: { type: 'array', items: { type: 'string' }, description: 'Arguments array (safer than a single command string)' },
-          cwd: { type: 'string', description: 'Working directory (absolute path, must be inside an allowed directory)' },
-          env: { type: 'object', description: 'Extra environment variables to set (merged with process.env)' },
-          timeoutMs: { type: 'number', description: 'Timeout in milliseconds (default 60000, max 600000 = 10 minutes)' }
-        },
-        required: ['binary']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_node',
-      description: 'Run a local Node.js script (equivalent to `node script_path [args]`). The script file path must be inside an allowed directory. Returns stdout / stderr / exitCode.',
-      parameters: {
-        type: 'object',
-        properties: {
-          script_path: { type: 'string', description: 'Absolute path to the Node.js script (.js / .mjs / .cjs)' },
-          args: { type: 'array', items: { type: 'string' }, description: 'Arguments to pass to the script' },
-          cwd: { type: 'string', description: 'Working directory (absolute path, default: directory of script_path)' },
-          timeoutMs: { type: 'number', description: 'Timeout in milliseconds (default 60000, max 600000)' }
-        },
-        required: ['script_path']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_python',
-      description: 'Run a local Python script (equivalent to `python script_path [args]`). The script file path must be inside an allowed directory. Returns stdout / stderr / exitCode.',
-      parameters: {
-        type: 'object',
-        properties: {
-          script_path: { type: 'string', description: 'Absolute path to the Python script (.py)' },
-          args: { type: 'array', items: { type: 'string' }, description: 'Arguments to pass to the script' },
-          cwd: { type: 'string', description: 'Working directory (absolute path, default: directory of script_path)' },
-          timeoutMs: { type: 'number', description: 'Timeout in milliseconds (default 60000, max 600000)' }
-        },
-        required: ['script_path']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'spawn_shell',
-      description: 'Spawn a long-running command as a background job. Use for dev servers, watch mode, etc. Returns a handle; subscribe to shell:stdout / shell:stderr / shell:exit events to stream output. Max 8 concurrent jobs.',
-      parameters: {
-        type: 'object',
-        properties: {
-          binary: { type: 'string', description: 'Allowed binary name (same whitelist as run_shell)' },
-          args: { type: 'array', items: { type: 'string' }, description: 'Arguments array' },
-          cwd: { type: 'string', description: 'Working directory' },
-          env: { type: 'object', description: 'Extra environment variables' }
-        },
-        required: ['binary']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'shell_get_env',
-      description: 'Read whitelisted environment variables. Allowed keys: PATH / NODE_ENV / PYTHONPATH / VIRTUAL_ENV / JAVA_HOME / GOPATH / GOROOT / CARGO_HOME / RUSTUP_HOME / LANG / LC_ALL / TZ / CI / NODE_OPTIONS / NPM_CONFIG_REGISTRY. Other keys are blocked.',
-      parameters: {
-        type: 'object',
-        properties: {
-          key: { type: 'string', description: 'Environment variable name. If omitted, returns all whitelisted vars.' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
       name: 'clear_mindmap',
       description: 'Clear all nodes of the current mindmap, keeping one empty root. Use when the user asks to clear the map / clear the canvas / delete all nodes / start over; MUST confirm with the user before clearing.',
       parameters: { type: 'object', properties: {} }
@@ -2199,7 +1940,7 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
     type: 'function',
     function: {
       name: 'semantic_search',
-      description: 'Semantic search over the local KB (mindmaps + auto-indexed PDF/DOCX/XLSX/CSV/MD/TXT documents, BM25 Chinese ranking): expand intent into 3~6 keywords (synonyms/related terms), merge/dedupe/rank by hit count. Suited for fuzzy questions (vs search_knowledge_base exact match). Returns related files, nodes and document chunks.',
+      description: 'Local semantic search over the indexed KB (mindmaps + documents). Uses local embedding vectors plus BM25; no extra keyword expansion is required. Best for fuzzy/natural-language questions. Returns related files, nodes and document chunks.',
       parameters: {
         type: 'object',
         properties: {
@@ -2207,10 +1948,10 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
           keywords: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Intent-expanded keyword list (3~6); include synonyms, hypernyms/hyponyms and varied phrasings of related terms to boost recall'
+            description: 'Optional extra keywords; usually leave empty to use local vector retrieval'
           }
         },
-        required: ['query', 'keywords']
+        required: ['query']
       }
     }
   },
@@ -2261,7 +2002,7 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
     type: 'function',
     function: {
       name: 'retrieve_local_file',
-      description: 'Fast semantic retrieval inside a local document (txt/md/json/log/html/xml/docx/xlsx/xls/csv/tsv/pdf). Extracts text once (cached in-session) and returns only the top chunks most relevant to the user query — do NOT read the whole file. Pass file_path (absolute path, e.g. from the 【拖入文件｜路径：xxx】 marker) and query (the user\'s actual question). Best for large PDF/docx/xlsx/xls/txt when the user drops a file and asks a question; use read_local_file only when the user needs the FULL content or an OCR-scanned PDF.',
+      description: 'Fast semantic retrieval inside a local document (txt/md/json/log/html/xml/docx/pptx/xlsx/xls/csv/tsv/pdf). Extracts text once (cached in-session) and returns only the top chunks most relevant to the user query — do NOT read the whole file. Pass file_path (absolute path, e.g. from the 【拖入文件｜路径：xxx】 marker) and query (the user\'s actual question). Best for large PDF/docx/pptx/xlsx/xls/txt when the user drops a file and asks a question; use read_local_file only when the user needs the FULL content or an OCR-scanned PDF.',
       parameters: {
         type: 'object',
         properties: {
@@ -2477,7 +2218,7 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
     type: 'function',
     function: {
       name: 'read_local_file',
-      description: 'Read a local document in full: txt/md/json/log (direct), docx (text extraction), xlsx/xls/csv/tsv (Excel/CSV tables, each row becomes one tab-separated line), pdf (text extraction; scanned PDF auto-OCR via page_start/page_end or ocr_all), images (auto OCR), smm (outline text). Use when user @-references or asks to analyze a local file.',
+      description: 'Read a local document in full: txt/md/json/log (direct), docx/pptx (text extraction), xlsx/xls/csv/tsv (Excel/CSV tables, each row becomes one tab-separated line), pdf (text extraction; scanned PDF auto-OCR via page_start/page_end or ocr_all), images (auto OCR), smm (outline text). Use when user @-references or asks to analyze a local file.',
       parameters: {
         type: 'object',
         properties: {
@@ -2531,27 +2272,6 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
   {
     type: 'function',
     function: {
-      name: 'update_mcp_server',
-      description: 'Update a configured MCP server (e.g. change its URL/port, command, args, headers, or enable/disable). Only provided fields are changed; others stay.',
-      parameters: {
-        type: 'object',
-        properties: {
-          serverId: { type: 'string', description: 'MCP server id from list_mcp_servers' },
-          name: { type: 'string', description: 'New display name (optional)' },
-          url: { type: 'string', description: 'New URL for http/sse transport (optional)' },
-          command: { type: 'string', description: 'New command for stdio transport (optional)' },
-          args: { type: 'array', items: { type: 'string' }, description: 'New args for stdio transport (optional)' },
-          env: { type: 'object', description: 'New env vars (optional)' },
-          headers: { type: 'object', description: 'New headers (optional)' },
-          enabled: { type: 'boolean', description: 'Enable or disable (optional)' }
-        },
-        required: ['serverId']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
       name: 'list_custom_tools',
       description: 'List custom tools from the custom-tools directory. Returns id, name, description, category, enabled, autoInvoke, parameters, hasScript.',
       parameters: { type: 'object', properties: {} }
@@ -2567,24 +2287,6 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
         properties: {
           toolId: { type: 'string', description: 'Custom tool id from list_custom_tools' },
           arguments: { type: 'object', description: 'Tool arguments object' }
-        },
-        required: ['toolId']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'update_custom_tool',
-      description: 'Update a custom tool by id (name/description/enabled/autoInvoke). Only provided fields are changed. Use when the user asks to change a saved tool.',
-      parameters: {
-        type: 'object',
-        properties: {
-          toolId: { type: 'string', description: 'Custom tool id from list_custom_tools' },
-          name: { type: 'string', description: 'New display name (optional)' },
-          description: { type: 'string', description: 'New description (optional)' },
-          enabled: { type: 'boolean', description: 'Enable or disable (optional)' },
-          autoInvoke: { type: 'boolean', description: 'Auto-invoke flag (optional)' }
         },
         required: ['toolId']
       }
@@ -2734,6 +2436,21 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
   {
     type: 'function',
     function: {
+      name: 'convert_doc_to_mindmap',
+      description: 'Read a local document (PDF/DOCX/PPTX/XLSX/XLS/CSV/MD/TXT) and generate a new .smm mindmap file. The current canvas is NOT overwritten. Use whenever the user asks to convert a document/file into a mindmap, especially when the source is a PDF or other document rather than a Markdown/XMind import.',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute source document path' },
+          file_name: { type: 'string', description: 'Optional display name for the output; defaults to the source filename without extension' }
+        },
+        required: ['file_path']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'list_references',
       description: 'Reference list & broken-link check: list the @file/#node references in nodes (which node references which node of which file) and check each referenced file/node still exists (deleted/renamed/moved files create broken links). Use for "which nodes reference this file / what files did I reference / are there broken links".',
       parameters: {
@@ -2742,6 +2459,28 @@ description: '⚠️ IMPORTANT: This tool is ONLY for saving the mindmap as a .m
           scope: { type: 'string', enum: ['current', 'all'], description: 'current=current map only (default); all=scan all map files under the save dir' },
           file_path: { type: 'string', description: 'Only list nodes referencing this file (optional filter)' }
         }
+      }
+    }
+  },
+
+  {
+    type: 'function',
+    function: {
+      name: 'run_code',
+      description: 'Execute JavaScript code in a sandbox with full access to all tools. Use for batch operations, complex multi-step logic, data processing, or when multiple tool calls can be efficiently combined into one script. Tools are available via await tools.toolName(args). The code has access to: tools (all registered tools), mindMap (current mindmap instance), console (log output), context (execution context). Return a value to include it in the result. Requires user confirmation before execution.',
+      parameters: {
+        type: 'object',
+        properties: {
+          code: {
+            type: 'string',
+            description: 'JavaScript code to execute. Use async/await pattern. Call tools with await tools.toolName(args). Access the mindmap via mindMap. Output via console.log(). Return a value to send it back as the result.'
+          },
+          description: {
+            type: 'string',
+            description: 'Brief description of what this code does (shown to user in confirmation dialog)'
+          }
+        },
+        required: ['code']
       }
     }
   },
@@ -2793,6 +2532,7 @@ export const TOOL_NAME_MAP = {
   get_review_schedule: '查询复习计划',
   get_today_review_status: '今日复习状态',
   delete_review_plan: '删除复习计划',
+  sync_desk_calendar: '同步 desktop todo calendar',
   format_painter: '格式刷',
   set_node_note: '节点备注',
   outer_frame: '外框',
@@ -2835,6 +2575,7 @@ export const TOOL_NAME_MAP = {
   retrieve_local_file: '检索本地文件',
   list_directory: '列出目录',
   import_file_as_mindmap: '导入文件为导图',
+  convert_doc_to_mindmap: '文档转思维导图',
   export_to_markdown: '导出 Markdown',
   export_mindmap_html: '导出 HTML（含全视图）',
   export_mindmap_pdf: '导出导图 PDF',
@@ -2870,7 +2611,8 @@ export const TOOL_NAME_MAP = {
   list_mcp_servers: '列出 MCP 服务',
   list_mcp_tools: '列出 MCP 工具',
   mcp_call_tool: '调用 MCP 工具',
-  semantic_tool_search: '语义工具搜索'
+  semantic_tool_search: '语义工具搜索',
+  run_code: '代码执行'
 }
 
 // MCP 访问令牌权限勾选列表：与 ChatPanel.listMcpTools 同源（getCoreTools + aiTools），
@@ -2950,7 +2692,7 @@ async function resolveFilePathAuto(filePath) {
     // 优先按扩展名匹配，其次按 basename 精确匹配
     const ext = norm.split('.').pop().toLowerCase()
     let matches = r.results
-    if (ext && ext !== 'pdf' && ext !== 'docx' && ext !== 'xlsx' && ext !== 'txt' && ext !== 'md') {
+    if (ext && ext !== 'pdf' && ext !== 'docx' && ext !== 'pptx' && ext !== 'xlsx' && ext !== 'txt' && ext !== 'md') {
       // 无明确扩展名时全部候选
     } else if (ext) {
       const extMatches = r.results.filter(f => f.path.toLowerCase().endsWith('.' + ext))
@@ -2964,29 +2706,13 @@ async function resolveFilePathAuto(filePath) {
 }
 
 // 从本地文档提取文本（txt/md/docx/pdf 文本层），带缓存；不处理 OCR 扫描版（走 read_local_file 兜底）
-// review A5：大代码文件提示。完全精确的"按 offset 字节读文件"需要在主进程新增 IPC（fs:readFileRange），
-// 为了"保证功能正常运行"且改动可控，这里做最小化改动：保留全文件 readFile 行为（向后兼容），
-// 但当全文超过 500KB 时，在 message 里提示 AI 改用 offset/max_chars 分次读取（避免一次 IPC 几百 KB 阻塞）。
-const CODE_FILE_HINT_THRESHOLD = 500 * 1024 // 500KB
-const _codeFileSizeCache = new Map() // filePath -> { size, at }
-async function getCodeFileSize(filePath) {
-  const cached = _codeFileSizeCache.get(filePath)
-  if (cached && Date.now() - cached.at < 60000) return cached.size
-  try {
-    const stat = await window.electronAPI.fs.stat(filePath)
-    const size = typeof stat === 'number' ? stat : (stat?.size || 0)
-    _codeFileSizeCache.set(filePath, { size, at: Date.now() })
-    return size
-  } catch (_) { return 0 }
-}
-
 async function extractLocalDocTextCached(filePath, ext) {
   const key = filePath
   if (localDocTextCache.has(key)) return localDocTextCache.get(key)
   let result = { success: false, error: '不支持的格式' }
   try {
     // 统一走 docParseService：PDF(pdfjs) / DOCX(mammoth) / XLSX(exceljs) / CSV·TSV(papaparse) / 文本直读
-    if (['txt', 'md', 'markdown', 'json', 'log', 'csv', 'tsv', 'html', 'xml', 'docx', 'pdf', 'xlsx', 'xls', 'pptx'].includes(ext)) {
+    if (['txt', 'md', 'markdown', 'json', 'log', 'csv', 'tsv', 'html', 'xml', 'docx', 'pptx', 'pdf', 'xlsx', 'xls'].includes(ext)) {
       const res = await parseDocument(filePath)
       result = res.success
         ? { success: true, text: res.text, source: res.type, meta: res.meta }
@@ -3010,7 +2736,7 @@ export function warmLocalDocTextCache(filePath, ext, text, meta) {
 async function indexDocumentInBackground(filePath, fileName, ext, text) {
   try {
     if (!searchService.isAvailable()) return
-    const docExts = ['docx', 'xlsx', 'xls', 'csv', 'tsv', 'pdf', 'pptx', 'ppt', 'txt', 'md', 'markdown', 'json', 'log', 'html', 'xml']
+    const docExts = ['docx', 'pptx', 'xlsx', 'xls', 'csv', 'tsv', 'pdf', 'txt', 'md', 'markdown', 'json', 'log', 'html', 'xml']
     if (!docExts.includes(ext)) return
     const chunks = chunkText(String(text || ''))
     if (!chunks.length) return
@@ -3022,7 +2748,7 @@ async function indexDocumentInBackground(filePath, fileName, ext, text) {
     const r = await searchService.indexDocument(filePath, fileName, 'doc', chunks, mtime)
     // BM25 入库成功且非跳过（内容有更新）时追加向量索引（E5 本地推理，异步慢速）
     if (r?.success && !r?.skipped) {
-      searchService.indexDocumentVectors(filePath, fileName, mtime, chunks.slice(0, 500))
+      searchService.indexDocumentVectors(filePath, fileName, mtime, chunks.slice(0, 120))
     }
   } catch { /* 索引失败不影响读取 */ }
 }
@@ -3575,6 +3301,14 @@ function applyNodeStyles(mindMap, nodes, styleArgs = {}) {
       ? `文字字号 ${styleArgs.textFontSize}px 已应用到 ${c}/${nodes.length} 个节点`
       : `文字字号未生效（目标节点均为空文本）`)
   }
+  // 样式修改直接改数据（setStyles + render），未走 execCommand，不会自动记录历史。
+  // 用 originAddHistory（未节流）记录一条独立撤销快照，避免样式操作与后续操作（如挖空）
+  // 被合并到同一条历史里，导致 Ctrl+Z 跳顺序撤回。
+  try {
+    if (mindMap.command && typeof mindMap.command.originAddHistory === 'function') {
+      mindMap.command.originAddHistory()
+    }
+  } catch (e) {}
   return details
 }
 
@@ -3946,6 +3680,18 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
     }
   } catch (e) { /* store 未就绪时不阻断 */ }
 
+  // 构建执行上下文（供 Registry 和新版工具使用）
+  const execContext = { mindMap, activeNode, extraHandlers }
+
+  // ========== 新版格式工具：通过 ToolRegistry 调用（自带超时+输出限制） ==========
+  // 检查是否为已注册的新版格式工具（非桥接的旧工具）
+  const registeredTool = toolRegistry.get(name)
+  if (registeredTool && registeredTool._isNewStyle) {
+    return toolRegistry.call(name, args, execContext)
+  }
+
+  // ========== 旧版工具：switch-case + 统一超时控制 + 输出限制 ==========
+  const executeLegacyTool = async () => {
   switch (name) {
     case 'audit_mindmap': {
       try {
@@ -4008,15 +3754,30 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         const contentText = treeToText(treeData)
         if (!contentText.trim()) return { success: false, message: '当前导图没有任何内容可整理' }
         const topicName = nodePlainText(treeData?.data?.text || '') || '思维导图'
+        const mapType = classifyMindMap(treeData)
 
-        const sys = '你是思维导图结构整理专家。根据用户提供的原始导图内容，重新梳理出一个更合理的框架结构。必须严格遵守原文内容，禁止随意增删改、禁止编造、禁止过度总结替换原文，只调整层级归属、分类归纳、排序、分组、合并同类项，使结构更清晰、层级更合理。只输出 JSON，不要任何解释文字。'
-        const usr = '请把下面这份思维导图内容重新整理成一个框架更合理的层级结构。\n\n严格要求：\n1. 严格保留原文每个节点的文字内容，禁止增删改、禁止编造、禁止过度总结替换原文\n2. 可以调整：节点的层级归属、分类归纳、排序、分组、合并同类项、把过宽的结构拆分或把过深的层级归纳\n3. 根主题保持原文不变\n4. 只输出 JSON，不要输出任何解释、前言或代码块\n\n输出 JSON 格式：\n{"root":"根主题文字","children":[{"text":"一级节点","children":[{"text":"二级节点","children":[]}]}]}\n\n原始导图内容：\n' + contentText.slice(0, 16000)
+        const sys = '你是思维导图结构整理专家。根据用户提供的原始导图内容，重新梳理出一个更合理的框架结构。必须严格遵守原文内容，禁止随意增删改、禁止编造、禁止过度总结替换原文，只调整层级归属、分类归纳、排序、分组、合并同类项，使结构更清晰、层级更合理。输出合法 JSON，可以包裹在 ```json 代码块中；禁止尾随逗号、注释或 NaN。若输入内容为空或无效，请返回空结果，不要编造。'
+        const usr = `请把下面这份思维导图内容重新整理成一个框架更合理的层级结构。
 
-        let choice = await aiService.chat(usr, sys, null, { responseFormat: 'json' })
+${mindMapTypePrompt(mapType, 'organize')}
+
+严格要求：
+1. 严格保留原文每个节点的文字内容，禁止增删改、禁止编造、禁止过度总结替换原文
+2. 可以调整：节点的层级归属、分类归纳、排序、分组、合并同类项、把过宽的结构拆分或把过深的层级归纳
+3. 根主题保持原文不变
+4. 只输出 JSON，不要输出任何解释、前言或代码块
+
+输出 JSON 格式：
+{"root":"根主题文字","children":[{"text":"一级节点","children":[{"text":"二级节点","children":[]}]}]}
+
+原始导图内容：
+` + contentText.slice(0, 16000)
+
+        let choice = await aiService.chat(usr, sys, null, { responseFormat: 'json', thinking: false })
         let parsed = extractJsonObject(choice?.message?.content || '')
         if (!parsed) {
           const retryUsr = '请重新输出，且必须只输出一个 JSON 对象。不要输出代码块、解释或省略号。如果原文内容过多，可以合并同类项，但不能编造原文。\n\n原始导图内容：\n' + contentText.slice(0, 12000)
-          choice = await aiService.chat(retryUsr, sys, null, { responseFormat: 'json' })
+          choice = await aiService.chat(retryUsr, sys, null, { responseFormat: 'json', thinking: false })
           parsed = extractJsonObject(choice?.message?.content || '')
         }
         if (!parsed) return { success: false, message: 'AI 整理返回的 JSON 格式异常，请重试' }
@@ -4045,11 +3806,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 
         const safeTopic = String(rootText).replace(/[<>:"/\\|?*【】]/g, '').slice(0, 40).trim() || '思维导图'
         const fileName = safeTopic + '【整理框架】.smm'
-        let targetPath = fileName
-        try {
-          const store = useMindMapStore()
-          if (store.currentFilePath) targetPath = store.currentFilePath.replace(/[\\/][^\\/]+$/, '') + '/' + fileName
-        } catch (e) {}
+        const targetPath = fileName
         const saveData = JSON.stringify(newTree, null, 2)
         if (!window.electronAPI?.saveFile) return { success: false, message: '文件保存功能不可用' }
         const result = await window.electronAPI.saveFile(targetPath, saveData)
@@ -4414,8 +4171,6 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
               ? mindMap.renderer.findNodeByUid(String(u.uid))
               : null
             if (node && !node.isGeneralization) {
-              // review #5：改写前快照原文本到 node.note，最多保留 5 条历史
-              try { snapshotBeforeTextChange(node, 'ai_rewrite') } catch (e) {}
               node.setText(`<p><span>${escHtml(String(u.text))}</span></p>`)
               updated++
             } else {
@@ -4441,11 +4196,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         if (!targets.length) {
           return { success: false, message: '没有目标节点。请提供 updates=[{uid,text}]、targets（uids/keyword/mode），或先选中节点' }
         }
-        targets.forEach(n => {
-          // review #5：改写前快照原文本到 node.note
-          try { snapshotBeforeTextChange(n, 'ai_rewrite') } catch (e) {}
-          n.setText(`<p><span>${escHtml(String(args.text))}</span></p>`)
-        })
+        targets.forEach(n => n.setText(`<p><span>${escHtml(String(args.text))}</span></p>`))
         return { success: true, message: targets.length > 1 ? `已更新 ${targets.length} 个节点的文本` : '节点文本已更新' }
       } catch (e) {
         return { success: false, message: `更新节点文本失败: ${e.message}` }
@@ -5251,7 +5002,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           const sheet = { id: 'sheet1', class: 'sheet', title: rootText, rootTopic: toTopic(treeData) }
           const zip = new JSZip()
           zip.file('content.json', JSON.stringify([sheet]))
-          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '2.0.0' } }))
+          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.8.0' } }))
           const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
           if (!window.electronAPI?.saveBinaryFile) return { success: false, message: '文件保存功能不可用' }
           const r = await window.electronAPI.saveBinaryFile(fileName, base64)
@@ -6012,7 +5763,7 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
                 user,
                 systemPrompt,
                 null,
-                isJson ? { responseFormat: 'json' } : undefined
+                isJson ? { responseFormat: 'json', thinking: false } : { thinking: false }
               )
               const content = String(choice?.message?.content || '').trim()
               if (content) {
@@ -6089,6 +5840,17 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
       }
     }
 
+    case 'sync_desk_calendar': {
+      try {
+        const result = await runDeskCalendarSyncOnce()
+        return result?.success
+          ? { success: true, message: result.message || '复习计划同步完成' }
+          : { success: false, message: result?.message || '同步失败' }
+      } catch (e) {
+        return { success: false, message: `同步 desktop todo calendar 失败: ${e.message}` }
+      }
+    }
+
     case 'get_review_schedule': {
       try {
         const dateRe = /^\d{4}-\d{2}-\d{2}$/
@@ -6101,9 +5863,9 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
           if (!endDate) endDate = startDate
           if (endDate < startDate) [startDate, endDate] = [endDate, startDate]
         } else {
-          const dateStr = String(args.date || getToday()).trim()
-          if (!dateRe.test(dateStr)) return { success: false, message: 'date 格式应为 YYYY-MM-DD' }
-          startDate = endDate = dateStr
+          // 默认查询全部复习计划，而不是只查今天；复习计划与当前打开文件无关，是全局数据。
+          startDate = '2000-01-01'
+          endDate = '2100-01-01'
         }
 
         // 周期筛选：1/3/7/15/31（天）→ 对应 CYCLES 条目
@@ -6562,9 +6324,12 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
         const types = Array.isArray(args.types) && args.types.length
           ? args.types.filter(t => typeNames[t]).map(t => typeNames[t])
           : ['单选题', '多选题', '简答题']
+        const mapType = classifyMindMap(mindMap.getData?.() || contentText)
 
-        const sys = '你是出题专家。根据用户提供的思维导图内容出自测题，严格基于原文，不引入外部知识，只出核心考点/重点题。只输出 JSON，不要任何其他文字。'
+        const sys = `你是出题专家。根据用户提供的思维导图内容出自测题，严格基于原文，不引入外部知识，只出核心考点/重点题。输出合法 JSON，可以包裹在 \`\`\`json 代码块中；禁止尾随逗号、注释或 NaN。若输入内容为空或无效，请返回空结果，不要编造。${mindMapTypePrompt(mapType, 'quiz')}`
         const usr = `基于以下思维导图内容，出 ${count} 道题（题型混合：${types.join('、')}）。
+
+${mindMapTypePrompt(mapType, 'quiz')}
 
 输出 JSON 格式：
 {"title":"主题名","questions":[{"type":"单选题|多选题|简答题","question":"题干","options":["A. xxx","B. xxx","C. xxx","D. xxx"],"answer":"答案（如 B / ACD / 文字答案）","explanation":"简要解析"}]}
@@ -6574,19 +6339,19 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
 思维导图内容：
 ${contentText.slice(0, 9000)}`
 
-        const choice = await aiService.chat(usr, sys, null, { responseFormat: 'json' })
-        const rawResponse = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
-        // ai_quiz 期望 { title, questions } 结构。先尝试完整解析，再容错提取 questions 数组
-        let quiz = null
-        try { quiz = JSON.parse(rawResponse) } catch (e) {
-          // 容错：仅拿到 questions 数组时，title 兜底用 topicName（后续代码处理）
-          const arr = parseQuizResponse(rawResponse)
-          if (arr.length) quiz = { title: null, questions: arr }
+        const choice = await aiService.chat(usr, sys, null, { responseFormat: 'json', max_tokens: 2800, thinking: false })
+        let jsonStr = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
+        const braceStart = jsonStr.indexOf('{')
+        const braceEnd = jsonStr.lastIndexOf('}')
+        if (braceStart === -1 || braceEnd === -1) return { success: false, message: 'AI 出题返回内容无法解析，请重试' }
+        let quiz
+        try {
+          quiz = JSON.parse(jsonStr.slice(braceStart, braceEnd + 1))
+        } catch {
+          return { success: false, message: 'AI 出题返回的 JSON 格式异常，请重试' }
         }
-        const questions = Array.isArray(quiz?.questions) ? quiz.questions.filter(q => q && q.question) : []
-        if (!quiz || !questions.length) {
-          return { success: false, message: 'AI 出题返回内容无法解析（可能被截断）：\n预览：' + rawResponse.slice(0, 250) }
-        }
+        const questions = Array.isArray(quiz.questions) ? quiz.questions.filter(q => q && q.question) : []
+        if (!questions.length) return { success: false, message: 'AI 没有生成有效题目，请重试' }
 
         // 组装自测导图：根=主题；每题一级子节点；选项、答案+解析（合并一个节点，内容挖空隐藏）为二级
         const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -6623,12 +6388,7 @@ ${contentText.slice(0, 9000)}`
 
         const safeTopic = (quiz.title || topicName).replace(/[<>:"/\\|?*【】]/g, '').slice(0, 40).trim() || '自测'
         const fileName = `${safeTopic}【AI出题】.smm`
-        // 保存到原导图所在文件夹（无当前文件路径时回退默认保存目录）
-        let targetPath = fileName
-        try {
-          const store = useMindMapStore()
-          if (store.currentFilePath) targetPath = store.currentFilePath.replace(/[\\/][^\\/]+$/, '') + '/' + fileName
-        } catch (e) {}
+        const targetPath = fileName
         const saveData = JSON.stringify(root, null, 2)
         if (!window.electronAPI?.saveFile) return { success: false, message: '文件保存功能不可用' }
         const result = await window.electronAPI.saveFile(targetPath, saveData)
@@ -6638,7 +6398,7 @@ ${contentText.slice(0, 9000)}`
         questions.forEach(q => { typeCount[q.type || '单选题'] = (typeCount[q.type || '单选题'] || 0) + 1 })
         return {
           success: true,
-          message: `已生成自测导图「${fileName}」并保存到原导图所在文件夹（${result.filePath}）。共 ${questions.length} 题：${Object.entries(typeCount).map(([t, c]) => `${t} ${c} 道`).join('、')}。答案与解析已合并为一个子节点并自动挖空隐藏（默认不可见，点击挖空处可查看），无需再调用挖空工具。可在左侧文件目录中打开查看，不影响当前导图。`,
+          message: `已生成自测导图「${fileName}」并保存到默认保存目录（${result.filePath}）。共 ${questions.length} 题：${Object.entries(typeCount).map(([t, c]) => `${t} ${c} 道`).join('、')}。答案与解析已合并为一个子节点并自动挖空隐藏（默认不可见，点击挖空处可查看），无需再调用挖空工具。可在左侧文件目录中打开查看，不影响当前导图。`,
           filePath: result.filePath,
           fileName,
           // 生成的是独立文件，画布内容未切换：调用方不得把"当前文件"指向它
@@ -6695,13 +6455,16 @@ ${contentText.slice(0, 9000)}`
         const targetUids = targetNodes.map(n => n.getData?.('uid') || n.uid)
         // 记录当前文档根节点 uid：AI 等待期间用户可能切换文件，返回后据此识别目标是否已随旧文件整体失效
         const rootUidAtStart = (() => { try { return mindMap.renderer.root?.getData?.('uid') || null } catch (e) { return null } })()
+        const mapType = classifyMindMap(mindMap.getData?.() || targetNodes)
 
-        const sys = '你是出题专家。根据用户提供的知识点，为每个知识点出一道题（填空题或选择题），并给出答案和解析。严格基于原文，不引入外部知识，题干考察该知识点的核心考点/得分点。只输出 JSON 对象，不要任何其他文字。'
+        const sys = `你是出题专家。根据用户提供的知识点，为每个知识点出一道题（填空题或选择题），并给出答案和解析。严格基于原文，不引入外部知识，题干考察该知识点的核心考点/得分点。输出合法 JSON，可以包裹在 \`\`\`json 代码块中；禁止尾随逗号、注释或 NaN。若输入内容为空或无效，请返回空结果，不要编造。${mindMapTypePrompt(mapType, 'quiz')}`
         const block = nodeInfos.map(info => {
           const childTxt = info.children.length ? `\n   子节点：${info.children.join('；')}` : ''
           return `${info.index}. ${info.text}${childTxt}`
         }).join('\n\n')
         const usr = `下面有 ${nodeInfos.length} 个知识点（已编号）。请为【每个编号的知识点】各出【1 道题】（共 ${nodeInfos.length} 道，绝不为知识点下的子内容额外出题），题型以 ${types.join('、')} 为主（优先填空题，其次单选题）。
+
+${mindMapTypePrompt(mapType, 'quiz')}
 
 输出 JSON 对象（不要数组、不要 Markdown、不要任何其他文字）：
 {"questions":[{"index":1,"type":"填空","question":"题干（空处用____表示）","options":[],"answer":"答案","explanation":"简要解析"}]}
@@ -6710,24 +6473,37 @@ ${contentText.slice(0, 9000)}`
 - questions 数组长度等于 ${nodeInfos.length}，与知识点一一对应、顺序一致
 - index 与知识点编号一致
 - 填空题 options 为空数组；选择题 options 为 4 个选项，answer 为正确选项字母（如 B）
-- 题干考察该知识点的核心考点/得分点/易错点，不要考偏门细节；题干与答案必须能在原文找到依据
-- 解析(explanation)≤50 字，宁短勿长；explanation 超长会被服务端截断、整个返回 JSON 解析失败、出题整体报错
-- 解析按要点列（如"①发现矛盾 ②分析矛盾"），不要写完整长句
+- 题干考察该知识点的核心考点/得分点/易错点，不要考偏门细节；题干与答案必须能在原文找到依据；解析说明记忆要点或判断依据
 - 不要漏掉任何知识点
 
 知识点：
 ${block}`
 
-        const choice = await aiService.chat(usr, sys, null, { responseFormat: 'json' })
-        const rawResponse = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
-        const list = parseQuizResponse(rawResponse)
-        const validQuestions = Array.isArray(list) ? list.filter(q => q && q.question) : []
-        if (!validQuestions.length) {
-          return {
-            success: false,
-            message: 'AI 出题返回内容无法解析（可能被 max_tokens 截断）：\n内容预览：' + rawResponse.slice(0, 250) + '\n建议：① 减少单次出题节点数（≤10 个）；② 设置解析(explanation)≤50 字。'
+        const choice = await aiService.chat(usr, sys, null, { responseFormat: 'json', max_tokens: 3200, thinking: false })
+        let jsonStr = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
+        let list = []
+        // 优先解析对象 {"questions":[...]}
+        const objStart = jsonStr.indexOf('{')
+        const objEnd = jsonStr.lastIndexOf('}')
+        if (objStart !== -1 && objEnd !== -1) {
+          try {
+            const obj = JSON.parse(jsonStr.slice(objStart, objEnd + 1))
+            if (Array.isArray(obj?.questions)) list = obj.questions
+          } catch {}
+        }
+        // 兜底：直接解析数组 [...]
+        if (!list.length) {
+          const arrStart = jsonStr.indexOf('[')
+          const arrEnd = jsonStr.lastIndexOf(']')
+          if (arrStart !== -1 && arrEnd !== -1) {
+            try {
+              const arr = JSON.parse(jsonStr.slice(arrStart, arrEnd + 1))
+              if (Array.isArray(arr)) list = arr
+            } catch {}
           }
         }
+        const validQuestions = Array.isArray(list) ? list.filter(q => q && q.question) : []
+        if (!validQuestions.length) return { success: false, message: 'AI 出题返回内容无法解析，请重试' }
 
         // 优先按 index 映射，数量一致时按顺序兜底
         const byIndex = new Map()
@@ -7342,330 +7118,6 @@ ${block}`
       }
     }
 
-    case 'edit_local_file': {
-      try {
-        const filePath = String(args.file_path || args.filePath || '').trim()
-        if (!filePath) return { success: false, message: '请提供 file_path（文件绝对路径）' }
-        const mode = String(args.mode || '').trim() || 'replace_in_file'
-        const newText = typeof args.new_text === 'string' ? args.new_text : ''
-        if (mode !== 'replace_in_file' && mode !== 'write_full_file') {
-          return { success: false, message: `mode 必须是 replace_in_file 或 write_full_file，当前：${mode}` }
-        }
-        if (!window.electronAPI?.fs) {
-          return { success: false, message: '文件系统不可用，无法编辑本地文件' }
-        }
-        const fileName = filePath.split(/[/\\]/).pop() || filePath
-        // 拒绝读 config.json（同 read_local_file 的安全策略，避免泄漏密钥）
-        if (fileName.toLowerCase() === 'config.json') {
-          return { success: false, message: '该文件是应用自身的敏感配置，禁止 AI 写入。如需修改模型/MCP/工具配置，请在设置中操作。' }
-        }
-
-        if (mode === 'write_full_file') {
-          // 直接覆盖写入（文件不存在则自动创建）
-          if (window.electronAPI.fs.createFile) {
-            await window.electronAPI.fs.createFile(filePath, newText)
-          } else if (window.electronAPI.fs.writeFile) {
-            await window.electronAPI.fs.writeFile(filePath, newText)
-          } else {
-            return { success: false, message: '主进程未提供文件写入接口' }
-          }
-          const stat = window.electronAPI.fs.stat ? await window.electronAPI.fs.stat(filePath) : null
-          return {
-            success: true,
-            message: `已覆盖写入：${filePath}${stat?.size ? `（${stat.size} 字节）` : ''}`,
-            filePath,
-            mode: 'write_full_file',
-            size: stat?.size ?? null
-          }
-        }
-
-        // replace_in_file：先读取全文，定位 old_text 并校验唯一性
-        const oldText = typeof args.old_text === 'string' ? args.old_text : ''
-        if (!oldText) return { success: false, message: 'replace_in_file 模式必须提供 old_text' }
-        const exists = window.electronAPI.fs.exists ? await window.electronAPI.fs.exists(filePath) : true
-        if (exists === false) {
-          return { success: false, message: `文件不存在：${filePath}。如需新建文件，请用 mode=write_full_file` }
-        }
-        const content = await window.electronAPI.fs.readFile(filePath)
-        const occurrences = content.split(oldText).length - 1
-        if (occurrences === 0) {
-          return {
-            success: false,
-            message: `old_text 在文件中未找到。请确认 old_text 与文件内容完全一致（含空格/换行/缩进）。如需新建，请用 mode=write_full_file`,
-            filePath
-          }
-        }
-        if (occurrences > 1) {
-          return {
-            success: false,
-            message: `old_text 在文件中匹配到 ${occurrences} 处。请在 old_text 中加入更多上下文，使其唯一`,
-            filePath
-          }
-        }
-        const updated = content.replace(oldText, newText)
-        if (window.electronAPI.fs.createFile) {
-          await window.electronAPI.fs.createFile(filePath, updated)
-        } else {
-          await window.electronAPI.fs.writeFile(filePath, updated)
-        }
-        return {
-          success: true,
-          message: `已替换 1 处内容：${filePath}`,
-          filePath,
-          mode: 'replace_in_file'
-        }
-      } catch (e) {
-        return { success: false, message: `编辑本地文件失败: ${e.message}` }
-      }
-    }
-
-    case 'append_local_file': {
-      try {
-        const filePath = String(args.file_path || '').trim()
-        if (!filePath) return { success: false, message: '请提供 file_path（文件绝对路径）' }
-        const content = typeof args.content === 'string' ? args.content : ''
-        if (!content) return { success: false, message: 'content 不能为空' }
-        if (!window.electronAPI?.fs) {
-          return { success: false, message: '文件系统不可用，无法追加内容' }
-        }
-        const fileName = filePath.split(/[/\\]/).pop() || filePath
-        if (fileName.toLowerCase() === 'config.json') {
-          return { success: false, message: '该文件是应用自身的敏感配置，禁止 AI 写入。' }
-        }
-        const exists = window.electronAPI.fs.exists ? await window.electronAPI.fs.exists(filePath) : false
-        let finalContent = content
-        if (exists && args.newline !== false) {
-          // 自动追加换行，确保新内容独立成行（除非文件本来就是空或以换行结尾）
-          const cur = await window.electronAPI.fs.readFile(filePath)
-          if (cur && !cur.endsWith('\n')) finalContent = '\n' + content
-        }
-        if (exists) {
-          const cur = exists ? await window.electronAPI.fs.readFile(filePath) : ''
-          finalContent = (cur || '') + (cur && !cur.endsWith('\n') && args.newline !== false ? '\n' : '') + content
-        }
-        if (window.electronAPI.fs.createFile) {
-          await window.electronAPI.fs.createFile(filePath, finalContent)
-        } else if (window.electronAPI.fs.writeFile) {
-          await window.electronAPI.fs.writeFile(filePath, finalContent)
-        } else {
-          return { success: false, message: '主进程未提供文件写入接口' }
-        }
-        return {
-          success: true,
-          message: `${exists ? '已追加内容到' : '已创建并写入'}${filePath}（新增 ${content.length} 字符）`,
-          filePath
-        }
-      } catch (e) {
-        return { success: false, message: `追加本地文件失败: ${e.message}` }
-      }
-    }
-
-    case 'read_local_file_lines': {
-      try {
-        const filePath = String(args.file_path || '').trim()
-        if (!filePath) return { success: false, message: '请提供 file_path' }
-        if (!window.electronAPI?.fs?.readFile) {
-          return { success: false, message: '文件系统不可用' }
-        }
-        const exists = await window.electronAPI.fs.exists(filePath)
-        if (exists === false) return { success: false, message: `文件不存在：${filePath}` }
-        const content = await window.electronAPI.fs.readFile(filePath)
-        const lines = content.split(/\r?\n/)
-        const totalLines = lines.length
-        const start = Math.max(1, Number(args.start_line) || 1)
-        const end = Math.min(totalLines, Number(args.end_line) || totalLines)
-        if (start > end) {
-          return { success: false, message: `起始行 ${start} 大于结束行 ${end}` }
-        }
-        const maxChars = Math.min(Math.max(Number(args.max_chars) || 50000, 200), 200000)
-        let sliced = lines.slice(start - 1, end).join('\n')
-        let truncated = false
-        if (sliced.length > maxChars) {
-          sliced = sliced.slice(0, maxChars) + '\n…（内容过长已截断）'
-          truncated = true
-        }
-        return {
-          success: true,
-          message: `文件 ${filePath} 第 ${start}~${end} 行（共 ${totalLines} 行${truncated ? '，已截断' : ''}）：\n${sliced}`,
-          filePath,
-          start_line: start,
-          end_line: end,
-          total_lines: totalLines
-        }
-      } catch (e) {
-        return { success: false, message: `读取文件行范围失败: ${e.message}` }
-      }
-    }
-
-    case 'run_shell': {
-      try {
-        if (!window.electronAPI?.shell?.exec) {
-          return { success: false, message: 'Shell 执行功能不可用（请使用桌面应用）' }
-        }
-        const binary = String(args.binary || '').trim()
-        if (!binary) return { success: false, message: '请提供 binary（白名单内的可执行文件名）' }
-        const result = await window.electronAPI.shell.exec({
-          binary,
-          args: Array.isArray(args.args) ? args.args.map(String) : [],
-          cwd: args.cwd ? String(args.cwd) : undefined,
-          env: args.env && typeof args.env === 'object' ? args.env : undefined,
-          timeoutMs: args.timeoutMs ? Number(args.timeoutMs) : undefined
-        })
-        if (!result || result.error) {
-          return { success: false, message: `执行失败：${result?.error || '未知错误'}${result?.code ? `（code=${result.code}）` : ''}` }
-        }
-        const head = `已执行 ${binary} ${(result.args || []).join(' ')}（退出码 ${result.exitCode}${result.timedOut ? '，超时已被终止' : ''}）：\n`
-        const body = (result.stdout || '') + (result.stderr ? '\n--- stderr ---\n' + result.stderr : '')
-        return {
-          success: result.success && result.exitCode === 0,
-          message: head + (body || '（无输出）'),
-          exitCode: result.exitCode,
-          timedOut: result.timedOut,
-          stdout: result.stdout,
-          stderr: result.stderr
-        }
-      } catch (e) {
-        return { success: false, message: `执行命令失败: ${e.message}` }
-      }
-    }
-
-    case 'run_node': {
-      try {
-        if (!window.electronAPI?.shell?.exec) {
-          return { success: false, message: 'Shell 执行功能不可用（请使用桌面应用）' }
-        }
-        const scriptPath = String(args.script_path || '').trim()
-        if (!scriptPath) return { success: false, message: '请提供 script_path（脚本绝对路径）' }
-        // review S-2：script_path 必须绝对路径 + 经主进程白名单校验
-        const allowRes = await window.electronAPI.shell.assertScriptPathAllowed(scriptPath)
-        if (!allowRes || !allowRes.success) {
-          return { success: false, message: `脚本路径被拒绝：${allowRes?.error || '未知原因'}。请确认脚本在已打开导图所在目录、用户数据目录、桌面/文档/下载，或在设置中将其目录加入白名单。` }
-        }
-        const cwd = args.cwd ? String(args.cwd) : scriptPath.replace(/[\\/][^\\/]*$/, '')
-        const result = await window.electronAPI.shell.exec({
-          binary: 'node',
-          args: [scriptPath, ...(Array.isArray(args.args) ? args.args.map(String) : [])],
-          cwd,
-          timeoutMs: args.timeoutMs ? Number(args.timeoutMs) : undefined
-        })
-        if (!result || result.error) {
-          return { success: false, message: `执行失败：${result?.error || '未知错误'}` }
-        }
-        const head = `已执行 node ${scriptPath}（退出码 ${result.exitCode}${result.timedOut ? '，超时已被终止' : ''}）：\n`
-        const body = (result.stdout || '') + (result.stderr ? '\n--- stderr ---\n' + result.stderr : '')
-        return {
-          success: result.success && result.exitCode === 0,
-          message: head + (body || '（无输出）'),
-          exitCode: result.exitCode,
-          timedOut: result.timedOut,
-          stdout: result.stdout,
-          stderr: result.stderr
-        }
-      } catch (e) {
-        return { success: false, message: `执行 Node 脚本失败: ${e.message}` }
-      }
-    }
-
-    case 'run_python': {
-      try {
-        if (!window.electronAPI?.shell?.exec) {
-          return { success: false, message: 'Shell 执行功能不可用（请使用桌面应用）' }
-        }
-        const scriptPath = String(args.script_path || '').trim()
-        if (!scriptPath) return { success: false, message: '请提供 script_path（脚本绝对路径）' }
-        // review S-2：script_path 必须绝对路径 + 经主进程白名单校验
-        const allowRes = await window.electronAPI.shell.assertScriptPathAllowed(scriptPath)
-        if (!allowRes || !allowRes.success) {
-          return { success: false, message: `脚本路径被拒绝：${allowRes?.error || '未知原因'}。请确认脚本在已打开导图所在目录、用户数据目录、桌面/文档/下载，或在设置中将其目录加入白名单。` }
-        }
-        const cwd = args.cwd ? String(args.cwd) : scriptPath.replace(/[\\/][^\\/]*$/, '')
-        const result = await window.electronAPI.shell.exec({
-          binary: 'python',
-          args: [scriptPath, ...(Array.isArray(args.args) ? args.args.map(String) : [])],
-          cwd,
-          timeoutMs: args.timeoutMs ? Number(args.timeoutMs) : undefined
-        })
-        if (!result || result.error) {
-          return { success: false, message: `执行失败：${result?.error || '未知错误'}` }
-        }
-        const head = `已执行 python ${scriptPath}（退出码 ${result.exitCode}${result.timedOut ? '，超时已被终止' : ''}）：\n`
-        const body = (result.stdout || '') + (result.stderr ? '\n--- stderr ---\n' + result.stderr : '')
-        return {
-          success: result.success && result.exitCode === 0,
-          message: head + (body || '（无输出）'),
-          exitCode: result.exitCode,
-          timedOut: result.timedOut,
-          stdout: result.stdout,
-          stderr: result.stderr
-        }
-      } catch (e) {
-        return { success: false, message: `执行 Python 脚本失败: ${e.message}` }
-      }
-    }
-
-    case 'spawn_shell': {
-      try {
-        if (!window.electronAPI?.shell?.spawn) {
-          return { success: false, message: 'Shell spawn 功能不可用（请使用桌面应用）' }
-        }
-        const binary = String(args.binary || '').trim()
-        if (!binary) return { success: false, message: '请提供 binary' }
-        const result = await window.electronAPI.shell.spawn({
-          binary,
-          args: Array.isArray(args.args) ? args.args.map(String) : [],
-          cwd: args.cwd ? String(args.cwd) : undefined,
-          env: args.env && typeof args.env === 'object' ? args.env : undefined
-        })
-        if (!result || !result.success) {
-          return { success: false, message: `启动后台任务失败：${result?.error || '未知错误'}` }
-        }
-        return {
-          success: true,
-          message: `已启动后台任务：${binary}（handle=${result.handle}，pid=${result.pid}）。输出通过 shell:stdout/stderr/exit 事件流推送。需要终止时调用 shell_kill_background_job。`,
-          handle: result.handle,
-          pid: result.pid
-        }
-      } catch (e) {
-        return { success: false, message: `spawn 任务失败: ${e.message}` }
-      }
-    }
-
-    case 'shell_get_env': {
-      try {
-        if (!window.electronAPI?.shell?.getEnv) {
-          return { success: false, message: 'shell:getEnv 不可用（请使用桌面应用）' }
-        }
-        const result = await window.electronAPI.shell.getEnv(args.key ? String(args.key) : null)
-        if (!result || !result.success) {
-          return { success: false, message: result?.error || '读取环境变量失败' }
-        }
-        if (args.key) {
-          return { success: true, message: `${args.key} = ${result.value || '（未设置）'}`, key: args.key, value: result.value }
-        }
-        const lines = Object.entries(result.env || {}).map(([k, v]) => `${k} = ${v || '（未设置）'}`).join('\n')
-        return { success: true, message: lines || '（未配置任何白名单环境变量）', env: result.env }
-      } catch (e) {
-        return { success: false, message: `读取环境变量失败: ${e.message}` }
-      }
-    }
-
-    case 'shell_kill_background_job': {
-      try {
-        if (!window.electronAPI?.shell?.kill) {
-          return { success: false, message: 'shell:kill 不可用（请使用桌面应用）' }
-        }
-        const handle = String(args.handle || '').trim()
-        if (!handle) return { success: false, message: '请提供 handle' }
-        const result = await window.electronAPI.shell.kill(handle)
-        if (!result || !result.success) {
-          return { success: false, message: `终止任务失败：${result?.error || '未知错误'}` }
-        }
-        return { success: true, message: `已终止后台任务 ${handle}` }
-      } catch (e) {
-        return { success: false, message: `终止任务失败: ${e.message}` }
-      }
-    }
-
     case 'clear_mindmap': {
       try {
         if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
@@ -7803,20 +7255,6 @@ ${block}`
       } catch (e) { return { success: false, message: `MCP 调用失败: ${e.message}` } }
     }
 
-    case 'update_mcp_server': {
-      try {
-        if (!args.serverId) return { success: false, message: '请提供 serverId' }
-        if (!window.electronAPI?.mcp?.update) return { success: false, message: 'MCP 更新功能不可用' }
-        const patch = {}
-        for (const k of ['name', 'url', 'command', 'args', 'env', 'headers', 'enabled', 'transport']) {
-          if (args[k] !== undefined) patch[k] = args[k]
-        }
-        if (!Object.keys(patch).length) return { success: false, message: '没有提供任何要更新的字段' }
-        const server = await window.electronAPI.mcp.update(args.serverId, patch)
-        return { success: true, message: `已更新 MCP 服务「${server.name}」`, server }
-      } catch (e) { return { success: false, message: `更新 MCP 服务失败: ${e.message}` } }
-    }
-
     case 'list_custom_tools': {
       try {
         const list = await window.electronAPI?.customTools?.list?.() || []
@@ -7844,20 +7282,6 @@ ${block}`
         }
         return { success: true, message: result?.message || JSON.stringify(result), result }
       } catch (e) { return { success: false, message: `自定义工具调用失败: ${e.message}` } }
-    }
-
-    case 'update_custom_tool': {
-      try {
-        if (!args.toolId) return { success: false, message: '请提供 toolId' }
-        if (!window.electronAPI?.customTools?.update) return { success: false, message: '自定义工具更新功能不可用' }
-        const patch = {}
-        for (const k of ['name', 'description', 'enabled', 'autoInvoke']) {
-          if (args[k] !== undefined) patch[k] = args[k]
-        }
-        if (!Object.keys(patch).length) return { success: false, message: '没有提供任何要更新的字段' }
-        const tool = await window.electronAPI.customTools.update(args.toolId, patch)
-        return { success: true, message: `已更新自定义工具「${tool.name || tool.id}」`, tool }
-      } catch (e) { return { success: false, message: `更新自定义工具失败: ${e.message}` } }
     }
 
     case 'list_skills': {
@@ -7933,51 +7357,7 @@ ${block}`
       } catch (e) { return { success: false, message: `删除 Skill 失败: ${e.message}` } }
     }
 
-    case 'add_memory': {
-      try {
-        if (!args.content || typeof args.content !== 'string') return { success: false, message: '请提供 content' }
-        const r = addMemory(args.content, args.category, args.source || 'manual')
-        return {
-          success: r.success,
-          message: r.success ? (r.dedup ? '记忆已存在且内容相同，自动更新使用计数（id=' + (r.item && r.item.id) + '）' : '已保存记忆（id=' + (r.item && r.item.id) + '，category=' + (r.item && r.item.category) + '）') : (r.error || '添加失败'),
-          item: r.item
-        }
-      } catch (e) { return { success: false, message: '添加记忆失败: ' + e.message } }
-    }
-    case 'search_memory': {
-      try {
-        if (!args.query || typeof args.query !== 'string') return { success: false, message: '请提供 query' }
-        const limit = Math.min(Math.max(Number(args.limit) || 8, 1), 32)
-        const r = searchMemory(args.query, limit)
-        if (!r.items.length) return { success: true, message: '没有匹配的记忆', items: [] }
-        const lines = r.items.map(it => '【' + it.category + '】' + (it.enabled === false ? '（已禁用）' : '') + ' ' + it.content)
-        return { success: true, message: '找到 ' + r.items.length + ' 条相关记忆：\n' + lines.join('\n'), items: r.items }
-      } catch (e) { return { success: false, message: '搜索记忆失败: ' + e.message } }
-    }
-    case 'list_memory': {
-      try {
-        const r = listMemory({ category: args.category, enabledOnly: args.enabledOnly === true, limit: args.limit ? Number(args.limit) : undefined })
-        if (!r.items.length) return { success: true, message: '当前没有记忆项（共 0 条）' }
-        const lines = r.items.map(it => '【' + it.category + '】' + (it.enabled === false ? '（已禁用）' : '') + ' ' + it.content)
-        return { success: true, message: '当前共 ' + r.items.length + ' 条记忆：\n' + lines.join('\n'), items: r.items, total: r.total }
-      } catch (e) { return { success: false, message: '列出记忆失败: ' + e.message } }
-    }
-    case 'delete_memory': {
-      try {
-        if (!args.id) return { success: false, message: '请提供 id' }
-        const r = deleteMemory(args.id)
-        return { success: r.success, message: r.success ? '已删除记忆' : '未找到该 id' }
-      } catch (e) { return { success: false, message: '删除记忆失败: ' + e.message } }
-    }
-    case 'toggle_memory': {
-      try {
-        if (!args.id) return { success: false, message: '请提供 id' }
-        const r = toggleMemory(args.id, args.enabled !== false)
-        return { success: r.success, message: r.success ? ('已' + (args.enabled !== false ? '启用' : '禁用')) : (r.error || '未找到') }
-      } catch (e) { return { success: false, message: '切换记忆失败: ' + e.message } }
-    }
-
-        case 'move_node': {
+    case 'move_node': {
       try {
         if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
         if (!args.uid || !args.targetParentUid) return { success: false, message: '请提供 uid 和 targetParentUid' }
@@ -8471,10 +7851,8 @@ ${block}`
           }
         }
         const ext = resolvedPath.split('.').pop().toLowerCase()
-        const supported = ['txt', 'md', 'markdown', 'json', 'log', 'csv', 'tsv', 'html', 'xml', 'docx', 'pdf', 'xlsx', 'xls']
-        // 代码文件走纯文本读取
-        const codeExts = COMMON_CODE_EXTS
-        if (!supported.includes(ext) && !codeExts.includes(ext)) return { success: false, message: '语义检索暂不支持 .' + ext + '，请改用 read_local_file 读取' }
+        const supported = ['txt', 'md', 'markdown', 'json', 'log', 'csv', 'tsv', 'html', 'xml', 'docx', 'pptx', 'pdf', 'xlsx', 'xls']
+        if (!supported.includes(ext)) return { success: false, message: '语义检索暂不支持 .' + ext + '，请改用 read_local_file 读取' }
         let res = await extractLocalDocTextCached(resolvedPath, ext)
         if (!res.success) {
           // 扫描版/图片型 PDF 无文本层：优先走 files API 多模态读取全文，再据此语义检索
@@ -8519,11 +7897,6 @@ ${block}`
       try {
         const filePath = String(args.file_path || args.filePath || '').trim()
         if (!filePath) return { success: false, message: '请提供 file_path（文件绝对路径）' }
-        // 安全防护：禁止读取应用自身的敏感配置文件（config.json 含 API 密钥、飞书 appSecret、微信/机器人 token 等）
-        const _base = filePath.split(/[/\\]/).pop().toLowerCase()
-        if (_base === 'config.json') {
-          return { success: false, message: '该文件是应用自身的敏感配置（含 API 密钥、机器人令牌等），禁止 AI 读取。如需修改模型/MCP/工具配置，请使用专用工具（list_mcp_servers / update_mcp_server / list_custom_tools / update_custom_tool）。' }
-        }
         // 模型容易把网页链接误传给“读本地文件”：自动改走网页正文读取，避免无意义失败。
         if (/^https?:\/\//i.test(filePath)) {
           const page = await readWebpage(filePath)
@@ -8557,20 +7930,20 @@ ${block}`
           }
           text = treeToText(treeData)
           source = '思维导图大纲文本'
-        } else if (['docx', 'xlsx', 'xls', 'csv', 'tsv', 'pptx'].includes(ext)) {
-          // 统一解析器：docx(mammoth) / xlsx(exceljs) / xls(SheetJS) / csv·tsv(papaparse) / pptx(jszip+xml)；优先命中缓存
+        } else if (['docx', 'pptx', 'xlsx', 'xls', 'csv', 'tsv'].includes(ext)) {
+          // 统一解析器：docx(mammoth) / xlsx(exceljs) / xls(SheetJS) / csv·tsv(papaparse)；优先命中缓存
           const res = await extractLocalDocTextCached(filePath, ext)
           if (!res.success) return { success: false, message: `${ext} 解析失败: ${res.error}` }
           text = res.text
           source = ext === 'docx'
             ? 'Word 文档提取文本'
+            : ext === 'pptx'
+              ? `PPT 演示文稿（${res.meta.slides} 张幻灯片）`
             : ext === 'xlsx'
               ? `Excel 表格（${res.meta.sheets} 个工作表 / ${res.meta.rows} 行）`
               : ext === 'xls'
                 ? `Excel 表格·旧版 xls（${res.meta.sheets} 个工作表 / ${res.meta.rows} 行）`
-                : ext === 'pptx'
-                  ? `PowerPoint 演示文稿（${res.meta.slides} 张幻灯片）`
-                  : `${ext.toUpperCase()} 表格（${res.meta.rows} 行）`
+                : `${ext.toUpperCase()} 表格（${res.meta.rows} 行）`
         } else if (ext === 'pdf') {
           // 优先走 files API 多模态：无论扫描版/图片型 PDF，都先发给视觉模型直读
           const visionRes = await readLocalFileViaVisionAPI(filePath, fileName, 'application/pdf',
@@ -8658,28 +8031,7 @@ ${block}`
             source = visionRes.source
           }
         } else {
-          // 代码文件（.py / .js / .ts 等）走纯文本读取，避免让 AI 误以为无法读取
-          const codeExts = COMMON_CODE_EXTS
-          if (codeExts.includes(ext)) {
-            if (!window.electronAPI?.fs?.readFile) {
-              return { success: false, message: '文件系统不可用，无法读取代码文件' }
-            }
-            const exists = await window.electronAPI.fs.exists(filePath)
-            if (!exists) {
-              return { success: false, message: `文件不存在：${filePath}` }
-            }
-            // review A5：保留全文件 readFile 行为以保证向后兼容，但当文件 > 500KB 时在 message 提示 AI
-            // 用 offset/max_chars 分次读取（避免单次 IPC 几百 KB 阻塞渲染线程）。
-            text = await window.electronAPI.fs.readFile(filePath)
-            const fileSize = await getCodeFileSize(filePath)
-            if (fileSize > CODE_FILE_HINT_THRESHOLD) {
-              // 把"请分次读取"的提示附在尾部，AI 工具 result 里能看到
-              text = text + `\n\n【系统提示】文件较大（约 ${Math.round(fileSize / 1024)} KB），后续请用 read_local_file(file_path=..., offset=N, max_chars=50000) 分段读取。也可改用 read_local_file_lines(start_line=A, end_line=B) 按行精读。`
-            }
-            source = `代码文件（${ext}）`
-          } else {
-            return { success: false, message: `不支持的文件类型 .${ext}。支持：txt/md/json/log/html/xml/docx/xlsx/xls/csv/tsv/pdf/pptx/ppt/smm 及常见图片（OCR），以及代码文件：${codeExts.join('/')}` }
-          }
+          return { success: false, message: `不支持的文件类型 .${ext}。支持：txt/md/json/log/html/xml/docx/pptx/xlsx/xls/csv/tsv/pdf/smm 及常见图片（OCR）` }
         }
 
         const total = text.length
@@ -8699,6 +8051,20 @@ ${block}`
         }
       } catch (e) {
         return { success: false, message: `读取文件失败: ${e.message}` }
+      }
+    }
+
+    case 'convert_doc_to_mindmap': {
+      try {
+        const filePath = String(args.file_path || args.filePath || '').trim()
+        if (!filePath) return { success: false, message: '请提供 file_path（源文档绝对路径）' }
+        if (typeof extraHandlers?.convertDocToMindmap !== 'function') {
+          return { success: false, message: '当前环境不支持文档转思维导图工具' }
+        }
+        const reply = await extraHandlers.convertDocToMindmap(args)
+        return { success: true, message: reply || '文档已转换为思维导图' }
+      } catch (e) {
+        return { success: false, message: `文档转思维导图失败: ${e.message}` }
       }
     }
 
@@ -8768,11 +8134,8 @@ ${block}`
         const rootText = String(treeData.data.text || '').replace(/<[^>]+>/g, '').trim() || baseName
         const safeName = rootText.replace(/[<>:"/\\|?*]/g, '_').slice(0, 50)
         const outName = `${safeName}.smm`
-        const srcDir = filePath.replace(/[/\\][^/\\]+$/, '')
         const saveData = JSON.stringify(treeData, null, 2)
-        const candidateDirs = []
-        if (args.save_dir) candidateDirs.push(String(args.save_dir))
-        candidateDirs.push(srcDir, '') // '' = 默认保存目录（纯文件名）
+        const candidateDirs = ['']
         let savedPath = null
         const saveErrors = []
         if (window.electronAPI?.saveFile) {
@@ -9632,21 +8995,11 @@ ${block}`
 
         const recursive = args.recursive === true
 
-        // 系统/缓存目录黑名单：递归遍历时跳过这些 Chromium/Electron 缓存目录，避免卡顿
-        const SKIP_DIRS = new Set([
-          'cache', 'code cache', 'gpucache', 'local storage', 'session storage',
-          'service worker', 'cachestorage', 'network', 'shared dictionary', 'webstorage',
-          'blob_storage', 'dawncache', 'dictionaries', 'leveldb', 'index-dir',
-          'mcp-runtime', 'databases', 'cache_data', 'js', 'wasm', 'snapshot_blob_storage'
-        ])
-
         // 递归列出某目录的条目。注意：fs:listDir 返回的是扁平数组（元素含 isDir 字段），不是 {dirs, files} 对象
         const walkDir = async (d, out, depth) => {
           const list = await fsApi.listDir(d)
           const entries = Array.isArray(list) ? list : []
           for (const e of entries) {
-            // 跳过系统缓存目录（顶层也不列出，避免污染目录树）
-            if (e.isDir && SKIP_DIRS.has((e.name || '').toLowerCase())) continue
             out.push({ ...e, path: e.path || `${d.replace(/[\\/]+$/, '')}/${e.name}`, depth })
             if (recursive && e.isDir && depth < 12) {
               await walkDir(e.path || `${d.replace(/[\\/]+$/, '')}/${e.name}`, out, depth + 1)
@@ -9698,4 +9051,138 @@ ${block}`
     default:
       return { success: false, message: `未知工具: ${name}` }
   }
+  } // end of executeLegacyTool
+
+  // ===== 超时控制 =====
+  const timeout = _getToolTimeout(name)
+  const outputLimit = _getToolOutputLimit(name)
+
+  let result
+  try {
+    if (timeout > 0) {
+      result = await _withTimeout(executeLegacyTool(), timeout, name)
+    } else {
+      result = await executeLegacyTool()
+    }
+  } catch (error) {
+    if (error.name === 'TimeoutError') {
+      return {
+        success: false,
+        message: `工具 ${name} 执行超时（${(timeout / 1000).toFixed(0)}秒）。可能是操作量过大或卡住了，请尝试缩小范围或分批操作。`,
+        timeout: true,
+      }
+    }
+    // 其他异常理论上不会发生（每个 case 有自己的 try-catch）
+    return {
+      success: false,
+      message: `工具 ${name} 执行异常: ${error.message}`,
+      error: error.message,
+    }
+  }
+
+  // ===== 输出大小限制 =====
+  if (outputLimit > 0 && result && typeof result.message === 'string') {
+    const encoder = new TextEncoder()
+    const bytes = encoder.encode(result.message)
+    if (bytes.length > outputLimit) {
+      const targetBytes = Math.floor(outputLimit * 0.8)
+      const approxChars = Math.floor(targetBytes / 2)
+      const truncated = result.message.slice(0, approxChars)
+      const removedLines = result.message.slice(approxChars).split('\n').length - 1
+      result.message = `${truncated}\n\n... [输出已截断，原内容约 ${(bytes.length / 1024).toFixed(1)}KB，超出 ${(outputLimit / 1024).toFixed(0)}KB 限制，省略了约 ${removedLines} 行]`
+      result._truncated = true
+    }
+  }
+
+  return result
+}
+
+// ===== 工具超时配置 =====
+function _getToolTimeout(name) {
+  // AI 相关：2分钟
+  if (
+    name.startsWith('ai_') ||
+    name === 'parallel_ai_workers' ||
+    name === 'research_to_mindmap' ||
+    name === 'semantic_search' ||
+    name === 'semantic_tool_search' ||
+    name === 'search_knowledge_base' ||
+    name === 'run_code'
+  ) return 120000
+
+  // 导图生成/重构类：不设硬超时（大导图可能很慢）
+  if (
+    name === 'generate_mindmap' ||
+    name === 'add_child_nodes' ||
+    name === 'ai_continue_children' ||
+    name === 'ai_cloze_full_map' ||
+    name === 'ai_quiz' ||
+    name === 'reorganize_mindmap' ||
+    name === 'refactor_mindmap' ||
+    name === 'merge_mindmap_files' ||
+    name === 'convert_doc_to_mindmap' ||
+    name === 'import_file_as_mindmap' ||
+    name === 'batch_node_actions' ||
+    name === 'batch_text_style' ||
+    name === 'batch_move_nodes' ||
+    name === 'find_replace_text'
+  ) return 0
+
+  // 导出：1分钟
+  if (
+    name.startsWith('export_') ||
+    name === 'save_mindmap'
+  ) return 60000
+
+  // 文件读取：1分钟
+  if (
+    name === 'read_local_file' ||
+    name === 'retrieve_local_file'
+  ) return 60000
+
+  // 飞书/微信/网络：30秒
+  if (
+    name.startsWith('feishu_') ||
+    name.startsWith('send_') ||
+    name.startsWith('upload_') ||
+    name === 'search_web' ||
+    name === 'read_webpage'
+  ) return 30000
+
+  // 默认：30秒
+  return 30000
+}
+
+// ===== 工具输出限制配置 =====
+function _getToolOutputLimit(name) {
+  // 可能返回大量数据的工具：5MB
+  if (
+    name === 'get_mindmap_content' ||
+    name === 'read_local_file' ||
+    name === 'retrieve_local_file' ||
+    name === 'search_nodes' ||
+    name === 'query_nodes' ||
+    name === 'semantic_search' ||
+    name === 'search_knowledge_base' ||
+    name === 'get_review_schedule' ||
+    name === 'mcp_call_tool'
+  ) return 5 * 1024 * 1024
+
+  // 默认：2MB
+  return 2 * 1024 * 1024
+}
+
+// ===== Promise 超时包装 =====
+function _withTimeout(promise, ms, toolName) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(`Tool ${toolName} timed out after ${ms}ms`)
+      err.name = 'TimeoutError'
+      reject(err)
+    }, ms)
+
+    Promise.resolve(promise)
+      .then(result => { clearTimeout(timer); resolve(result) })
+      .catch(err => { clearTimeout(timer); reject(err) })
+  })
 }

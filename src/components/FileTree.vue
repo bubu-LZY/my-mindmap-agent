@@ -11,9 +11,6 @@
       <button class="tree-btn" @click="refreshTree" title="刷新">
         <el-icon><Refresh /></el-icon>
       </button>
-      <button class="tree-btn" @click="setSaveFolder" title="设置保存位置">
-        <el-icon><FolderChecked /></el-icon>
-      </button>
     </div>
 
     <!-- 最近打开文件 -->
@@ -356,6 +353,7 @@ const treeProps = {
 const fileIcon = (name) => {
   const ext = String(name || '').split('.').pop().toLowerCase()
   if (ext === 'pdf') return { icon: Files, color: '#e5484d' }
+  if (ext === 'pptx') return { icon: Reading, color: '#ff8f00' }
   if (['xlsx', 'xls', 'csv', 'tsv'].includes(ext)) return { icon: Grid, color: '#1d9d59' }
   if (['md', 'markdown'].includes(ext)) return { icon: Reading, color: '#4a6cf7' }
   if (['txt', 'log', 'json', 'html', 'xml'].includes(ext)) return { icon: Memo, color: '#8a8f99' }
@@ -378,12 +376,6 @@ const loadRoots = () => {
 
 const saveRoots = () => {
   localStorage.setItem(ROOTS_KEY, JSON.stringify(folderRoots.value))
-  // review bug fix：保存 folderRoots 时同步注册到 fsGuard 白名单。
-  // 之前只存 localStorage 不注册 fsGuard，导致用户手动添加的 folderRoots
-  // 后续被 AI 用 read_local_file 等工具访问时被 fsGuard 拒绝。
-  if (window.electronAPI?.fsGuard?.addAllowed && folderRoots.value.length > 0) {
-    window.electronAPI.fsGuard.addAllowed(folderRoots.value).catch(() => { /* ignore */ })
-  }
 }
 
 const addFolder = async () => {
@@ -712,7 +704,7 @@ const openFile = async (filePath, name) => {
   // 文档类文件（pdf/docx/xlsx/csv/md/txt 等）默认用文档查看器原样打开（md 支持渲染/源码切换，
   // 右键空白处可 AI 转换为思维导图）；xmind/opml 仍走"导入转换为导图"流程
   const ext = String(filePath || '').split('.').pop().toLowerCase()
-  if (['pdf', 'docx', 'xlsx', 'xls', 'csv', 'tsv', 'txt', 'md', 'markdown', 'json', 'log', 'html', 'xml'].includes(ext)) {
+  if (['pdf', 'docx', 'pptx', 'xlsx', 'xls', 'csv', 'tsv', 'txt', 'md', 'markdown', 'json', 'log', 'html', 'xml'].includes(ext)) {
     emit('open-doc', { filePath, fileName: name })
     return
   }
@@ -1121,7 +1113,7 @@ const removeNode = (data) => {
         tree.remove(node)
       }
       // 通知父组件：被删除的文件可能有打开的标签，需要同步关闭
-      emit('file-deleted', data.path, data.isDir)
+      emit('file-deleted', data.path)
     } catch (error) {
       ElMessage.error('删除失败: ' + error.message)
     }
@@ -1354,15 +1346,6 @@ onMounted(async () => {
     } catch {
       // 获取保存目录失败，忽略
     }
-  }
-
-  // review bug fix：把 FileTree 已有的 folderRoots 自动注册到 fsGuard 白名单，
-  // 这样重启程序后 FileTree 的 root 目录不会被 fsGuard 拒绝（之前是进程内 Set，
-  // 重启后清空，导致 FileTree 加载时 fs:exists 看起来无响应——实际上是 fsGuard 拦了）。
-  if (window.electronAPI?.fsGuard?.addAllowed && folderRoots.value.length > 0) {
-    try {
-      await window.electronAPI.fsGuard.addAllowed(folderRoots.value)
-    } catch (_) { /* 注册失败不阻塞 FileTree 渲染 */ }
   }
 
   syncTimer = setInterval(refreshVisibleDirs, 4000)

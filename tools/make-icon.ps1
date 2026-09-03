@@ -1,6 +1,6 @@
 Add-Type -AssemblyName System.Drawing
 
-$outDir = "c:\Users\lizhuoyang\Desktop\新建文件夹\mind-map-ai-agent\electron\icons"
+$outDir = Join-Path $PSScriptRoot "..\electron\icons"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $master = 1024

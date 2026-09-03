@@ -461,9 +461,10 @@ const buildMeta = (meta = {}, type) => {
   const parts = []
   if (meta.pages) parts.push(`${meta.pages} 页`)
   if (meta.sheets) parts.push(`${meta.sheets} 个工作表 / ${meta.rows} 行`)
+  if (meta.slides) parts.push(`${meta.slides} 张幻灯片`)
   if (meta.rows && type === 'csv') parts.push(`${meta.rows} 行`)
   if (meta.chars) parts.push(`${formatNum(meta.chars)} 字符`)
-  const typeNames = { pdf: 'PDF', docx: 'Word', xlsx: 'Excel', xls: 'Excel（旧版）', csv: 'CSV', md: 'Markdown', text: '文本' }
+  const typeNames = { pdf: 'PDF', docx: 'Word', pptx: 'PPT', xlsx: 'Excel', xls: 'Excel（旧版）', csv: 'CSV', md: 'Markdown', text: '文本' }
   return parts.length ? `${typeNames[type] || '文档'} · ${parts.join(' · ')}` : ''
 }
 
@@ -485,7 +486,11 @@ const loadPdf = async (token) => {
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
   let doc = null
   try {
-    doc = await pdfjsLib.getDocument({ data: buf }).promise
+    doc = await pdfjsLib.getDocument({
+      data: buf,
+      cMapUrl: 'https://unpkg.com/pdfjs-dist@4.10.38/cmaps/',
+      cMapPacked: true
+    }).promise
   } catch (e) {
     if (token !== loadToken) return
     if (e?.name === 'PasswordException' || /password/i.test(String(e?.message || ''))) {
@@ -608,7 +613,8 @@ const renderPdfPage = async (num) => {
     page = await pdfDoc.getPage(num)
     const meta = pdfPages.value[num - 1] || { scale: 1 }
     const viewport = page.getViewport({ scale: meta.scale })
-    const dpr = window.devicePixelRatio || 1
+    // 高 DPI 屏幕按 1.5 倍封顶，避免 2x/3x 下 canvas 像素数量成倍放大导致内存暴涨
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5)
 
     // canvas
     let canvas = pdfCanvasEls.get(num)
@@ -668,6 +674,7 @@ const renderPdfPage = async (num) => {
   } finally {
     pdfRenderingPages.delete(num)
     if (page) { try { page.cleanup() } catch {} }
+    schedulePdfRecycle()
   }
 }
 
@@ -704,7 +711,7 @@ const setupPdfObserver = () => {
         renderPdfPage(num)
       }
     }
-  }, { root: body, rootMargin: '2000px 0px 2000px 0px' })
+  }, { root: body, rootMargin: '1200px 0px 1200px 0px' })
   // 观察所有页面占位，触发懒渲染
   docBodyRef.value?.querySelectorAll('.pdf-page-wrap').forEach(el => pdfObserver.observe(el))
   // 更新当前可视页
@@ -727,11 +734,11 @@ const schedulePdfRecycle = () => {
   }, 300)
 }
 
-// 回收距当前可视页超过 ±5 页的已渲染页（内存保护）
+// 回收距当前可视页超过 ±4 页的已渲染页（内存保护）
 const recycleFarPages = () => {
   const cur = pdfCurrentPage.value
   for (const num of [...pdfRenderedPages]) {
-    if (Math.abs(num - cur) > 8) recyclePdfPage(num)
+    if (Math.abs(num - cur) > 4) recyclePdfPage(num)
   }
 }
 
@@ -740,24 +747,21 @@ const updateCurrentPage = () => {
   const body = docBodyRef.value
   if (!body || !pdfPages.value.length) return
   const wraps = body.querySelectorAll('.pdf-page-wrap')
-  const bodyRect = body.getBoundingClientRect()
   const top = body.scrollTop + 100
   let cur = pdfCurrentPage.value
   for (const el of wraps) {
     const num = Number(el.dataset.page)
-    // 用真实视觉坐标判定：getBoundingClientRect 已包含 transform 缩放/平移，
-    // 与 scrollTop 同处「视觉/缩放后」坐标系。此前用 offsetTop * zoomScale + panY 手动换算，
-    // 但 offsetTop 相对的是 offsetParent（body）而非滚动内容，缩放/窗口变化后坐标错乱导致页码乱跳。
-    const rect = el.getBoundingClientRect()
-    const off = (rect.top - bodyRect.top) + body.scrollTop
+    // offsetTop 是未缩放的布局坐标，而 scrollTop 与占位高度(zoomSpacerH)同处“视觉/缩放后”坐标系。
+    // 必须换算成视觉坐标（宽度 snap 不参与纵向），否则缩小后识别错页，导致真正可见页被回收成空白。
+    const off = el.offsetTop * zoomScale.value + panY.value
     if (off <= top) cur = num
     else break
   }
   pdfCurrentPage.value = cur
   pdfPage.value = cur
   // 保底渲染：快速/惯性滚动时 observer 可能来不及触发，主动渲染当前页前后若干页，避免视口出现空白占位
-  const from = Math.max(1, cur - 3)
-  const to = Math.min(pdfPages.value.length, cur + 3)
+  const from = Math.max(1, cur - 2)
+  const to = Math.min(pdfPages.value.length, cur + 2)
   for (let n = from; n <= to; n++) renderPdfPage(n)
 }
 
@@ -805,13 +809,14 @@ const indexPdfText = async (token) => {
         const t = (content.items || []).map(it => it.str || '').join(' ')
         if (t.trim()) {
           parts.push(t)
-          pdfPageTexts.value[i] = t
+          // 超大 PDF 不逐页缓存全部文本，避免内存被 pdfPageTexts 撑高；复制时按需提取。
+          if (pageCount <= 120) pdfPageTexts.value[i] = t
         }
       } finally {
         if (page) { try { page.cleanup() } catch {} }
       }
     }
-    const fullText = parts.join('\n\n')
+    const fullText = parts.join('\n\n').slice(0, 300000)
     if (fullText.trim() && token === loadToken) {
       warmLocalDocTextCache(props.filePath, 'pdf', fullText, { pages: pageCount })
       indexInBackground(fullText)
@@ -935,16 +940,24 @@ const indexInBackground = async (fullText, token) => {
     // 已切换文件/卸载：跳过后续索引与向量化，避免大文档切换时并发向量化导致卡死/内存暴涨
     if (token !== undefined && token !== loadToken) return
     let mtime = ''
+    let fileSize = 0
     if (window.electronAPI?.fs?.stat) {
       const st = await window.electronAPI.fs.stat(props.filePath)
-      if (st?.success) mtime = st.mtime
+      if (st?.success) {
+        mtime = st.mtime
+        fileSize = Number(st.size || 0)
+      }
     }
     if (token !== undefined && token !== loadToken) return
     const r = await searchService.indexDocument(props.filePath, props.fileName, 'doc', chunks, mtime)
     // 向量化最耗内存：切换文件后不再启动
     if (token !== undefined && token !== loadToken) return
     if (r?.success && !r?.skipped) {
-      searchService.indexDocumentVectors(props.filePath, props.fileName, mtime, chunks.slice(0, 500))
+      // 大文档也做向量索引，但改为小批流式写入，避免一次性把全部向量放在内存。
+      const text = String(fullText || text.value || '')
+      if (text.length <= 1000000 && chunks.length <= 500 && (!fileSize || fileSize <= 40 * 1024 * 1024)) {
+        searchService.indexDocumentVectors(props.filePath, props.fileName, mtime, chunks.slice(0, 500))
+      }
     }
   } catch { /* 索引失败不影响查看 */ }
 }

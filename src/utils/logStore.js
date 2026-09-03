@@ -85,33 +85,6 @@ export function loadLogs() {
 }
 
 /**
- * 写入一条结构化日志事件（review #11）
- * - level: 'debug' | 'info' | 'warn' | 'error'，默认 'info'
- * - event: 自定义事件名（如 'chat_request' / 'tool_call'）
- * - durationMs: 本事件持续毫秒（仅当存在）
- * - 通过把字段塞进 meta 对象，让现有 addLog 调用方无需改动
- */
-export function addLogEvent(level, event, content, extraMeta = {}, conversationId = null) {
-  const meta = { ...(extraMeta || {}) }
-  if (level) meta.level = level
-  if (event) meta.event = event
-  // durationMs 由调用方在 extraMeta 里传；不在这里硬塞
-  return addLog('info', content, meta, conversationId)
-}
-
-/**
- * 工具调用结构化日志（review #11）
- * - level: 通常 info；失败 error
- * - event: 固定 'tool_call'
- * - extraMeta: 调用方传 { toolName, args, durationMs, result, error, ... }
- */
-export function addToolLog(level, content, extraMeta = {}, conversationId = null) {
-  const meta = { ...(extraMeta || {}), event: 'tool_call' }
-  if (level) meta.level = level
-  return addLog('tool', content, meta, conversationId)
-}
-
-/**
  * 添加一条日志
  * @param {string} type - 日志类型: 'send' | 'receive' | 'error' | 'info' | 'tool_call' | 'tool_result' | 'tool_error'
  * @param {string} content - 日志内容

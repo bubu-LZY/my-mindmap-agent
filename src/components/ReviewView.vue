@@ -155,7 +155,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   getAllReviewDates,
@@ -579,6 +579,12 @@ onMounted(() => {
   refreshData()
   selectedDate.value = today.value
   loadDateItems(today.value)
+  const onReviewChanged = () => {
+    refreshOverview()
+    refreshData()
+  }
+  window.addEventListener('review-plan-changed', onReviewChanged)
+  onBeforeUnmount(() => window.removeEventListener('review-plan-changed', onReviewChanged))
 })
 
 defineExpose({ refreshData, addCurrentNodeToReview })

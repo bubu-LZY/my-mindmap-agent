@@ -15,6 +15,7 @@ export const generateMindMapPrompt = topic => `你是一个思维导图生成助
 3. 每个节点内容简洁，不超过20个字
 4. 一级分支3-7个，每个分支下有2-5个子节点
 5. 只输出 Markdown 内容，不要其他说明
+6. 若主题为空、无效或仅为占位符，请输出空结果，不要编造内容
 
 主题：${topic}`
 
@@ -33,6 +34,7 @@ export const expandNodePrompt = (nodePath, direction) => `你是一个思维导�
 2. 每个节点内容简洁，不超过15个字
 3. 节点之间用换行分隔，每行一个
 4. 只输出节点文本，不要编号和其他说明`
+  + (nodePath ? '' : '\n\n若当前节点路径为空或无效，请输出空结果，不要编造内容。')
 
 /**
  * 总结的 Prompt
@@ -41,7 +43,9 @@ export const expandNodePrompt = (nodePath, direction) => `你是一个思维导�
  */
 export const summarizePrompt = content => `请总结以下思维导图内容的核心要点（100字以内）：
 
-${content}`
+${content}
+
+若输入内容为空、无效或仅为占位符，请直接输出“无内容”，不要编造。`
 
 /**
  * 智能整理的 Prompt
@@ -57,7 +61,9 @@ export const reorganizePrompt = content => `你是一个思维导图整理专家
 4. 输出为 Markdown 格式（# 为根节点）
 
 原始内容：
-${content}`
+${content}
+
+若输入内容为空、无效或仅为占位符，请直接输出空结果，不要编造内容。`
 
 /**
  * 智能问答的系统 Prompt

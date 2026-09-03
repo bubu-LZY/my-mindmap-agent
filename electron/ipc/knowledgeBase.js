@@ -4,7 +4,7 @@ const path = require('path')
 
 // 获取默认保存目录
 function getDefaultSaveDir() {
-  return app.defaultSaveDir || path.join(app.getPath('documents'), 'MindMapAI')
+  return app.defaultSaveDir || 'C:\\我的mindmap'
 }
 
 // 读取文件并返回文本内容

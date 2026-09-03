@@ -10,28 +10,6 @@ const FEISHU_CONFIG_KEY = 'feishu_config'
 // 敏感字段：appSecret 使用 safeStorage 加密落盘
 const FEISHU_SENSITIVE_FIELDS = ['appSecret']
 
-// 文件路径安全校验（防止路径遍历和空字节注入）
-function assertSafeFilePath(filePath, maxSizeMB = 100) {
-  if (typeof filePath !== 'string' || !filePath.trim()) {
-    throw new Error('文件路径无效')
-  }
-  if (filePath.includes('\0') || /[\x00-\x1f\x7f]/.test(filePath)) {
-    throw new Error('路径包含非法字符')
-  }
-  const resolved = path.resolve(filePath)
-  if (!fs.existsSync(resolved)) {
-    throw new Error('文件不存在: ' + resolved)
-  }
-  const stat = fs.statSync(resolved)
-  if (!stat.isFile()) {
-    throw new Error('路径不是文件')
-  }
-  if (stat.size > maxSizeMB * 1024 * 1024) {
-    throw new Error(`文件过大（超过 ${maxSizeMB}MB）`)
-  }
-  return resolved
-}
-
 // 飞书 API 基础 URL（固定，无需用户配置）
 const FEISHU_BASE_URL = 'https://open.feishu.cn'
 
@@ -233,10 +211,9 @@ function registerFeishuHandlers() {
     async (event, { filePath, parentType, parentNode }) => {
       const token = await getTenantAccessToken()
 
-      const safePath = assertSafeFilePath(filePath, 100)
-      const fileName = path.basename(safePath)
-      const fileStats = fs.statSync(safePath)
-      const fileBuffer = fs.readFileSync(safePath)
+      const fileName = path.basename(filePath)
+      const fileStats = fs.statSync(filePath)
+      const fileBuffer = fs.readFileSync(filePath)
 
       // 使用原生 FormData 与 Blob（Node 18+ 全局可用，无需 form-data 包）
       const form = new FormData()
@@ -285,9 +262,8 @@ function registerFeishuHandlers() {
 
       // 1. 上传图片拿 image_key
       const token = await getTenantAccessToken()
-      const safePath = assertSafeFilePath(filePath, 20)
-      const fileName = path.basename(safePath)
-      const fileBuffer = fs.readFileSync(safePath)
+      const fileName = path.basename(filePath)
+      const fileBuffer = fs.readFileSync(filePath)
       const form = new FormData()
       form.append('image_type', 'message')
       form.append('image', new Blob([fileBuffer]), fileName)
@@ -332,16 +308,15 @@ function registerFeishuHandlers() {
       const targetChat = chatId || getConfig().defaultChatId
       if (!targetChat) throw new Error('未指定群聊且未配置默认群聊')
 
-      const safePath = assertSafeFilePath(filePath, 30)
-      const stats = fs.statSync(safePath)
+      const stats = fs.statSync(filePath)
       if (stats.size > 30 * 1024 * 1024) {
         throw new Error('文件超过 30MB，飞书消息文件上传限制')
       }
 
       // 1. 上传文件拿 file_key
       const token = await getTenantAccessToken()
-      const fileName = path.basename(safePath)
-      const fileBuffer = fs.readFileSync(safePath)
+      const fileName = path.basename(filePath)
+      const fileBuffer = fs.readFileSync(filePath)
       const form = new FormData()
       form.append('file_type', 'stream')
       form.append('file_name', fileName)
@@ -386,10 +361,9 @@ function registerFeishuHandlers() {
     async (event, { filePath, folderToken }) => {
       const token = await getTenantAccessToken()
 
-      const safePath = assertSafeFilePath(filePath, 100)
-      const fileName = path.basename(safePath)
-      const fileStats = fs.statSync(safePath)
-      const fileBuffer = fs.readFileSync(safePath)
+      const fileName = path.basename(filePath)
+      const fileStats = fs.statSync(filePath)
+      const fileBuffer = fs.readFileSync(filePath)
 
       const form = new FormData()
       form.append('file_name', fileName)

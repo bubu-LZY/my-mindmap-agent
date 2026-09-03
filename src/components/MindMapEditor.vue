@@ -7,12 +7,45 @@
   >
     <div ref="containerRef" class="mind-map-container"></div>
 
+    <!-- 小地图导航窗：左下角小视口，显示全图概览与当前视口框，可拖拽平移 -->
+    <div
+      v-if="miniMapVisible"
+      class="mind-map-mini-map"
+      :style="{ width: MINIMAP_WIDTH + 'px', height: MINIMAP_HEIGHT + 'px' }"
+      @mousedown="onMiniMapMousedown"
+      @mousemove="onMiniMapMousemove"
+      @mouseup="onMiniMapMouseup"
+      @mouseleave="onMiniMapMouseup"
+    >
+      <img
+        v-if="miniMapUrl"
+        :src="miniMapUrl"
+        class="mini-map-img"
+        alt="思维导图小地图"
+      />
+      <div
+        class="mini-map-view-box"
+        :style="miniMapViewStyle"
+        @mousedown.stop="onMiniMapViewBoxMousedown"
+        @contextmenu.prevent.stop
+        @wheel.stop.prevent="onMiniMapViewBoxWheel"
+      ></div>
+      <button class="mini-map-close" title="隐藏小地图" @mousedown.stop @click="miniMapVisible = false">×</button>
+    </div>
+    <button
+      v-else
+      class="mini-map-open"
+      title="显示小地图"
+      @click="miniMapVisible = true; updateMiniMap()"
+    >地图</button>
+
     <!-- 全屏展示：按钮已移至全局右下角按钮组，此处保留 ESC 快捷键逻辑 -->
     <!-- （全屏样式仍由 is-fullscreen class 控制） -->
 
     <TextToolbar
       :visible="textToolbarVisible"
       :get-mind-map="() => mindMap"
+      position-mode="fixed"
       @interact-start="onToolbarInteractStart"
       @interact-end="onToolbarInteractEnd"
     />
@@ -32,7 +65,6 @@
       @ai-rewrite="onAiRewrite"
       @ai-cloze="onAiCloze"
       @ai-cloze-full-map="onAiClozeFullMap"
-      @ai-rewrite-full-map="onAiRewriteFullMap"
       @reorganize-mindmap="onReorganizeMindmap"
       @ai-quiz="onAiQuiz"
       @ai-add-to-chat="onAiAddToChat"
@@ -155,11 +187,76 @@ import { parseReferenceLink, isReferenceLink } from '../services/referenceServic
 import { useMindMapStore } from '../stores/mindMapStore'
 import { initCloze, destroyCloze, applyClozeStyles, toggleAllCloze, isClozeHiddenAll, toggleSelectionCloze, clozeWholeNode, encodeClozeInHtml, setupClozeClickHandler, nodeHasCloze, clearAllCloze, resetClozeState, saveClozeState, syncMindMapRef } from '../utils/cloze'
 import { normalizeHtmlForQuill } from '../utils/textStyle'
+import { legacyTableHtmlToText } from '../utils/markdownParser'
 import MindMapNode from 'simple-mind-map/src/core/render/node/MindMapNode.js'
+import nodeGeneralization from 'simple-mind-map/src/core/render/node/nodeGeneralization.js'
 import MindMapLayout from 'simple-mind-map/src/layouts/MindMap.js'
 import LogicalStructureLayout from 'simple-mind-map/src/layouts/LogicalStructure.js'
 import { walk } from 'simple-mind-map/src/utils'
+import { clonePlainTree } from '../utils/treeUtils'
 import { CONSTANTS } from 'simple-mind-map/src/constants/constant'
+
+// Patch：概要节点富文本样式加载后仍被 RichText 插件的 handleSetData 强制
+// 置为 resetRichText = true，导致下次渲染时 removeHtmlStyle 把所有颜色/加粗/
+// 高亮等内联样式剥掉。用户在切换标签或重启程序后就会看到概要只剩文字。
+// 这里在 RichText.handleSetData 执行完后，仅对“已经带内联样式”的概要项恢复
+// resetRichText = false，让 simple-mind-map 不要重置这些概要的富文本样式。
+const GENERALIZATION_STYLE_RE =
+  /style=|<strong\b|<b\b|<em\b|<i\b|<u\b|<s\b|<strike\b|<del\b/i
+
+const preserveGeneralizationRichTextStyles = (root) => {
+  if (!root || typeof root !== 'object') return
+  const data = root.data
+  if (data && data.generalization !== undefined && data.generalization !== null) {
+    const list = Array.isArray(data.generalization)
+      ? data.generalization
+      : [data.generalization]
+    list.forEach((item) => {
+      if (!item || typeof item !== 'object') return
+      const html = typeof item.text === 'string' ? item.text : ''
+      if (item.richText !== false && GENERALIZATION_STYLE_RE.test(html)) {
+        item.resetRichText = false
+      }
+    })
+  }
+  if (Array.isArray(root.children)) {
+    root.children.forEach(preserveGeneralizationRichTextStyles)
+  }
+}
+
+if (RichText && RichText.prototype && typeof RichText.prototype.handleSetData === 'function') {
+  const originRichTextHandleSetData = RichText.prototype.handleSetData
+  RichText.prototype.handleSetData = function (data) {
+    const result = originRichTextHandleSetData.call(this, data)
+    try {
+      preserveGeneralizationRichTextStyles(result)
+    } catch (e) {
+      console.warn('[Patch] 概要富文本样式保护失败:', e)
+    }
+    return result
+  }
+}
+
+// Patch：修复概要节点鼠标悬停时数据层与渲染层不一致导致的崩溃
+// 问题：handleGeneralizationMouseenter 中 getGeneralizationNodeIndex 返回的索引
+// 是基于渲染层 _generalizationList 的，而 list 是数据层 generalization 数组，
+// 两者不同步时 generalizationData 为 undefined，读取 .range 报错。
+;(() => {
+  const orig = nodeGeneralization.handleGeneralizationMouseenter
+  if (!orig) return
+  nodeGeneralization.handleGeneralizationMouseenter = function () {
+    try {
+      const belongNode = this.generalizationBelongNode
+      if (!belongNode) return
+      const list = belongNode.formatGetGeneralization()
+      const index = belongNode.getGeneralizationNodeIndex(this)
+      if (index < 0 || index >= list.length) return // 数据不同步时静默返回
+      orig.call(this)
+    } catch (e) {
+      console.warn('[Patch] handleGeneralizationMouseenter 异常:', e)
+    }
+  }
+})()
 
 // Patch：含图片的节点禁止拖拽调整左右宽度。
 // 图片放大后节点宽度应跟随图片内容同步缩放，否则固定宽度会裁切图片。
@@ -181,13 +278,12 @@ import { CONSTANTS } from 'simple-mind-map/src/constants/constant'
 
 // Patch：外框避让。simple-mind-map 的外框（OuterFrame 插件）是纯视觉层，
 // 绘制在节点层下方，且布局的 getMarginX/getMarginY 完全未预留外框的
-// outerFramePaddingX / outerFramePaddingY 与 strokeWidth，导致外框会被相邻节点覆盖。
+// outerFramePaddingY 与 strokeWidth，导致外框会被相邻兄弟节点覆盖。
 // 这里在 MindMap / LogicalStructure 两种布局的 computedBaseValue 里，
 // 为“被外框框选的连续兄弟节点组”额外累计垂直空间，并在 computedTopValue
 // 摆放时于组首尾各插入一半，使外框与相邻节点拉开、不再被覆盖。
 ;(() => {
   const OF_PAD_Y_DEFAULT = 10
-  const OF_PAD_X_DEFAULT = 10
   const OF_STROKE_WIDTH_DEFAULT = 2
 
   // 节点的外框组标识；没有 groupId 但有 outerFrame 时用 uid 兜底，避免误合并
@@ -211,22 +307,6 @@ import { CONSTANTS } from 'simple-mind-map/src/constants/constant'
         ? of.strokeWidth
         : OF_STROKE_WIDTH_DEFAULT
     return padY * 2 + sw
-  }
-
-  // 外框组需要额外预留的水平宽度（左右各一半）：paddingX*2 + 描边宽度
-  // 用于把外框与同层（左右）相邻节点拉开，避免缩放时被压在一起
-  function getFrameGroupHorizontalExtra(layout, firstNode) {
-    const opt = (layout && layout.mindMap && layout.mindMap.opt) || {}
-    const padX =
-      typeof opt.outerFramePaddingX === 'number'
-        ? opt.outerFramePaddingX
-        : OF_PAD_X_DEFAULT
-    const of = firstNode && firstNode.getData && firstNode.getData('outerFrame')
-    const sw =
-      of && typeof of.strokeWidth === 'number'
-        ? of.strokeWidth
-        : OF_STROKE_WIDTH_DEFAULT
-    return padX * 2 + sw
   }
 
   // 按“连续相同的 groupId”把有序节点列表分成组
@@ -271,21 +351,6 @@ import { CONSTANTS } from 'simple-mind-map/src/constants/constant'
     return totalTop
   }
 
-  // 节点所在的外框组：以 node 自身为分组起点向后合并连续同组兄弟。
-  // 返回 { start, end, groupId }；找不到外框返回 null。
-  function getNodeFrameGroup(list, idx) {
-    if (!list || idx < 0 || idx >= list.length) return null
-    const groups = splitFrameGroups(list)
-    return groups.find(g => idx >= g.start && idx <= g.end && g.groupId !== null) || null
-  }
-
-  // 当前节点是否"是某个外框组的最后一个兄弟"。只有在这种情况下，
-  // 它的下一个兄弟才需要为它额外腾出水平 padding。
-  function isLastInFrameGroup(list, idx) {
-    const g = getNodeFrameGroup(list, idx)
-    return !!g && g.end === idx
-  }
-
   // —— MindMap（思维导图，分左右方向）——
   MindMapLayout.prototype.computedBaseValue = function () {
     walk(
@@ -305,17 +370,10 @@ import { CONSTANTS } from 'simple-mind-map/src/constants/constant'
                 ? CONSTANTS.LAYOUT_GROW_DIR.RIGHT
                 : CONSTANTS.LAYOUT_GROW_DIR.LEFT)
           }
-          // 外框组最后节点之后：当前兄弟为它额外腾出水平 padding，
-          // 让外框与下一个兄弟拉开。否则缩小时后面兄弟会与外框重叠。
-          const horizontalExtra = index > 0 && parent._node.children
-            ? (isLastInFrameGroup(parent._node.children, index - 1)
-                ? getFrameGroupHorizontalExtra(this, parent._node.children[index - 1])
-                : 0)
-            : 0
           newNode.left =
             newNode.dir === CONSTANTS.LAYOUT_GROW_DIR.RIGHT
-              ? parent._node.left + parent._node.width + this.getMarginX(layerIndex) + horizontalExtra
-              : parent._node.left - this.getMarginX(layerIndex) - newNode.width - horizontalExtra
+              ? parent._node.left + parent._node.width + this.getMarginX(layerIndex)
+              : parent._node.left - this.getMarginX(layerIndex) - newNode.width
         }
         if (!cur.data.expand) {
           return true
@@ -398,16 +456,10 @@ import { CONSTANTS } from 'simple-mind-map/src/constants/constant'
         if (isRoot) {
           this.setNodeCenter(newNode)
         } else {
-          // 外框组最后节点之后：当前兄弟为它额外腾出水平 padding
-          const horizontalExtra = index > 0 && parent._node.children
-            ? (isLastInFrameGroup(parent._node.children, index - 1)
-                ? getFrameGroupHorizontalExtra(this, parent._node.children[index - 1])
-                : 0)
-            : 0
           if (this.isUseLeft) {
-            newNode.left = parent._node.left - newNode.width - this.getMarginX(layerIndex) - horizontalExtra
+            newNode.left = parent._node.left - newNode.width - this.getMarginX(layerIndex)
           } else {
-            newNode.left = parent._node.left + parent._node.width + this.getMarginX(layerIndex) + horizontalExtra
+            newNode.left = parent._node.left + parent._node.width + this.getMarginX(layerIndex)
           }
         }
         if (!cur.data.expand) {
@@ -453,11 +505,156 @@ import { CONSTANTS } from 'simple-mind-map/src/constants/constant'
   }
 })()
 
+// 递归清理树数据：移除函数/DOM 节点/循环引用等不能结构化克隆的对象。
+// 概要节点渲染会把概要项（item）与概要节点实例共享引用，可能被写入实例引用，
+// 导致 IPC 保存时报 "An object could not be cloned"、概要数据丢失。
+function sanitizeGeneralization(gen) {
+  // 先过一遍概要项自愈（定义见下，函数声明提升，可安全前置调用）：
+  // 保证保存出去的数据里不会残留 { data: {} } 空壳或 text === 'undefined'
+  const list = sanitizeGeneralizationList(gen)
+  return list.map(item => {
+    if (!item || typeof item !== 'object') return item
+    const clean = {}
+    for (const key of Object.keys(item)) {
+      const val = item[key]
+      if (typeof val === 'function') continue
+      if (val && typeof val === 'object') {
+        try {
+          clean[key] = JSON.parse(JSON.stringify(val))
+        } catch (e) {
+          continue // 含循环引用/DOM 节点：跳过该字段
+        }
+      } else {
+        clean[key] = val
+      }
+    }
+    return clean
+  })
+}
+
+function sanitizeTreeData(node) {
+  if (!node) return null
+  const out = {}
+  if (node.data && typeof node.data === 'object') {
+    out.data = {}
+    for (const key of Object.keys(node.data)) {
+      const val = node.data[key]
+      if (typeof val === 'function') continue
+      if (key === 'generalization') {
+        out.data[key] = sanitizeGeneralization(val)
+        continue
+      }
+      if (val && typeof val === 'object') {
+        try {
+          out.data[key] = JSON.parse(JSON.stringify(val))
+        } catch (e) {
+          continue
+        }
+      } else {
+        out.data[key] = val
+      }
+    }
+  }
+  if (Array.isArray(node.children)) {
+    out.children = node.children.map(sanitizeTreeData).filter(Boolean)
+  }
+  return out
+}
+
+// 从 MindMapNode 树（renderTree）直接转换为纯数据树，绕过 simple-mind-map 的 simpleDeepClone。
+// 概要节点渲染可能把实例引用写进概要项，导致 simpleDeepClone（JSON.stringify）遇循环引用返回 null，
+// 进而 getData 返回 null、数据无法保存。这里递归清理，保证总能拿到可序列化的纯数据。
+function renderTreeToData(node) {
+  if (!node) return null
+  const nodeData = (node.nodeData && node.nodeData.data) || node.data || {}
+  const out = { data: {} }
+  for (const key of Object.keys(nodeData)) {
+    const val = nodeData[key]
+    if (typeof val === 'function') continue
+    if (key === 'generalization') {
+      out.data[key] = sanitizeGeneralization(val)
+      continue
+    }
+    if (val && typeof val === 'object') {
+      try {
+        out.data[key] = JSON.parse(JSON.stringify(val))
+      } catch (e) {
+        continue
+      }
+    } else {
+      out.data[key] = val
+    }
+  }
+  if (Array.isArray(node.children)) {
+    out.children = node.children.map(renderTreeToData).filter(Boolean)
+  }
+  return out
+}
+
+// 概要项自愈。
+// 历史版本 clonePlainTree 会把 data.generalization 这个数组错误克隆成 { data: {} }，
+// 于是每条概要丢掉 text/range，画布上渲染成 "undefined"、双击编辑为空；
+// 更糟的是一旦数据被这样写回文件，概要文本就永久丢失了。
+// 这里在每次 setData 前做一次兜底清洗：
+//   1) 把 { data: {...} } 这类被错误包裹的概要项还原回真实概要项
+//   2) 丢掉既无文本又无区间、且带不出任何信息的畸形项，避免再渲染出 undefined 节点
+function sanitizeGeneralizationList(gen) {
+  const list = Array.isArray(gen) ? gen : (gen ? [gen] : [])
+  const out = []
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue
+    let item = raw
+    // 被错误克隆的概要项：外层只剩一个 data 壳，真实内容在 data 里
+    if (
+      item.data &&
+      typeof item.data === 'object' &&
+      !Array.isArray(item.data) &&
+      !('text' in item) &&
+      !('range' in item) &&
+      !('image' in item)
+    ) {
+      item = item.data
+    }
+    if (!item || typeof item !== 'object') continue
+    const hasText =
+      item.text !== undefined && item.text !== null && item.text !== 'undefined'
+    const hasRange = !!item.range
+    if (!hasText && !hasRange && !item.image && !item.icon) {
+      // 既没有文本也没有区间（也带不出图片/图标）：这是个空壳，直接丢弃
+      continue
+    }
+    if (!hasText) item.text = ''
+    out.push(item)
+  }
+  return out
+}
+
+// 同为 clonePlainTree 历史 bug 的受害者：这些字段本应是数组，
+// 被错误克隆后变成 { data: {} } 空壳，会导致关联线消失、图标/标签丢失。
+// 这里把空壳清掉，让库回退到「该字段不存在」的正常行为。
+const ARRAY_DATA_FIELDS = ['associativeLineTargets', 'icon', 'tag']
+function cleanCorruptedArrayFields(data) {
+  for (const key of ARRAY_DATA_FIELDS) {
+    const v = data[key]
+    if (v && !Array.isArray(v) && typeof v === 'object' && 'data' in v) {
+      delete data[key]
+    }
+  }
+}
+
 function normalizeNodeData(node) {
   if (!node) return null
   if (!node.data) node.data = {}
   if (!node.data.uid) node.data.uid = createUid()
   if (!node.data.richText) node.data.richText = true
+  if (node.data.generalization !== undefined && node.data.generalization !== null) {
+    node.data.generalization = sanitizeGeneralizationList(node.data.generalization)
+  }
+  cleanCorruptedArrayFields(node.data)
+  // 兼容旧版把整张 <table> 塞进单个节点后导致双击编辑卡死、退出丢表格的问题
+  if (node.data.text && /<table\b/i.test(node.data.text)) {
+    node.data.text = legacyTableHtmlToText(node.data.text)
+  }
   if (node.data.text && !node.data.text.startsWith('<')) {
     node.data.text = `<p><span>${node.data.text}</span></p>`
   }
@@ -501,7 +698,6 @@ const emit = defineEmits([
   'ai-rewrite',
   'ai-cloze',
   'ai-cloze-full-map',
-  'ai-rewrite-full-map',
   'reorganize-mindmap',
   'ai-quiz',
   'ai-add-to-chat',
@@ -516,9 +712,52 @@ const containerRef = ref(null)
 // 固定工具栏：当前激活节点（驱动按钮可用态）
 const fixedToolbarNodes = ref([])
 let mindMap = null
+// 离屏容器：大纲/关联图模式下真实容器被 v-show 隐藏（display:none，尺寸为 0），
+// simple-mind-map 在 0 尺寸容器上无法 new 实例，导致 renderer.renderTree 为空、
+// 大纲视图所有依赖 renderer 的快捷键（回车/退格/挖空等）失效。
+// 用离屏容器兜底初始化，切回思维导图视图时再把 SVG 迁回真实容器。
+let offscreenContainer = null
+let imgResizeRenderTimer = null
+let mindMapViewSaveTimer = null
+let miniMapUpdateTimer = null
+let miniMapGeneration = 0
+let miniMapViewBoxDrag = null
 // 全局注册表：AI 工具（toolHandler）经 store 惰性获取实例，
 // 避免父组件一次性快照为 null 后所有导图类工具永久报"实例未初始化"
 const mindMapStore = useMindMapStore()
+
+// 每个文件独立保存画布视图状态（缩放/平移），切换标签后按 fileId 恢复
+const MINDMAP_VIEW_STATE_PREFIX = 'mindmap_view_state:'
+const getViewStateKey = () => `${MINDMAP_VIEW_STATE_PREFIX}${props.fileId || 'untitled'}`
+const readMindMapViewState = () => {
+  try {
+    const raw = localStorage.getItem(getViewStateKey())
+    if (!raw) return null
+    const data = JSON.parse(raw)
+    if (!data || !data.state || typeof data.state.scale !== 'number') return null
+    if (!Number.isFinite(data.state.scale) || data.state.scale <= 0) return null
+    return data
+  } catch (e) {
+    return null
+  }
+}
+const writeMindMapViewState = (viewData) => {
+  try {
+    localStorage.setItem(getViewStateKey(), JSON.stringify(viewData))
+  } catch (e) {
+    // localStorage 不可用/超限时静默降级，不影响导图编辑
+  }
+}
+
+// 小地图尺寸：原项目示例通常偏大，这里刻意做小，只作为右下角导航窗
+const MINIMAP_WIDTH = 190
+const MINIMAP_HEIGHT = 140
+const MINIMAP_BOX_MIN_WIDTH = 34
+const MINIMAP_BOX_MIN_HEIGHT = 26
+const miniMapVisible = ref(false)
+const miniMapUrl = ref('')
+const miniMapViewStyle = ref({ left: '0px', top: '0px', width: '0px', height: '0px' })
+const miniMapBoxSizeOverride = ref(null)
 
 // 全屏展示：整个界面只保留导图（覆盖左侧文件栏/右侧聊天等），ESC 或再次点击退出
 const isFullscreen = ref(false)
@@ -723,6 +962,208 @@ let isSettingData = false
   MindMap.usePlugin(Painter)
   MindMap.usePlugin(NodeImgAdjust)
   MindMap.usePlugin(TouchEvent)
+
+// 根据 MiniMap 插件返回的原始视口数据，计算并设置蓝框位置/大小。
+// 注意：插件的 right/bottom 是距离容器右/下边缘的距离，不是右/下边缘坐标。
+const applyMiniMapViewBoxData = (data) => {
+  if (!data) return
+  const raw = data.viewBoxStyle || {}
+  const left = parseFloat(raw.left) || 0
+  const top = parseFloat(raw.top) || 0
+  const right = parseFloat(raw.right) || left
+  const bottom = parseFloat(raw.bottom) || top
+  const rawWidth = Math.max(0, MINIMAP_WIDTH - left - right)
+  const rawHeight = Math.max(0, MINIMAP_HEIGHT - top - bottom)
+  const maxWidth = Math.max(MINIMAP_BOX_MIN_WIDTH, MINIMAP_WIDTH - 8)
+  const maxHeight = Math.max(MINIMAP_BOX_MIN_HEIGHT, MINIMAP_HEIGHT - 8)
+  const clampBoxWidth = (v) => Math.min(Math.max(v, MINIMAP_BOX_MIN_WIDTH), maxWidth)
+  const clampBoxHeight = (v) => Math.min(Math.max(v, MINIMAP_BOX_MIN_HEIGHT), maxHeight)
+  const width = miniMapBoxSizeOverride.value
+    ? clampBoxWidth(miniMapBoxSizeOverride.value.width)
+    : clampBoxWidth(rawWidth)
+  const height = miniMapBoxSizeOverride.value
+    ? clampBoxHeight(miniMapBoxSizeOverride.value.height)
+    : clampBoxHeight(rawHeight)
+  const centerX = left + rawWidth / 2
+  const centerY = top + rawHeight / 2
+  const boxLeft = Math.min(Math.max(0, centerX - width / 2), MINIMAP_WIDTH - width)
+  const boxTop = Math.min(Math.max(0, centerY - height / 2), MINIMAP_HEIGHT - height)
+  miniMapViewStyle.value = {
+    left: boxLeft + 'px',
+    top: boxTop + 'px',
+    width: width + 'px',
+    height: height + 'px'
+  }
+}
+
+// 拖动蓝框期间，只同步蓝框位置，不重新生成整张缩略图，避免卡顿。
+let miniMapViewBoxSyncQueued = false
+const queueMiniMapViewBoxSync = () => {
+  if (miniMapViewBoxSyncQueued) return
+  miniMapViewBoxSyncQueued = true
+  requestAnimationFrame(() => {
+    miniMapViewBoxSyncQueued = false
+    if (!mindMap?.miniMap || !miniMapVisible.value) return
+    try {
+      const data = mindMap.miniMap.calculationMiniMap(MINIMAP_WIDTH, MINIMAP_HEIGHT)
+      applyMiniMapViewBoxData(data)
+    } catch (e) {
+      console.warn('[MindMapEditor] 小地图蓝框同步失败:', e)
+    }
+  })
+}
+
+// 刷新左下角小地图：用 MiniMap 插件计算缩略图与当前视口框，并异步取图
+const updateMiniMap = () => {
+  if (!mindMap || !mindMap.miniMap || !miniMapVisible.value) return
+  if (miniMapViewBoxDrag) return
+  if (miniMapUpdateTimer) {
+    clearTimeout(miniMapUpdateTimer)
+  }
+  miniMapUpdateTimer = setTimeout(() => {
+    miniMapUpdateTimer = null
+    if (!mindMap || !mindMap.miniMap || !miniMapVisible.value) return
+    const generation = ++miniMapGeneration
+    try {
+      const data = mindMap.miniMap.calculationMiniMap(MINIMAP_WIDTH, MINIMAP_HEIGHT)
+      if (!data) return
+      applyMiniMapViewBoxData(data)
+      if (typeof data.getImgUrl === 'function') {
+        data.getImgUrl((url) => {
+          if (generation === miniMapGeneration && url) {
+            miniMapUrl.value = url
+          }
+        })
+      }
+    } catch (e) {
+      console.warn('[MindMapEditor] 小地图刷新失败:', e)
+    }
+  }, 180)
+}
+
+// 小地图整体按下拖动：按小地图坐标平移画布
+const onMiniMapMousedown = (e) => {
+  e.preventDefault()
+  if (mindMap?.miniMap) {
+    try { mindMap.miniMap.onMousedown(e) } catch (err) {}
+  }
+}
+const onMiniMapMousemove = (e) => {
+  if (mindMap?.miniMap) {
+    try { mindMap.miniMap.onMousemove(e, 5) } catch (err) {}
+  }
+}
+const onMiniMapMouseup = () => {
+  const wasDraggingViewBox = !!miniMapViewBoxDrag
+  miniMapViewBoxDrag = null
+  if (mindMap?.miniMap) {
+    try { mindMap.miniMap.onMouseup() } catch (err) {}
+  }
+  if (wasDraggingViewBox) updateMiniMap()
+}
+const onMiniMapViewBoxMousedown = (e) => {
+  e.preventDefault()
+  e.stopPropagation()
+  if (e.button !== 0 && e.button !== 2) return
+  if (!mindMap || !mindMap.miniMap) return
+  const state = mindMap.miniMap.currentState
+  if (!state) return
+  const style = miniMapViewStyle.value
+  miniMapViewBoxDrag = {
+    clientX: e.clientX,
+    clientY: e.clientY,
+    viewX: mindMap.view.x,
+    viewY: mindMap.view.y,
+    miniMapBoxScale: state.miniMapBoxScale || 1,
+    startLeft: parseFloat(style.left) || 0,
+    startTop: parseFloat(style.top) || 0,
+    width: parseFloat(style.width) || MINIMAP_BOX_MIN_WIDTH,
+    height: parseFloat(style.height) || MINIMAP_BOX_MIN_HEIGHT
+  }
+  window.addEventListener('mousemove', onMiniMapViewBoxMousemove)
+  window.addEventListener('mouseup', onMiniMapViewBoxDragEnd)
+}
+const onMiniMapViewBoxMousemove = (e) => {
+  if (!miniMapViewBoxDrag || !mindMap) return
+  e.preventDefault()
+  e.stopPropagation()
+  const dx = e.clientX - miniMapViewBoxDrag.clientX
+  const dy = e.clientY - miniMapViewBoxDrag.clientY
+  const scale = miniMapViewBoxDrag.miniMapBoxScale || 1
+  try {
+    mindMap.view.translateXTo(miniMapViewBoxDrag.viewX - dx / scale)
+    mindMap.view.translateYTo(miniMapViewBoxDrag.viewY - dy / scale)
+  } catch (err) {
+    console.warn('[MindMapEditor] 小地图视口框拖动失败:', err)
+  }
+}
+const onMiniMapViewBoxDragEnd = () => {
+  if (!miniMapViewBoxDrag) return
+  miniMapViewBoxDrag = null
+  window.removeEventListener('mousemove', onMiniMapViewBoxMousemove)
+  window.removeEventListener('mouseup', onMiniMapViewBoxDragEnd)
+  if (mindMap?.miniMap) {
+    try { mindMap.miniMap.onMouseup() } catch (err) {}
+  }
+  updateMiniMap()
+}
+const onMiniMapViewBoxWheel = (e) => {
+  e.preventDefault()
+  e.stopPropagation()
+  if (!mindMap) return
+  const style = miniMapViewStyle.value
+  const curWidth = parseFloat(style.width) || MINIMAP_BOX_MIN_WIDTH
+  const curHeight = parseFloat(style.height) || MINIMAP_BOX_MIN_HEIGHT
+  const maxWidth = Math.max(MINIMAP_BOX_MIN_WIDTH, MINIMAP_WIDTH - 8)
+  const maxHeight = Math.max(MINIMAP_BOX_MIN_HEIGHT, MINIMAP_HEIGHT - 8)
+  const direction = e.deltaY < 0 ? 1 : -1
+  const width = Math.min(Math.max(curWidth + direction * 10, MINIMAP_BOX_MIN_WIDTH), maxWidth)
+  const height = Math.min(Math.max(curHeight + direction * 8, MINIMAP_BOX_MIN_HEIGHT), maxHeight)
+  miniMapBoxSizeOverride.value = { width, height }
+  const left = Math.min(
+    Math.max(0, parseFloat(style.left) - (width - curWidth) / 2),
+    Math.max(0, MINIMAP_WIDTH - width)
+  )
+  const top = Math.min(
+    Math.max(0, parseFloat(style.top) - (height - curHeight) / 2),
+    Math.max(0, MINIMAP_HEIGHT - height)
+  )
+  miniMapViewStyle.value = {
+    left: left + 'px',
+    top: top + 'px',
+    width: width + 'px',
+    height: height + 'px'
+  }
+}
+
+// 安装缩放/平移持久化与小地图刷新监听
+const setupMindMapViewListeners = () => {
+  if (!mindMap) return
+  const saveViewState = (viewData) => {
+    if (mindMapViewSaveTimer) clearTimeout(mindMapViewSaveTimer)
+    mindMapViewSaveTimer = setTimeout(() => {
+      mindMapViewSaveTimer = null
+      if (mindMap && viewData) writeMindMapViewState(viewData)
+    }, 250)
+  }
+  mindMap.on('view_data_change', (viewData) => {
+    saveViewState(viewData)
+    if (miniMapViewBoxDrag) {
+      queueMiniMapViewBoxSync()
+    } else {
+      updateMiniMap()
+    }
+  })
+  mindMap.on('node_tree_render_end', () => {
+    updateMiniMap()
+  })
+  mindMap.on('data_change', () => {
+    updateMiniMap()
+  })
+  mindMap.on('view_theme_change', () => {
+    updateMiniMap()
+  })
+}
 
 // simple-mind-map 初始化 Quill 时使用 formats 白名单创建实例级 registry，
 // 白名单内不含 code，导致编辑态挖空的 formatText('code') 被静默忽略。
@@ -1159,10 +1600,27 @@ const initMindMap = () => {
     return
   }
 
-  const normalizedData = normalizeNodeData(JSON.parse(JSON.stringify(props.data)))
+  const normalizedData = normalizeNodeData(clonePlainTree(props.data))
+  const savedViewData = readMindMapViewState()
+
+  // 确定初始化容器：真实容器 0 尺寸时（大纲/关联图模式被 v-show 隐藏为 display:none），
+  // 用离屏容器兜底，保证 mindMap 实例在这些模式下也能创建（renderer.renderTree 可用，
+  // 大纲视图依赖 renderTree 的快捷键不失效）
+  let el = containerRef.value
+  try {
+    const initRect = containerRef.value.getBoundingClientRect()
+    if (initRect.width <= 0 || initRect.height <= 0) {
+      offscreenContainer = document.createElement('div')
+      offscreenContainer.style.cssText = 'position:fixed;left:-9999px;top:0;width:800px;height:600px;pointer-events:none;'
+      document.body.appendChild(offscreenContainer)
+      el = offscreenContainer
+    }
+  } catch (e) {
+    // getBoundingClientRect 异常时退回真实容器（会由上层 catch 挂起重试）
+  }
 
   mindMap = new MindMap({
-    el: containerRef.value,
+    el,
     data: normalizedData,
     layout: (() => {
       try {
@@ -1175,7 +1633,8 @@ const initMindMap = () => {
     theme: getSavedTheme(),
     readonly: false,
     mousewheelAction: 'zoom',
-    fit: true,
+    viewData: savedViewData || null,
+    fit: !savedViewData,
     // 左键框选节点，右键按住拖动画布，右键单击弹出菜单
     useLeftKeySelectionRightKeyDrag: true,
     // 禁用库自带的画布拖拽平移：画布平移统一由本组件的右键/中键拖动逻辑负责。
@@ -1318,6 +1777,8 @@ const initMindMap = () => {
       return svg
     }
   })
+  setupMindMapViewListeners()
+  updateMiniMap()
   mindMapStore.setMindMap(mindMap)
   // [多实例] 把本实例按 fileId 注册进表，AI 任务按绑定的 fileId 取到这个独立实例
   if (props.fileId) mindMapStore.registerInstance(props.fileId, mindMap)
@@ -1366,13 +1827,79 @@ const initMindMap = () => {
     console.warn('[MindMapEditor] 概要线样式补丁失败:', e)
   }
 
-  // 图片缩放（SET_NODE_IMAGE）后，openPerformance 懒渲染下节点边框可能不随图片尺寸更新，
-  // 用防抖 render 强制刷新节点形状尺寸（文本编辑进行中时跳过，避免干扰输入框）
-  let imgResizeRenderTimer = null
+  // Patch：修复删除概要节点后不触发渲染导致"删不掉"的问题
+  // 问题根因：Render.deleteNodeGeneralization 内部调用 SET_NODE_DATA 命令，
+  // 该命令只修改 nodeData.data 不触发 reRender，导致渲染层的 _generalizationList
+  // 和 DOM 节点都还在，视觉上看起来"删不掉"，且数据层与渲染层不一致会导致
+  // handleGeneralizationMouseenter 等函数崩溃。
+  try {
+    const renderer = mindMap.renderer
+    if (renderer && typeof renderer.deleteNodeGeneralization === 'function') {
+      const origDeleteGen = renderer.deleteNodeGeneralization.bind(renderer)
+      renderer.deleteNodeGeneralization = function (node) {
+        origDeleteGen(node)
+        // 删除后手动触发所属节点的重渲染，同步更新 _generalizationList 和 DOM
+        try {
+          const targetNode = node.generalizationBelongNode
+          if (targetNode && typeof targetNode.reRender === 'function') {
+            targetNode.reRender()
+            mindMap.render()
+          }
+        } catch (e) {
+          console.warn('[Patch] deleteNodeGeneralization 重渲染失败:', e)
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[MindMapEditor] 删除概要渲染补丁失败:', e)
+  }
+
+  // Patch：修复编辑状态退出后残留的 node_text_edit_change 事件导致崩溃。
+  // 问题根因：RichText 插件的 text-change 事件在输入法合成结束等延迟回调里仍会触发，
+  // 但此时编辑器已退出、this.node 已被清空为 null，onNodeTextEditChange 里
+  // node.createTextNode(text) 就会抛 "Cannot read properties of null (reading 'createTextNode')"。
+  try {
+    const renderer = mindMap.renderer
+    if (renderer && typeof renderer.onNodeTextEditChange === 'function') {
+      const origOnEdit = renderer.onNodeTextEditChange.bind(renderer)
+      renderer.onNodeTextEditChange = function (payload) {
+        // node 为空（编辑已退出）时静默跳过，避免残留事件崩溃
+        if (!payload || !payload.node) return
+        try {
+          origOnEdit(payload)
+        } catch (e) {
+          console.warn('[MindMapEditor] onNodeTextEditChange 异常:', e)
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[MindMapEditor] onNodeTextEditChange 保护补丁失败:', e)
+  }
 
   // 监听数据变化 —— 仅在用户编辑时回传，程序性 setData 时不回传
   mindMap.on('data_change', (data) => {
+    if (!mindMap) return // 组件卸载后残留的 addHistory 节流回调仍会触发，静默跳过
     if (isSettingData) return
+    // 概要诊断：对比 data_change 事件数据与实际 renderTree 里的概要数量，
+    // 若不一致说明概要数据在 getCopyData（simpleDeepClone）环节丢失，据此定位根因
+    try {
+      const actual = mindMap.renderer && mindMap.renderer.renderTree
+      if (actual && data && data.data) {
+        const countTree = (n, c = { nodes: 0, items: 0 }) => {
+          if (!n || !n.data) return c
+          const g = n.data.generalization
+          const list = Array.isArray(g) ? g : (g ? [g] : [])
+          if (list.length > 0) { c.nodes++; c.items += list.length }
+          if (Array.isArray(n.children)) n.children.forEach(ch => countTree(ch, c))
+          return c
+        }
+        const a = countTree(actual)
+        const b = countTree(data)
+        if (a.items !== b.items) {
+          console.warn(`[概要诊断] data_change 数据概要数与实际不一致：renderTree=${a.nodes}节点/${a.items}条，data=${b.nodes}节点/${b.items}条`, data)
+        }
+      }
+    } catch (e) {}
     // 带上 fileId，App 层按文件独立跟踪脏标记（多窗口各自保存）
     emit('data-change', data, props.fileId)
     clearTimeout(imgResizeRenderTimer)
@@ -1387,12 +1914,14 @@ const initMindMap = () => {
 
   // 监听节点激活
   mindMap.on('node_active', (node, activeNodeList) => {
+    if (!mindMap) return // 组件卸载后残留事件静默跳过
     fixedToolbarNodes.value = activeNodeList || []
     emit('node-active', node, activeNodeList)
   })
 
   // 监听树渲染完成
   mindMap.on('node_tree_render_end', (...args) => {
+    if (!mindMap) return
     emit('node-tree-render-end', ...args)
     // 渲染完成后重新应用挖空样式
     setTimeout(() => applyClozeStyles(), 100)
@@ -1401,11 +1930,14 @@ const initMindMap = () => {
   // 视图隐藏期间发生过渲染则置位：隐藏中（display:none）渲染会导致 foreignObject 文本丢失，
   // 切回视图时需完整重渲染恢复；未渲染过则切回时无需任何重渲染（避免闪烁）
   mindMap.on('node_tree_render_start', () => {
+    if (!mindMap) return
     if (!props.visible) renderedWhileHidden = true
   })
 
   // 监听前进后退 —— 参数是 (activeIndex, length)
   mindMap.on('back_forward', (activeIndex, length) => {
+    // 组件卸载后（mindMap 已销毁）残留的 addHistory 节流回调仍会触发，此时静默跳过
+    if (!mindMap || !mindMap.renderer) return
     // 撤销/重做后刷新激活节点状态
     const activeNodes = mindMap.renderer.activeNodeList
     if (activeNodes && activeNodes.length > 0) {
@@ -1718,22 +2250,51 @@ const initMindMap = () => {
 }
 
 /**
- * 快捷键：Tab 添加子节点，Shift+Tab 提升节点层级
+ * 快捷键：
+ * - Tab 添加子节点，Shift+Tab 提升节点层级
+ * - 方向键（非编辑态）移动选中节点
+ * - ESC 退出编辑状态
  * 参考幕布思维导图行为：无论是否在编辑状态都生效
  */
 const onWrapperKeydown = (event) => {
   // Ctrl+H 已移至 App.vue 全局处理，避免焦点不可用时无法触发
 
-  // Esc: 取消正在进行的关联线绘制
-  if (event.key === 'Escape' && mindMap?.associativeLine?.creatingStartNode) {
-    try {
-      mindMap.associativeLine.cancelCreateLine()
-      try { ElMessage.info('已取消关联线绘制') } catch (e) {}
-    } catch (err) {}
+  // Esc: 取消正在进行的关联线绘制 / 退出编辑状态
+  if (event.key === 'Escape') {
+    // 优先取消关联线绘制
+    if (mindMap?.associativeLine?.creatingStartNode) {
+      try {
+        mindMap.associativeLine.cancelCreateLine()
+        try { ElMessage.info('已取消关联线绘制') } catch (e) {}
+      } catch (err) {}
+      return
+    }
+    // 退出编辑状态（如果正在编辑）
+    const isEditing = event.target.isContentEditable
+    if (isEditing) {
+      event.preventDefault()
+      exitEditMode(() => {})
+      return
+    }
     return
   }
 
   // 挖空快捷键已统一为 Ctrl+H（App.vue 全局处理），此处不再重复处理 Ctrl+Enter
+
+  const isEditing = event.target.isContentEditable
+
+  // 方向键导航（非编辑态下移动选中节点）
+  if (!isEditing && (
+    event.key === 'ArrowUp' || event.key === 'ArrowDown' ||
+    event.key === 'ArrowLeft' || event.key === 'ArrowRight'
+  )) {
+    const hasActiveNode = mindMap && mindMap.renderer && mindMap.renderer.activeNodeList && mindMap.renderer.activeNodeList.length > 0
+    if (!hasActiveNode) return
+
+    event.preventDefault()
+    navigateActiveNode(event.key)
+    return
+  }
 
   if (event.key !== 'Tab') return
 
@@ -1742,7 +2303,6 @@ const onWrapperKeydown = (event) => {
   if (!hasActiveNode) return
 
   event.preventDefault()
-  const isEditing = event.target.isContentEditable
 
   if (event.shiftKey) {
     // Shift+Tab: 提升节点层级
@@ -1758,6 +2318,115 @@ const onWrapperKeydown = (event) => {
     } else {
       mindMap.execCommand('INSERT_CHILD_NODE')
     }
+  }
+}
+
+/**
+ * 方向键导航：移动当前选中节点
+ * - ArrowUp / ArrowDown: 在上一个 / 下一个可见兄弟节点间移动（深度优先顺序）
+ * - ArrowLeft: 移动到父节点
+ * - ArrowRight: 移动到第一个子节点（如果有子节点且展开）
+ */
+const navigateActiveNode = (direction) => {
+  if (!mindMap || !mindMap.renderer) return
+  const currentNode = mindMap.renderer.activeNodeList?.[0]
+  if (!currentNode) return
+
+  let targetNode = null
+
+  if (direction === 'ArrowUp' || direction === 'ArrowDown') {
+    // 按深度优先顺序找上一个/下一个可见节点
+    const visibleList = getVisibleNodeListForNav()
+    const currentIndex = visibleList.findIndex(n => {
+      const uid = n.getData?.('uid') || n.uid
+      const curUid = currentNode.getData?.('uid') || currentNode.uid
+      return uid === curUid
+    })
+    if (currentIndex === -1) return
+    const targetIndex = direction === 'ArrowUp' ? currentIndex - 1 : currentIndex + 1
+    if (targetIndex >= 0 && targetIndex < visibleList.length) {
+      targetNode = visibleList[targetIndex]
+    }
+  } else if (direction === 'ArrowLeft') {
+    // 移动到父节点
+    targetNode = currentNode.parent
+  } else if (direction === 'ArrowRight') {
+    // 移动到第一个子节点（需展开且有子节点）
+    const isExpanded = currentNode.getData('expand') !== false
+    if (isExpanded && currentNode.children && currentNode.children.length > 0) {
+      targetNode = currentNode.children[0]
+    }
+  }
+
+  if (targetNode) {
+    // 切换选中节点
+    try {
+      if (typeof mindMap.renderer.clearActiveNode === 'function') {
+        mindMap.renderer.clearActiveNode()
+      }
+      if (typeof mindMap.renderer.addNodeToActiveList === 'function') {
+        mindMap.renderer.addNodeToActiveList(targetNode)
+      }
+      if (typeof mindMap.renderer.emitNodeActiveEvent === 'function') {
+        mindMap.renderer.emitNodeActiveEvent(targetNode)
+      }
+      // 确保节点在视口中可见
+      if (typeof mindMap.renderer.moveNodeToCenter === 'function') {
+        mindMap.renderer.moveNodeToCenter(targetNode)
+      }
+      emit('node-active', targetNode, [targetNode])
+    } catch (e) {
+      console.error('方向键导航失败:', e)
+    }
+  }
+}
+
+/**
+ * 全局键盘监听（思维导图模式）：
+ * - ESC: 退出编辑状态 / 取消关联线绘制
+ * - 方向键（非编辑态）: 移动选中节点
+ * 使用全局监听确保无论焦点在哪里都能响应
+ */
+const onGlobalMindMapKeydown = (event) => {
+  if (!mindMap || !mindMap.renderer) return
+  // 确保事件目标在当前思维导图容器内
+  if (containerRef.value && !containerRef.value.contains(event.target)) return
+  // 如果目标是输入框等表单元素，不处理方向键（让用户正常输入）
+  const tag = event.target.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+
+  const isEditing = event.target.isContentEditable
+
+  // Esc: 退出编辑状态 / 取消关联线绘制
+  if (event.key === 'Escape') {
+    // 优先取消关联线绘制
+    if (mindMap?.associativeLine?.creatingStartNode) {
+      try {
+        mindMap.associativeLine.cancelCreateLine()
+        try { ElMessage.info('已取消关联线绘制') } catch (e) {}
+      } catch (err) {}
+      event.preventDefault()
+      return
+    }
+    // 退出编辑状态
+    if (isEditing) {
+      event.preventDefault()
+      exitEditMode(() => {})
+      return
+    }
+    return
+  }
+
+  // 方向键导航（非编辑态下移动选中节点）
+  if (!isEditing && (
+    event.key === 'ArrowUp' || event.key === 'ArrowDown' ||
+    event.key === 'ArrowLeft' || event.key === 'ArrowRight'
+  )) {
+    const hasActiveNode = mindMap.renderer.activeNodeList && mindMap.renderer.activeNodeList.length > 0
+    if (!hasActiveNode) return
+
+    event.preventDefault()
+    navigateActiveNode(event.key)
   }
 }
 
@@ -2480,8 +3149,8 @@ const onRichImgResizeMove = (e) => {
   const s = richImgResizeState
   if (!s) return
   e.preventDefault()
-  const w = Math.max(20, s.startW + (e.clientX - s.startX))
-  const h = Math.max(20, s.startH + (e.clientY - s.startY))
+  const w = Math.max(20, s.startW + (e.clientX - s.startX) * 1.2)
+  const h = Math.max(20, s.startH + (e.clientY - s.startY) * 1.2)
   const dw = w - s.startW
   const dh = h - s.startH
   // 内联样式覆盖 CSS 的 max-width/max-height（180/120px），允许放大
@@ -2733,10 +3402,6 @@ const onAiClozeFullMap = () => {
   emit('ai-cloze-full-map')
 }
 
-const onAiRewriteFullMap = () => {
-  emit('ai-rewrite-full-map')
-}
-
 const onReorganizeMindmap = () => {
   emit('reorganize-mindmap')
 }
@@ -2940,6 +3605,24 @@ watch(
       // 否则 applyClozeStyles 会作用到旧实例，点击挖空文字切换显隐失效）
       syncMindMapRef(mindMap)
       nextTick(() => {
+        // 离屏容器迁移：mindMap 曾在大纲/关联图模式用离屏容器初始化，切回思维导图视图时
+        // 把离屏容器的全部子节点迁回真实容器（SVG + 富文本测量元素等）并更新 mindMap.el，
+        // 否则富文本测量元素残留离屏容器被移除后，概要等富文本节点测量尺寸为 0 导致丢失
+        if (mindMap && offscreenContainer) {
+          try {
+            if (containerRef.value) {
+              while (offscreenContainer.firstChild) {
+                containerRef.value.appendChild(offscreenContainer.firstChild)
+              }
+            }
+            mindMap.el = containerRef.value
+            if (offscreenContainer.parentNode) offscreenContainer.parentNode.removeChild(offscreenContainer)
+            offscreenContainer = null
+            try { mindMap.resize() } catch (e) { /* 容器尺寸异常时忽略 */ }
+          } catch (e) {
+            console.warn('[MindMapEditor] 离屏容器迁回失败:', e)
+          }
+        }
         if (mindMap) {
           if (renderedWhileHidden) {
             // 隐藏期间发生过渲染：foreignObject 内文本可能丢失（只剩骨架），需一次完整重渲染恢复
@@ -2977,6 +3660,9 @@ watch(
           // 思维导图尚未初始化（可能之前容器尺寸为 0），重新尝试
           waitForContainerAndInit()
         }
+        setTimeout(() => {
+          if (mindMap) updateMiniMap()
+        }, 320)
       })
     }
   }
@@ -3039,6 +3725,7 @@ const waitForContainerAndInit = () => {
 
 onMounted(() => {
   document.addEventListener('keydown', onQuillKeydownCapture, true)
+  document.addEventListener('keydown', onGlobalMindMapKeydown, true)
   window.addEventListener('mousemove', onPreviewMouseMove)
   nextTick(() => {
     waitForContainerAndInit()
@@ -3049,7 +3736,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   // 清理画布平移相关的 window 级监听器（防止组件卸载后残留）
   if (canvasPanCleanup) { canvasPanCleanup(); canvasPanCleanup = null }
+  window.removeEventListener('mousemove', onMiniMapViewBoxMousemove)
+  window.removeEventListener('mouseup', onMiniMapViewBoxDragEnd)
   if (imgResizeRenderTimer) { clearTimeout(imgResizeRenderTimer); imgResizeRenderTimer = null }
+  if (mindMapViewSaveTimer) { clearTimeout(mindMapViewSaveTimer); mindMapViewSaveTimer = null }
+  if (miniMapUpdateTimer) { clearTimeout(miniMapUpdateTimer); miniMapUpdateTimer = null }
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null
@@ -3061,14 +3752,27 @@ onBeforeUnmount(() => {
   // 销毁挖空观察器
   destroyCloze()
   if (mindMap) {
+    try {
+      if (mindMap.view && typeof mindMap.view.getTransformData === 'function') {
+        writeMindMapViewState(mindMap.view.getTransformData())
+      }
+    } catch (e) { /* 忽略 */ }
     mindMap.destroy()
     mindMap = null
     mindMapStore.setMindMap(null)
     // [多实例] 从多实例表注销本实例
     if (props.fileId) mindMapStore.unregisterInstance(props.fileId)
   }
+  // 清理离屏容器（若存在）
+  if (offscreenContainer) {
+    try {
+      if (offscreenContainer.parentNode) offscreenContainer.parentNode.removeChild(offscreenContainer)
+    } catch (e) { /* 忽略 */ }
+    offscreenContainer = null
+  }
   // 清理引用功能的 document 级事件监听
   document.removeEventListener('keydown', onQuillKeydownCapture, true)
+  document.removeEventListener('keydown', onGlobalMindMapKeydown, true)
   window.removeEventListener('mousemove', onPreviewMouseMove)
   document.removeEventListener('click', onLinkClick, true)
   document.removeEventListener('mouseover', onLinkHover, true)
@@ -3121,7 +3825,7 @@ defineExpose({
           mindMap.renderer.textEdit.hideEditTextBox()
         }
       } catch (e) { /* 忽略 */ }
-      const normalized = normalizeNodeData(JSON.parse(JSON.stringify(data)))
+      const normalized = normalizeNodeData(clonePlainTree(data))
       isSettingData = true
       // setData 内部已走 reRender（clearDraw+clearCache+render），无需再 render，避免产生重影
       mindMap.setData(normalized)
@@ -3151,14 +3855,35 @@ defineExpose({
       } catch (e) {
         // 隐藏容器（0 尺寸）下构造可能失败：装回 ResizeObserver，容器恢复可见时自愈重建，
         // 否则观察器已被拆除、实例又为 null，导图将永久无法初始化
-        console.error('[MindMapEditor] ensureInit 初始化失败，等待容器可见后重试:', e)
+        console.warn('[MindMapEditor] 容器当前不可见（0 尺寸），已挂起等待容器可见后自动初始化，无需处理。', e)
         waitForContainerAndInit()
       }
     }
   },
   getData: () => {
     if (mindMap) {
-      return mindMap.getData()
+      const data = mindMap.getData()
+      // 数据可能被概要节点渲染污染（含函数/DOM 引用等不能结构化克隆的对象），
+      // 统一做一次 JSON 序列化清理，避免 IPC 保存时报 "An object could not be cloned"。
+      if (data) {
+        try {
+          return JSON.parse(JSON.stringify(data))
+        } catch (e) {
+          return sanitizeTreeData(data)
+        }
+      }
+      // mindMap.getData() 返回 null：simple-mind-map 内部 simpleDeepClone 遇循环引用
+      // （概要节点污染）返回 null。绕过它，直接从 renderTree 递归转换并清理。
+      const rt = mindMap.renderer && mindMap.renderer.renderTree
+      if (rt) {
+        const cleaned = renderTreeToData(rt)
+        try {
+          return cleaned ? JSON.parse(JSON.stringify(cleaned)) : null
+        } catch (e) {
+          return cleaned
+        }
+      }
+      return null
     }
     return null
   },
@@ -3295,6 +4020,80 @@ defineExpose({
   touch-action: none;
   /* 阻止浏览器中键自动滚动（autoscroll 圆圈图标）和 overscroll 行为 */
   overscroll-behavior: none;
+}
+
+/* ============ 小地图导航窗 ============ */
+.mind-map-mini-map {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 20;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+  cursor: crosshair;
+}
+
+.mini-map-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+}
+
+.mini-map-view-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px solid rgba(0, 122, 255, 0.9);
+  background: rgba(0, 122, 255, 0.1);
+  cursor: move;
+}
+
+.mini-map-close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.25);
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.mini-map-close:hover {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.mini-map-open {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 20;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #555;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.mini-map-open:hover {
+  background: #ffffff;
+  color: var(--apple-blue, #007aff);
 }
 
 /* 确保 SVG 占满容器 */

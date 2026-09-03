@@ -149,7 +149,6 @@ const svgMenuItems = computed(() => [
   { sep: true },
   { key: 'REORGANIZE_MINDMAP', label: '一键整理导图（为新文件）', badge: '整理', ai: true },
   { key: 'AI_CLOZE_FULL_MAP', label: 'AI 全文挖空', badge: '挖空', ai: true },
-  { key: 'AI_REWRITE_FULL_MAP', label: '全局背诵改写', badge: '改写', ai: true },
   { key: 'TOGGLE_CLOZE_ALL', label: '显示/隐藏全部挖空' },
   { key: 'CLEAR_ALL_CLOZE', label: '清除全文挖空', danger: true }
 ])
@@ -346,10 +345,6 @@ const onSelect = (item) => {
       return
     case 'AI_CLOZE_FULL_MAP':
       emit('ai-cloze-full-map')
-      close()
-      return
-    case 'AI_REWRITE_FULL_MAP':
-      emit('ai-rewrite-full-map')
       close()
       return
     case 'AI_ADD_TO_CHAT':

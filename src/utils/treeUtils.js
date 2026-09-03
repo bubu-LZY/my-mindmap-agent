@@ -3,6 +3,62 @@
  */
 
 /**
+ * 克隆 simple-mind-map 树数据为纯 JSON 可序列化对象。
+ * 兼容从 data_change 事件拿到的渲染树（可能带 _node/parent/opt 等循环引用），
+ * 避免 JSON.parse(JSON.stringify()) 抛“Converting circular structure to JSON”，
+ * 导致分屏/打开文件时画布空白。
+ */
+// 渲染树里挂的实例引用字段，克隆时必须跳过（含循环引用，会导致 JSON 序列化失败）
+const SKIP_KEYS = ['_node', 'parent', 'opt', 'children', 'renderTree', 'nodeData']
+
+/**
+ * 深拷贝「纯数据值」：保留数组与普通对象的原始结构。
+ * 节点 data 里的字段（generalization / icon / tag / associativeLineTargets 等）都是纯数据，
+ * 绝不能再按 { data, children } 的树节点结构去解析，否则：
+ *   - 数组（如 generalization）会被克隆成 { data: {} }，概要文本丢失 → 画布上显示 undefined
+ *   - 数组元素（概要项 { text, range }）会被克隆成 { data: {} }
+ */
+function clonePlainValue(value, seen) {
+  if (!value || typeof value !== 'object') return value
+  if (seen.has(value)) return seen.get(value)
+  if (Array.isArray(value)) {
+    const arr = []
+    seen.set(value, arr)
+    value.forEach(item => arr.push(clonePlainValue(item, seen)))
+    return arr
+  }
+  const out = {}
+  seen.set(value, out)
+  for (const key of Object.keys(value)) {
+    if (SKIP_KEYS.includes(key)) continue
+    out[key] = clonePlainValue(value[key], seen)
+  }
+  return out
+}
+
+export function clonePlainTree(node, seen = new WeakMap()) {
+  if (!node || typeof node !== 'object') return node
+  if (seen.has(node)) return seen.get(node)
+  const out = {}
+  seen.set(node, out)
+
+  const data = node.data && typeof node.data === 'object' ? node.data : {}
+  out.data = {}
+  for (const key of Object.keys(data)) {
+    if (SKIP_KEYS.includes(key)) continue
+    // data 的字段一律按纯数据深拷贝，不能再走 clonePlainTree（会把数组毁成 { data: {} }）
+    out.data[key] = clonePlainValue(data[key], seen)
+  }
+
+  if (Array.isArray(node.children)) {
+    out.children = node.children
+      .filter(child => child && child.data)
+      .map(child => clonePlainTree(child, seen))
+  }
+  return out
+}
+
+/**
  * 将树形数据转为缩进文本（用于 AI 上下文）
  * @param {object} node 树节点
  * @param {number} depth 当前深度

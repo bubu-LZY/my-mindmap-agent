@@ -87,10 +87,8 @@ export const DEFAULT_WINDOW = 32000
 // 触发压缩的阈值比例（估算 token 超过 窗口 × 该比例 时压缩）
 export const COMPRESS_THRESHOLD_RATIO = 0.5
 
-// review B2：从 8 提到 12，保留更多对话轮原文，避免结构化表格/代码块/列表被压成 1~2 行摘要后失真。
-// 估算阈值 COMPRESS_THRESHOLD_RATIO=0.5（32K 模型窗口 × 0.5 = 16K 触发压缩），保留 12 轮约 6K tokens，
-// 留出余量给 system prompt + 工具定义 + 当前问题。
-export const KEEP_RECENT_ROUNDS = 12
+// 压缩时保留的最近对话轮数（一轮 = 一次用户消息 + 一次 AI 回复）
+export const KEEP_RECENT_ROUNDS = 8
 
 const STORAGE_KEY = 'mindmap_context_window_overrides'
 

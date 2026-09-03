@@ -25,6 +25,7 @@ const { app, BrowserWindow, shell, ipcMain, Tray, Menu, nativeImage } = require(
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
+const store = require('./utils/store')
 
 // === IPC 发送方校验（防御渲染层被注入后滥用特权 IPC）===
 // 仅放行业务主窗口：生产为 file:// 打包产物，开发为本地 dev server。
@@ -79,10 +80,8 @@ const httpServerModule = require('./ipc/httpServer')
 require('./ipc/mcpManager')
 require('./ipc/skillsManager')
 require('./ipc/customTools')
-require('./ipc/shellExec')
 require('./ipc/vectorStore')
 require('./ipc/passwordGate')
-const networkMonitor = require('./ipc/networkMonitor')
 
 // 在默认浏览器中打开 URL
 ipcMain.handle('open-external', async (event, url) => {
@@ -93,6 +92,32 @@ ipcMain.handle('open-external', async (event, url) => {
     return true
   } catch (error) {
     console.error('打开外部链接失败:', error)
+    return false
+  }
+})
+
+// 临时打开/切换 Electron 开发者工具（快捷键 Ctrl+Shift+I 调用）
+ipcMain.handle('devtools:open', () => {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return false
+    if (mainWindow.webContents.isDevToolsOpened()) {
+      mainWindow.webContents.closeDevTools()
+    } else {
+      mainWindow.webContents.openDevTools({ mode: 'detach' })
+    }
+    return true
+  } catch (error) {
+    return false
+  }
+})
+
+// 一键重启：保存完成后由渲染进程调用，真正退出并重新拉起应用（比 location.reload 更彻底）
+ipcMain.handle('app:restart', () => {
+  try {
+    app.relaunch()
+    app.exit(0)
+    return true
+  } catch (error) {
     return false
   }
 })
@@ -601,19 +626,20 @@ ipcMain.handle('auto-launch:set', (event, enable) => {
   }
 })
 
-// 默认保存目录（桌面）
+// 默认保存目录：固定到 C:\我的mindmap，不再提供修改入口。
+const DEFAULT_SAVE_DIR = 'C:\\我的mindmap'
 let defaultSaveDir = ''
 
 function getDefaultSaveDir() {
   if (!defaultSaveDir) {
-    defaultSaveDir = app.getPath('desktop')
+    defaultSaveDir = DEFAULT_SAVE_DIR
+    try { fs.mkdirSync(defaultSaveDir, { recursive: true }) } catch {}
   }
   return defaultSaveDir
 }
 
 // 将默认保存目录挂载到 app 上，供 IPC 模块使用
 app.whenReady().then(() => {
-  try { networkMonitor.start() } catch (e) { console.error('[networkMonitor] start failed:', e) }
   app.defaultSaveDir = getDefaultSaveDir()
 })
 
@@ -699,6 +725,7 @@ function createWindow() {
     show: !startHidden,
     webPreferences: {
       contextIsolation: true,
+      webviewTag: true,
       preload: path.join(__dirname, 'preload.js')
     }
   })
@@ -706,9 +733,24 @@ function createWindow() {
   // 隐藏顶部 File/Edit/View/Window/Help 菜单栏
   mainWindow.setMenu(null)
 
+  // 开发模式：NODE_ENV=development、MINDMAP_DEVTOOLS=1，或启动参数 --devtools 时自动打开 DevTools。
+  // 用于临时查看页面元素与渲染层报错。
+  if (process.env.NODE_ENV === 'development' || process.env.MINDMAP_DEVTOOLS === '1' || process.argv.includes('--devtools')) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' })
+  }
+
   // 兜底拦截窗口导航（如拖入文件时 Chromium 默认打开 file:// 导致应用被替换；正常业务不使用页面跳转）
   mainWindow.webContents.on('will-navigate', (e) => e.preventDefault())
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+
+  // 内置浏览器使用 <webview> 加载外部网页：强制关闭 preload / node 集成，只保留隔离的渲染环境，
+  // 避免外部页面获得主进程能力。登录状态由 persist:ai-web-browser 分区单独保存。
+  mainWindow.webContents.on('will-attach-webview', (event, webPreferences) => {
+    delete webPreferences.preload
+    webPreferences.nodeIntegration = false
+    webPreferences.nodeIntegrationInSubFrames = false
+    webPreferences.contextIsolation = true
+  })
 
   // 开发环境加载本地服务器，生产环境加载打包后的文件
   if (process.env.NODE_ENV === 'development') {
@@ -769,20 +811,6 @@ function createWindow() {
     mainWindow = null
   })
 }
-
-// 软重启：渲染层点击「保存并刷新界面」后调用。用主进程 webContents.reload 更可靠，
-// 避免 location.reload 在 beforeunload 被静默取消后表现为「点了没反应」。
-ipcMain.handle('app:reload-ui', () => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.webContents.reload()
-      return true
-    } catch (e) {
-      return false
-    }
-  }
-  return false
-})
 
 // ============ 单实例锁 ============
 // 防止定时任务（schtasks）触发时开出第二个窗口：

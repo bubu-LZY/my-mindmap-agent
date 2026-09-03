@@ -57,18 +57,10 @@ const loginFailures = new Map() // 主服务限流：ip -> { count, firstFail, l
 const viewOnlyLoginFailures = new Map() // 仅查看服务独立限流（与主服务隔离，避免互相累计）
 
 // 获取客户端 IP
-// 安全加固：X-Forwarded-For 头可被客户端伪造。仅在用户明确开启 trustProxy 后才信任，
-// 避免公网暴露时被攻击者通过 XFF 头绕过登录限流（5 次锁定）
-const trustHttpProxy = () => {
-  try { return !!store.get('httpServerTrustProxy', false) } catch (e) { return false }
-}
 const getClientIp = (req) => {
-  if (trustHttpProxy()) {
-    const forwarded = req.headers['x-forwarded-for']
-    if (forwarded) {
-      const first = String(forwarded).split(',')[0].trim()
-      if (first) return first
-    }
+  const forwarded = req.headers['x-forwarded-for']
+  if (forwarded) {
+    return String(forwarded).split(',')[0].trim()
   }
   return req.socket?.remoteAddress || 'unknown'
 }
@@ -632,6 +624,34 @@ const handleRequest = async (req, res) => {
     return
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/desk-calendar/status') {
+    try {
+      const body = await readBody(req)
+      const config = readConfig()
+      const authToken = String(body.token || req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim()
+      if (!config.enabled || Date.now() >= config.tokenExpiresAt || !tokenMatches(authToken)) {
+        sendJson(res, 401, { ok: false, error: 'Token 无效或已过期' })
+        return
+      }
+      const title = String(body.title || '').trim()
+      const date = String(body.date || '').trim()
+      if (!title || !date || typeof body.isCompleted !== 'boolean') {
+        sendJson(res, 400, { ok: false, error: '缺少 title/date/isCompleted' })
+        return
+      }
+      const win = getMainWindow()
+      if (!isRendererAvailable(win)) {
+        sendJson(res, 503, { ok: false, error: '主页面已关闭' })
+        return
+      }
+      win.webContents.send('desk-calendar:status', { title, date, isCompleted: !!body.isCompleted })
+      sendJson(res, 200, { ok: true })
+    } catch (e) {
+      sendJson(res, 400, { ok: false, error: e.message })
+    }
+    return
+  }
+
   sendJson(res, 404, { ok: false, error: 'Not Found' })
 }
 
@@ -1007,24 +1027,7 @@ const init = (getWindow) => {
     writeConfig,
     tokenMatches,
     getPort: () => port,
-    isRunning: () => !!(server && server.listening),
-    // 把用户配置的 MCP 服务也桥接给外部 Agent：tools/list 时把它们的工具以 mcp__<id>__<name> 暴露，
-    // tools/call 时由 mcpManager 实际转发到对应的 stdio / http MCP server。
-    getUserMcpServers: () => {
-      try {
-        const cfg = store.get('mcpServers', [])
-        return Array.isArray(cfg) ? cfg.filter(s => s && s.enabled !== false) : []
-      } catch (_) { return [] }
-    },
-    callUserMcpTool: async (serverId, toolName, args) => {
-      const mcpManager = require('./mcpManager')
-      try {
-        const result = await mcpManager.callTool(serverId, toolName, args || {})
-        return { success: true, message: typeof result === 'string' ? result : JSON.stringify(result), data: result }
-      } catch (e) {
-        return { success: false, message: e.message || String(e) }
-      }
-    }
+    isRunning: () => !!(server && server.listening)
   })
   ipcMain.handle('http-server:getStatus', () => getStatus())
   // MCP 安装配置 JSON：外部 AI 客户端（Trae / Claude Desktop / Cursor 等）可直接粘贴安装
@@ -1091,14 +1094,6 @@ const init = (getWindow) => {
     writeViewOnlyConfig(cfg)
     return getViewOnlyStatus()
   })
-ipcMain.handle('httpServer:getConfig', () => {
-  try { return { trustProxy: !!store.get('httpServerTrustProxy', false) } } catch (e) { return { trustProxy: false } }
-})
-ipcMain.handle('httpServer:setTrustProxy', (_event, enabled) => {
-  try { store.set('httpServerTrustProxy', !!enabled) } catch (e) {}
-  return { trustProxy: !!enabled }
-})
-
   ipcMain.on('agent-api:response', (event, payload) => {
     const item = payload && payload.id ? pendingAgentRequests.get(payload.id) : null
     if (!item) return

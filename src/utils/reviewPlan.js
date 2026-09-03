@@ -6,6 +6,15 @@
 const REVIEW_KEY = 'MINDMAP_REVIEW_PLAN'
 const REMINDER_KEY = 'MINDMAP_REVIEW_REMINDER'
 
+// 通知同步服务：复习计划发生变化（添加/删除/勾选/取消勾选）
+const notifyReviewPlanChanged = () => {
+  try {
+    if (typeof window !== 'undefined' && window.dispatchEvent) {
+      window.dispatchEvent(new CustomEvent('review-plan-changed'))
+    }
+  } catch { /* 忽略 */ }
+}
+
 // 每日复习提醒配置：{ enabled, time: 'HH:mm', feishu: bool, wechat: bool }
 export function getReminderConfig() {
   try {
@@ -167,6 +176,7 @@ export function addToReviewPlan(nodeData) {
 
   list.push(item)
   saveReviewPlan(list)
+  notifyReviewPlanChanged()
   return item
 }
 
@@ -174,6 +184,7 @@ export function addToReviewPlan(nodeData) {
 export function removeById(id) {
   const list = getReviewPlan().filter(item => item.id !== id)
   saveReviewPlan(list)
+  notifyReviewPlanChanged()
 }
 
 // 统一路径分隔符为 /，便于跨平台比较
@@ -230,7 +241,7 @@ export function removeByFilePath(filePath) {
   const list = getReviewPlan()
   const remaining = list.filter(item => normalizePath(item.filePath) !== target)
   const removed = list.length - remaining.length
-  if (removed > 0) saveReviewPlan(remaining)
+  if (removed > 0) { saveReviewPlan(remaining); notifyReviewPlanChanged() }
   return removed
 }
 
@@ -240,14 +251,14 @@ export function removeByNodeUid(nodeUid) {
   const list = getReviewPlan()
   const remaining = list.filter(item => item.nodeUid !== nodeUid)
   const removed = list.length - remaining.length
-  if (removed > 0) saveReviewPlan(remaining)
+  if (removed > 0) { saveReviewPlan(remaining); notifyReviewPlanChanged() }
   return removed
 }
 
 // 清空全部复习计划，返回删除数量
 export function clearReviewPlan() {
   const list = getReviewPlan()
-  if (list.length > 0) saveReviewPlan([])
+  if (list.length > 0) { saveReviewPlan([]); notifyReviewPlanChanged() }
   return list.length
 }
 
@@ -357,6 +368,7 @@ export function markCycleCompleted(id, cycleNum) {
     }
   }
   saveReviewPlan(list)
+  notifyReviewPlanChanged()
 }
 
 // 标记某个复习周期为未完成
@@ -371,6 +383,7 @@ export function markCycleUncompleted(id, cycleNum) {
     }
   }
   saveReviewPlan(list)
+  notifyReviewPlanChanged()
 }
 
 // 获取复习计划统计

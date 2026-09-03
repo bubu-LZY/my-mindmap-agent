@@ -11,4 +11,7 @@ custom-tools/
     tool.js
 ```
 
-规范见 `docs/custom-tools-spec.md`。
+详细规范：
+
+- 自定义工具：`docs/custom-tools-spec.md`
+- Skills / MCP / Custom Tools 总览：`docs/skills-mcp-tools.md`

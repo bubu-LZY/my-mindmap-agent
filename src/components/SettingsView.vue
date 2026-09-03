@@ -1,5 +1,5 @@
 <template>
-  <div class="settings-view">
+  <div ref="settingsViewRef" class="settings-view" @scroll="onSettingsScroll">
     <div class="settings-layout">
       <nav class="settings-toc">
         <ul>
@@ -114,7 +114,6 @@
           </div>
         </el-form-item>
       </el-form>
-      <div v-else-if="configLoading" class="profile-empty">配置加载中...</div>
       <div v-else class="profile-empty">请先新增一个配置档</div>
 
       <div class="settings-actions">
@@ -150,6 +149,29 @@
       </div>
       <div class="settings-actions" style="margin-top: 8px;">
         <el-button type="primary" @click="saveTemperature">保存 temperature</el-button>
+      </div>
+    </div>
+
+    <!-- 深度思考模式 -->
+    <div id="sec-thinking" class="settings-section">
+      <h3>深度思考模式</h3>
+      <p class="vision-desc">
+        开启后请求会携带 OpenAI 兼容的 reasoning_effort 参数，级别分为 low（快速）、medium（均衡）、high（深度）。
+      </p>
+      <div class="vision-row">
+        <span class="vision-row-label">启用深度思考模式</span>
+        <el-switch v-model="thinking.enabled" />
+      </div>
+      <div v-if="thinking.enabled" class="temperature-row">
+        <span class="vision-row-label">思考级别</span>
+        <el-radio-group v-model="thinking.level">
+          <el-radio-button value="low">low</el-radio-button>
+          <el-radio-button value="medium">medium</el-radio-button>
+          <el-radio-button value="high">high</el-radio-button>
+        </el-radio-group>
+      </div>
+      <div class="settings-actions" style="margin-top: 8px;">
+        <el-button type="primary" @click="saveThinking">保存深度思考设置</el-button>
       </div>
     </div>
 
@@ -194,6 +216,7 @@
             v-model="visionConfig.activeProfileId"
             placeholder="选择多模态配置档"
             class="profile-select"
+            @change="onVisionProfileSwitch"
           >
             <el-option
               v-for="p in visionProfiles"
@@ -300,139 +323,86 @@
       </p>
     </div>
 
-    <!-- Embedding 向量化配置 -->
+    <!-- Embedding 大模型配置 -->
     <div id="sec-embedding" class="settings-section">
-      <h3>Embedding 向量化（语义检索）</h3>
+      <h3>Embedding 大模型配置</h3>
       <p class="vision-desc">
-        用于语义搜索和知识库检索。优先使用你配置的 Embedding API（效果更好），不可用时自动降级到本地小模型（离线可用，速度稍慢）。
+        配置后语义检索优先调用 Embedding API；未配置或调用失败时自动降级为本地向量模型。
       </p>
 
-      <div class="vision-row">
-        <span class="vision-row-label">启用 Embedding API</span>
-        <el-switch v-model="embeddingConfig.enabled" />
+      <div class="profile-bar">
+        <el-select
+          v-model="embeddingConfig.activeProfileId"
+          placeholder="选择 Embedding 配置档"
+          class="profile-select"
+          @change="onEmbeddingProfileSwitch"
+        >
+          <el-option
+            v-for="p in embeddingProfiles"
+            :key="p.id"
+            :label="(p.name || '未命名') + '（Embedding）'"
+            :value="p.id"
+          />
+        </el-select>
+        <el-button size="small" @click="addEmbeddingProfile">新增</el-button>
+        <el-button
+          size="small"
+          :disabled="embeddingProfiles.length <= 1"
+          @click="deleteActiveEmbeddingProfile"
+        >删除</el-button>
       </div>
 
-      <template v-if="embeddingConfig.enabled">
-        <el-form label-position="top" class="settings-form">
-          <el-form-item label="复用基础大模型配置">
-            <div class="vision-row" style="margin: 0;">
-              <el-switch v-model="embeddingConfig.useBaseConfig" />
-              <span class="form-inline-hint">
-                开启后，API 地址和 API Key 直接使用上方「基础模型配置」的设置，只需填写模型名称
-              </span>
-            </div>
-          </el-form-item>
-
-          <template v-if="!embeddingConfig.useBaseConfig">
-            <el-form-item label="API 地址 (Base URL)">
-              <el-input
-                v-model="embeddingConfig.baseURL"
-                placeholder="如 https://api.openai.com/v1 或 https://your-proxy.com"
-              />
-              <div class="url-switch-row">
-                <span class="url-switch-label">自动补全路径（/v1/embeddings）</span>
-                <el-switch v-model="embeddingConfig.autoComplete" size="small" />
+      <el-form v-if="activeEmbeddingProfile" label-position="top" class="settings-form vision-form">
+        <el-form-item label="配置档名称">
+          <el-input v-model="activeEmbeddingProfile.name" placeholder="如：OpenAI Embedding、本地中转 Embedding" />
+        </el-form-item>
+        <el-form-item label="API 地址 (Base URL)">
+          <div class="url-input-row">
+            <el-input
+              v-model="activeEmbeddingProfile.baseURL"
+              placeholder="留空则沿用基础模型的 API 地址"
+              @blur="onEmbeddingBaseURLBlur"
+            />
+            <el-tooltip content="开启：自动补全 /v1/embeddings；关闭：按填写地址原样请求" placement="top">
+              <div class="url-switch">
+                <span class="url-switch-label">补全</span>
+                <el-switch v-model="activeEmbeddingProfile.autoComplete" size="small" />
               </div>
-            </el-form-item>
-
-            <el-form-item label="API Key">
-              <el-input
-                v-model="embeddingConfig.apiKey"
-                type="password"
-                show-password
-                placeholder="sk-..."
-              />
-            </el-form-item>
-          </template>
-
-          <el-form-item label="Embedding 模型名称">
-            <el-select
-              v-model="embeddingConfig.model"
-              filterable
-              allow-create
-              placeholder="选择或输入模型名称"
-              :loading="detectingEmbedding"
-              @visible-change="onEmbeddingDropdownOpen"
-            >
-              <el-option
-                v-for="m in embeddingFetchedModels"
-                :key="m"
-                :label="m"
-                :value="m"
-              />
-            </el-select>
-            <div v-if="embeddingFetchedModels.length > 0" class="model-hint">
-              已检测到 {{ embeddingFetchedModels.length }} 个 Embedding 模型
-            </div>
-            <div v-else-if="!detectingEmbedding && embeddingConfig.model" class="model-hint manual-hint">
-              未自动检测到模型，可手动输入（如 text-embedding-3-small、text-embedding-v3、bge-large-zh-v1.5 等）
-            </div>
-          </el-form-item>
-        </el-form>
-
-        <div class="settings-actions">
-          <el-button @click="testEmbeddingConfig" :loading="testingEmbedding">测试配置</el-button>
-          <el-button type="primary" @click="saveConfig('embedding')">保存配置</el-button>
-        </div>
-
-        <!-- 测试结果 -->
-        <div
-          v-if="embeddingTestResult"
-          :class="['test-result', embeddingTestResult.success ? 'success' : 'error']"
-        >
-          {{ embeddingTestResult.message }}
-        </div>
-
-        <!-- 向量索引管理 -->
-        <div class="vector-manage-block">
-          <div class="vector-manage-title">向量索引管理</div>
-          <div class="vector-manage-desc">
-            为所有已索引的文件（思维导图节点 + 文档分块）重建向量索引。
-            切换 Embedding 模型后需要重建，否则维度不匹配会导致语义搜索退化为关键词搜索。
+            </el-tooltip>
           </div>
-          <div class="vector-stats-row">
-            <span v-if="vectorStats.files > 0">
-              当前向量库：{{ vectorStats.files }} 个文件 / {{ vectorStats.vectors }} 条向量
-              <template v-if="vectorStats.smmFiles">（{{ vectorStats.smmFiles }} 个思维导图）</template>
-            </span>
-            <span v-else>当前向量库为空</span>
+          <div v-if="!activeEmbeddingProfile.baseURL && activeProfile && activeProfile.baseURL" class="inherit-hint">
+            将沿用基础模型的地址：{{ activeProfile.baseURL }}
           </div>
-          <div v-if="vectorStats.unindexed > 0" class="vector-stats-row vector-stats-warning">
-            ⚠ {{ vectorStats.unindexed }} 个文件未向量化（语义搜索效果会受影响），可点击「重建向量索引」补全
-          </div>
-          <div class="settings-actions">
-            <el-button @click="refreshVectorStats" :disabled="rebuildingVectors">刷新统计</el-button>
-            <el-button type="warning" @click="onRebuildVectors" :loading="rebuildingVectors">
-              {{ rebuildingVectors ? '重建中...' : '重建向量索引' }}
-            </el-button>
-          </div>
-          <div v-if="rebuildingVectors" class="rebuild-progress">
-            <el-progress :percentage="rebuildPercent" :status="rebuildFinished ? 'success' : ''" />
-            <div class="rebuild-progress-text">
-              {{ rebuildCurrentFile || '准备中...' }}（{{ rebuildDoneCount }}/{{ rebuildTotalCount }}）
-            </div>
-            <div class="rebuild-actions">
-              <el-button size="small" @click="onCancelRebuild">取消重建</el-button>
-            </div>
-          </div>
-          <div v-if="rebuildFinished && rebuildResult" :class="['test-result', rebuildResult.cancelled ? 'error' : 'success']">
-            <template v-if="rebuildResult.cancelled">
-              已取消重建：成功 {{ rebuildResult.successCount }} / {{ rebuildResult.total }} 个文件（失败 {{ rebuildResult.failedCount }} 个）
-            </template>
-            <template v-else-if="rebuildResult.failedCount > 0">
-              重建完成：成功 {{ rebuildResult.successCount }} / {{ rebuildResult.total }} 个文件（失败 {{ rebuildResult.failedCount }} 个，可点击「重建向量索引」重试失败项）
-            </template>
-            <template v-else>
-              重建完成：成功 {{ rebuildResult.successCount }} / {{ rebuildResult.total }} 个文件
-            </template>
-          </div>
-        </div>
+        </el-form-item>
+        <el-form-item label="API Key">
+          <el-input
+            v-model="activeEmbeddingProfile.apiKey"
+            type="password"
+            show-password
+            placeholder="留空则沿用基础模型的 API Key"
+          />
+        </el-form-item>
+        <el-form-item label="Embedding 模型名称">
+          <el-select
+            v-model="activeEmbeddingProfile.model"
+            filterable
+            allow-create
+            placeholder="输入 embedding 模型名称，如 text-embedding-3-small"
+          >
+            <el-option
+              v-for="m in ['text-embedding-3-small', 'text-embedding-3-large', 'bge-m3', 'bge-large-zh-v1.5']"
+              :key="m"
+              :label="m"
+              :value="m"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <div v-else class="profile-empty">请先新增一个 Embedding 配置档</div>
 
-        <p class="vision-tip">
-          提示：未启用或 API 不可用时，语义搜索将自动使用本地小模型（Xenova/multilingual-e5-small），
-          首次使用会自动下载模型（约 100MB），离线也能用。
-        </p>
-      </template>
+      <div class="settings-actions">
+        <el-button type="primary" @click="saveEmbeddingConfig">保存 Embedding 配置</el-button>
+      </div>
     </div>
 
     <!-- AI 安全与记忆 -->
@@ -516,12 +486,10 @@
         <div class="auto-launch-row">
           <div class="auto-launch-info">
             <div class="safety-block-title">默认保存目录</div>
-            <p class="safety-block-desc">AI 创建导图、导出文件等操作默认保存到此目录。与左侧目录树的「设置保存位置」是同一个设置，数据互通。</p>
+            <p class="safety-block-desc">AI 创建导图、导出文件等操作固定保存到 C:\我的mindmap，不再提供修改入口。</p>
           </div>
           <div class="save-dir-controls">
             <el-input v-model="saveDir" class="save-dir-input" placeholder="默认保存目录" readonly />
-            <el-button size="small" @click="selectSaveDir">选择目录</el-button>
-            <el-button size="small" type="primary" :disabled="!saveDir" @click="applySaveDir">保存</el-button>
           </div>
         </div>
       </div>
@@ -668,6 +636,18 @@
       </div>
     </div>
 
+    <!-- 官方扩展文档：MCP / Skills / Custom Tools 统一从这里复制或下载 -->
+    <div id="sec-extension-doc" class="settings-section">
+      <h3>官方扩展文档</h3>
+      <p class="vision-desc">
+        MCP、Skills、工具目录统一使用这份官方编写文档，包含能力清单、参数约定、编写步骤、Claude MCP JSON 兼容格式与安全规范。
+      </p>
+      <div class="profile-bar">
+        <el-button size="small" type="primary" @click="copyExtensionDoc">复制文档</el-button>
+        <el-button size="small" @click="downloadExtensionDoc">下载到工具目录</el-button>
+      </div>
+    </div>
+
     <!-- MCP 服务管理 -->
     <div id="sec-mcp" class="settings-section">
       <h3>MCP 服务</h3>
@@ -701,7 +681,6 @@
         <el-switch v-model="s.enabled" size="small" />
         <el-button size="small" @click="saveMcp(s)">保存</el-button>
         <el-button size="small" @click="testMcp(s)">测试</el-button>
-        <el-button size="small" @click="testMcp(s, { overrideTimeoutMs: 60000 })">再试一次(60秒超时)</el-button>
         <el-button size="small" type="danger" @click="removeMcp(s.id)">删除</el-button>
       </div>
 
@@ -745,7 +724,6 @@
       <p class="vision-desc">可维护多个技能。AI 可读取并执行技能指令；也可由 AI 根据对话沉淀为新技能。</p>
       <div class="profile-bar">
         <el-button size="small" @click="showSkillForm = !showSkillForm">{{ showSkillForm ? '收起新增' : '新增 Skill' }}</el-button>
-        <el-button size="small" type="primary" @click="downloadSkillCreationGuide" title="把 SKILL.md 形式的「AI 能力扩展引导」下载到本地，方便分享给其他 AI 或备份">下载 Skill 创建指南</el-button>
         <el-button size="small" @click="openSkillDir">打开 Skill 目录</el-button>
       </div>
       <div
@@ -786,7 +764,6 @@
       </p>
       <div class="profile-bar">
         <el-button size="small" @click="openCustomToolsDir">打开工具目录</el-button>
-        <el-button size="small" @click="downloadCustomToolsSpec">下载编写规范</el-button>
         <el-button size="small" @click="loadCustomTools">刷新工具</el-button>
       </div>
       <div
@@ -799,7 +776,7 @@
         <span class="custom-tools-drop-hint">请拖入包含 tool.json 和 tool.js 的文件夹</span>
       </div>
       <div v-if="customTools.length === 0" class="mcp-skill-row" style="padding: 12px 0; color: var(--text-secondary);">
-        暂未发现自定义工具。点击“下载编写规范”后按规范创建工具，再刷新即可。
+        暂未发现自定义工具。请打开上方「官方扩展文档」，按规范创建工具后刷新。
       </div>
       <div v-for="t in customTools" :key="t.id" class="mcp-skill-row">
         <div class="mcp-skill-name">
@@ -834,26 +811,48 @@
       <ThirdPartyPanel />
     </div>
 
+    <div id="sec-desk-calendar" class="settings-section">
+      <h3>同步 desktop todo calendar</h3>
+      <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 12px;">
+        与 desktop todo calendar 实时同步复习计划和复习状态。
+      </p>
+      <div class="setting-row">
+        <span class="setting-label">连接 Token</span>
+        <el-input
+          v-model="deskCalendarToken"
+          class="desk-token-input"
+          type="password"
+          show-password
+          placeholder="输入 desktop todo calendar 的 MCP Token"
+          @change="onDeskCalendarSyncToggle(deskCalendarSyncEnabled)"
+        />
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">启用同步</span>
+        <el-switch v-model="deskCalendarSyncEnabled" @change="onDeskCalendarSyncToggle" />
+      </div>
+      <p v-if="!deskCalendarSyncEnabled" class="section-desc">
+        desktop todo calendar 是一个 Windows 桌面日历/任务管理程序，内置 MCP Server，可与 my-mindmap agent 双向同步复习计划。
+        项目地址：
+        <a href="#" @click.prevent="openExternalLink('https://github.com/bubu-LZY/desktop_todo_Calendar')">https://github.com/bubu-LZY/desktop_todo_Calendar</a>
+      </p>
+      <p v-else class="section-desc">
+        已开启同步：my-mindmap agent 会把所有复习任务和完成状态同步到日历（任务标题带 [MM复习] 前缀）；双向同步：在 my-mindmap agent 勾选/取消完成会更新日历，在日历勾选/取消完成会更新 my-mindmap agent。只同步带 [MM复习] 前缀且已建立映射的任务，不会把用户或其他 AI 自己创建的复习任务误识别为 my-mindmap agent 的复习计划。删除日历任务不会删除 my-mindmap agent 的复习计划。
+      </p>
+    </div>
+
     <div id="sec-about" class="settings-section">
       <h3>关于</h3>
-      <p>my-mindmap agent v2.0.0</p>
+      <p>my-mindmap agent v4.8.0</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
         项目地址：
-        <a
-          href="https://github.com/bubu-LZY/my-mindmap-agent"
-          class="about-link"
-          @click.prevent="openExternalLink('https://github.com/bubu-LZY/my-mindmap-agent')"
-        >https://github.com/bubu-LZY/my-mindmap-agent</a>
+        <a href="#" @click.prevent="openExternalLink('https://github.com/bubu-LZY/my-mindmap-agent')">https://github.com/bubu-LZY/my-mindmap-agent</a>
       </p>
       <p>
         项目介绍页：
-        <a
-          href="https://bubu-lzy.github.io/my-mindmap-agent/"
-          class="about-link"
-          @click.prevent="openExternalLink('https://bubu-lzy.github.io/my-mindmap-agent/')"
-        >https://bubu-lzy.github.io/my-mindmap-agent/</a>
+        <a href="#" @click.prevent="openExternalLink('https://bubu-lzy.github.io/my-mindmap-agent/')">https://bubu-lzy.github.io/my-mindmap-agent/</a>
       </p>
     </div>
       </div><!-- .settings-content -->
@@ -940,7 +939,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { aiService, providerPresets, autoCompleteURL, buildBaseURL, isVisionModel } from '../services/aiService'
 import { DANGEROUS_TOOLS, getMcpToolPermissions } from '../services/toolHandler'
@@ -948,6 +947,7 @@ import { isTrustMode, setTrustMode } from '../utils/trustMode'
 import FeishuPanel from './FeishuPanel.vue'
 import ThirdPartyPanel from './ThirdPartyPanel.vue'
 import { getMemoryFacts, removeMemoryFact as deleteMemoryFact, clearMemoryFacts } from '../utils/aiMemory'
+import { isDeskCalendarSyncEnabled, setDeskCalendarSyncEnabled, getDeskCalendarToken } from '../services/deskCalendarSync'
 
 const emit = defineEmits(['saved'])
 
@@ -1703,6 +1703,16 @@ const maskToken = (token) => {
   return token.slice(0, 4) + '****' + token.slice(-4)
 }
 
+const openExternalLink = async (url) => {
+  if (!url || !/^https?:\/\//i.test(url)) return
+  if (window.electronAPI?.openExternal) {
+    const ok = await window.electronAPI.openExternal(url)
+    if (!ok) ElMessage.error('打开链接失败')
+  } else {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+}
+
 const copyText = async (text) => {
   if (!text) return
   try {
@@ -1834,20 +1844,6 @@ const applySaveDir = async () => {
   }
 }
 
-// 在默认浏览器中打开外部链接（关于页面的项目地址/项目介绍页）
-const openExternalLink = async (url) => {
-  if (!url) return
-  try {
-    if (window.electronAPI && typeof window.electronAPI.openExternal === 'function') {
-      await window.electronAPI.openExternal(url)
-    } else if (typeof window !== 'undefined') {
-      window.open(url, '_blank', 'noopener,noreferrer')
-    }
-  } catch (e) {
-    console.error('打开外部链接失败:', e)
-  }
-}
-
 const onAutoLaunchChange = async (enabled) => {
   if (!(window.electronAPI?.autoLaunch?.set)) {
     ElMessage.warning('当前为浏览器模式，无法设置开机自启动（请使用桌面应用）')
@@ -1913,10 +1909,12 @@ const baseURLPlaceholder = computed(() => {
 const config = ref({
   profiles: [],
   activeProfileId: '',
-  temperature: 0.7
+  temperature: 0.7,
+  thinking: {
+    enabled: false,
+    level: 'medium'
+  }
 })
-// 配置是否已从主进程加载完成（加载中避免误显示「请先新增一个配置档」）
-const configLoading = ref(true)
 
 // 当前活跃的配置档（computed）
 const activeProfileId = computed({
@@ -1929,11 +1927,17 @@ const temperature = computed({
   set: (v) => { config.value.temperature = Number(v) }
 })
 
+// 深度思考模式（low / medium / high）
+const thinking = computed({
+  get: () => config.value.thinking || { enabled: false, level: 'medium' },
+  set: (v) => { config.value.thinking = { ...(config.value.thinking || {}), ...v } }
+})
+
 // AI 请求超时时长（秒，默认 300 = 5 分钟）
 const aiTimeoutSeconds = ref(300)
 // 基础配置档列表（AI 对话用，不含多模态档）
 const baseProfiles = computed(() =>
-  config.value.profiles.filter(p => p.type !== 'vision')
+  config.value.profiles.filter(p => p.type !== 'vision' && p.type !== 'embedding')
 )
 const activeProfile = computed(() =>
   baseProfiles.value.find(p => p.id === config.value.activeProfileId) || null
@@ -1944,28 +1948,22 @@ const visionConfig = ref({
   enabled: false,
   activeProfileId: ''
 })
-
-// Embedding 向量化配置：优先走 API，失败降级本地模型
 const embeddingConfig = ref({
-  enabled: false,
-  useBaseConfig: true,
-  baseURL: '',
-  apiKey: '',
-  model: '',
-  autoComplete: true
+  activeProfileId: ''
 })
-const embeddingFetchedModels = ref([])
-const detectingEmbedding = ref(false)
-const testingEmbedding = ref(false)
-const embeddingTestResult = ref(null)
-let embeddingLastFetchSig = ''
 // 上次已保存配置的快照：分区保存时，另一区域的配置档沿用快照内容，不被当前 UI 中未保存的修改带走
 const savedSnapshot = ref(null)
 const visionProfiles = computed(() =>
   config.value.profiles.filter(p => p.type === 'vision')
 )
+const embeddingProfiles = computed(() =>
+  config.value.profiles.filter(p => p.type === 'embedding')
+)
 const activeVisionProfile = computed(() =>
   visionProfiles.value.find(p => p.id === visionConfig.value.activeProfileId) || null
+)
+const activeEmbeddingProfile = computed(() =>
+  embeddingProfiles.value.find(p => p.id === embeddingConfig.value.activeProfileId) || null
 )
 // 检测到的模型列表（从多模态配置档的 URL/Key 拉取，匹配多模态关键词的标出）
 const visionFetchedModels = ref([])
@@ -2061,6 +2059,9 @@ const loadConfig = async () => {
     if (window.electronAPI && window.electronAPI.getAIConfig) {
       const saved = await window.electronAPI.getAIConfig()
       config.value.temperature = Number.isFinite(Number(saved.temperature)) ? Number(saved.temperature) : 0.7
+      config.value.thinking = saved.thinking && typeof saved.thinking === 'object'
+        ? { enabled: !!saved.thinking.enabled, level: ['low', 'medium', 'high'].includes(saved.thinking.level) ? saved.thinking.level : 'medium' }
+        : { enabled: false, level: 'medium' }
       if (window.electronAPI.getAiTimeout) {
         const t = Number(await window.electronAPI.getAiTimeout())
         aiTimeoutSeconds.value = Number.isFinite(t) && t > 0 ? t : 300
@@ -2069,7 +2070,7 @@ const loadConfig = async () => {
       if (saved.profiles && Array.isArray(saved.profiles) && saved.profiles.length > 0) {
         config.value.profiles = saved.profiles.map(p => ({
           ...p,
-          type: p.type === 'vision' ? 'vision' : 'base',
+          type: p.type === 'vision' ? 'vision' : (p.type === 'embedding' ? 'embedding' : 'base'),
           // URL 补全开关默认开启（旧配置无此字段）
           autoComplete: p.autoComplete !== false,
           // 加载即规范化：自愈旧版写入的双重版本路径（/v4/v1/chat/completions → /v4/chat/completions）；补全关闭的档位原样保留
@@ -2100,15 +2101,9 @@ const loadConfig = async () => {
         enabled: !!savedVision.enabled,
         activeProfileId: savedVision.activeProfileId || ''
       }
-      // 加载 Embedding 向量化配置
-      const savedEmb = saved.embedding || {}
+      const savedEmbedding = saved.embedding || {}
       embeddingConfig.value = {
-        enabled: !!savedEmb.enabled,
-        useBaseConfig: savedEmb.useBaseConfig !== false,
-        baseURL: savedEmb.baseURL || '',
-        apiKey: savedEmb.apiKey || '',
-        model: savedEmb.model || '',
-        autoComplete: savedEmb.autoComplete !== false
+        activeProfileId: savedEmbedding.activeProfileId || ''
       }
       // 尝试匹配已知提供商
       if (activeProfile.value) {
@@ -2125,14 +2120,14 @@ const loadConfig = async () => {
       savedSnapshot.value = {
         profiles: JSON.parse(JSON.stringify(config.value.profiles)),
         activeProfileId: config.value.activeProfileId,
+        temperature: Number(config.value.temperature ?? 0.7),
+        thinking: JSON.parse(JSON.stringify(config.value.thinking || { enabled: false, level: 'medium' })),
         vision: { enabled: !!visionConfig.value.enabled, activeProfileId: visionConfig.value.activeProfileId || '' },
-        embedding: JSON.parse(JSON.stringify(embeddingConfig.value))
+        embedding: { activeProfileId: embeddingConfig.value.activeProfileId || '' }
       }
     }
   } catch (e) {
     console.error('加载配置失败:', e)
-  } finally {
-    configLoading.value = false
   }
 }
 
@@ -2185,8 +2180,31 @@ const deleteActiveVisionProfile = () => {
   visionModelMeta.value = {}
 }
 
-// 配置档切换：自动保存 + 通知 AI 助手立即切换，无需用户手动点保存。
-// 用户需求：只切换配置档（即使没点保存）也要立即应用，并把 AI 助手的模型同步切换为新档的模型。
+// ========== Embedding 配置档管理 ==========
+const onEmbeddingBaseURLBlur = () => {
+  if (activeEmbeddingProfile.value && activeEmbeddingProfile.value.baseURL) {
+    activeEmbeddingProfile.value.baseURL = autoCompleteURL(activeEmbeddingProfile.value.baseURL, activeEmbeddingProfile.value.autoComplete !== false)
+  }
+}
+
+const addEmbeddingProfile = () => {
+  const id = genProfileId()
+  config.value.profiles.push({ id, name: '', baseURL: '', apiKey: '', model: '', type: 'embedding', autoComplete: true })
+  embeddingConfig.value.activeProfileId = id
+}
+
+const deleteActiveEmbeddingProfile = () => {
+  if (embeddingProfiles.value.length <= 1) return
+  const idx = config.value.profiles.findIndex(p => p.id === embeddingConfig.value.activeProfileId)
+  if (idx === -1) return
+  config.value.profiles.splice(idx, 1)
+  embeddingConfig.value.activeProfileId = embeddingProfiles.value[0]?.id || ''
+}
+
+const onEmbeddingProfileSwitch = async () => {
+  emit('saved')
+}
+
 const onProfileSwitch = async () => {
   const p = activeProfile.value
   if (!p) return
@@ -2198,43 +2216,23 @@ const onProfileSwitch = async () => {
     selectedProvider.value = 'custom'
     currentModels.value = []
   }
-  fetchedModels.value = []
-  // 立即把新配置档持久化到主进程（用户不再需要手动点"保存配置"）
-  // 注意：仅切换档位 + 当前档的 API Key / Model 等字段，其他未保存的多模态/温度等
-  // 改动保持不变（沿用 savedSnapshot）
-  try {
-    if (window.electronAPI && window.electronAPI.setAIConfig) {
-      const uiProfiles = config.value.profiles.map(pp => ({
-        ...pp,
-        type: pp.type === 'vision' ? 'vision' : 'base',
-        autoComplete: pp.autoComplete !== false,
-        baseURL: pp.baseURL ? autoCompleteURL(pp.baseURL, pp.autoComplete !== false) : ''
-      }))
-      const uiBase = uiProfiles.filter(pp => pp.type !== 'vision')
-      const snap = savedSnapshot.value
-      const hasSnap = !!(snap && Array.isArray(snap.profiles))
-      const profiles = hasSnap
-        ? [...uiBase, ...snap.profiles.filter(pp => pp.type === 'vision')]
-        : uiBase
-      const visionState = hasSnap
-        ? snap.vision || { enabled: false, activeProfileId: '' }
-        : { enabled: !!visionConfig.value.enabled, activeProfileId: visionConfig.value.activeProfileId || '' }
-      const savedConfig = JSON.parse(JSON.stringify({
-        profiles,
-        activeProfileId: config.value.activeProfileId,
-        vision: visionState
-      }))
-      await window.electronAPI.setAIConfig(savedConfig)
-      savedSnapshot.value = JSON.parse(JSON.stringify(savedConfig))
-      config.value.profiles = [...uiBase, ...config.value.profiles.filter(pp => pp.type === 'vision')]
-      aiService.resetConfig()
-      // 通知 ChatPanel：模型名同步刷新到新档，并清空已缓存模型列表
-      emit('saved')
-      ElMessage.success(`已切换到配置档「${p.name || '未命名'}」`)
-    }
-  } catch (e) {
-    ElMessage.error('自动应用配置档失败: ' + (e?.message || e))
+  if (p.model && !currentModels.value.includes(p.model)) {
+    currentModels.value = [p.model, ...currentModels.value]
   }
+  fetchedModels.value = []
+  await fetchModels()
+  // 让 App/ChatPanel 立即同步当前配置档模型，而不是等点击“保存配置”。
+  emit('saved')
+}
+
+const onVisionProfileSwitch = async () => {
+  // 切换多模态配置档后清掉旧档检测缓存，避免模型下拉仍保留上一配置档的列表/元数据。
+  visionFetchedModels.value = []
+  visionMatchedCount.value = 0
+  visionModelMeta.value = {}
+  visionLastFetchSig = ''
+  await detectVisionModels(true)
+  emit('saved')
 }
 
 /**
@@ -2467,10 +2465,9 @@ const onVisionDropdownOpen = (visible) => {
 }
 
 /**
- * 保存配置（分区提交，配置档互不影响；其余设置项均有各自的自动保存）
- * - 'base'（基础模型区按钮）：只提交基础档；多模态/embedding 沿用上次已保存内容
- * - 'vision'（多模态区按钮）：只提交多模态档与启用开关；基础档/embedding 沿用上次已保存内容
- * - 'embedding'（向量化区按钮）：只提交 embedding 配置；基础档/多模态沿用上次已保存内容
+ * 保存配置（分区提交，两类模型档互不影响；其余设置项均有各自的自动保存）
+ * - 'base'（基础模型区按钮）：只提交基础档；多模态档与其开关沿用上次已保存内容
+ * - 'vision'（多模态区按钮）：只提交多模态档与启用开关；基础档沿用上次已保存内容
  */
 const saveConfig = async (scope = 'base') => {
   try {
@@ -2481,59 +2478,64 @@ const saveConfig = async (scope = 'base') => {
     // 当前 UI 配置档（baseURL 自动补全——补全关闭的档位原样保留、type 归一化）
     const uiProfiles = config.value.profiles.map(p => ({
       ...p,
-      type: p.type === 'vision' ? 'vision' : 'base',
+      type: p.type === 'vision' ? 'vision' : (p.type === 'embedding' ? 'embedding' : 'base'),
       autoComplete: p.autoComplete !== false,
       baseURL: p.baseURL ? autoCompleteURL(p.baseURL, p.autoComplete !== false) : ''
     }))
-    const uiBase = uiProfiles.filter(p => p.type !== 'vision')
+    const uiBase = uiProfiles.filter(p => p.type !== 'vision' && p.type !== 'embedding')
     const uiVision = uiProfiles.filter(p => p.type === 'vision')
+    const uiEmbedding = uiProfiles.filter(p => p.type === 'embedding')
     const snap = savedSnapshot.value
     const hasSnap = !!(snap && Array.isArray(snap.profiles))
     let profiles, activeProfileId, visionState, embeddingState
-
-    if (scope === 'embedding' && hasSnap) {
-      // embedding 保存：基础档和多模态档都取快照
-      profiles = [...snap.profiles]
-      activeProfileId = snap.activeProfileId || uiBase[0]?.id || ''
-      visionState = snap.vision || { enabled: false, activeProfileId: '' }
-      embeddingState = JSON.parse(JSON.stringify(embeddingConfig.value))
-    } else if (scope === 'vision' && hasSnap) {
+    if (scope === 'vision' && hasSnap) {
       // 多模态保存：基础档取快照（UI 中未保存的基础修改不被带走）
       profiles = [...snap.profiles.filter(p => p.type !== 'vision'), ...uiVision]
       activeProfileId = snap.activeProfileId || uiBase[0]?.id || ''
       visionState = { enabled: !!visionConfig.value.enabled, activeProfileId: visionConfig.value.activeProfileId || '' }
-      embeddingState = snap.embedding || { enabled: false, useBaseConfig: true, baseURL: '', apiKey: '', model: '', autoComplete: true }
+      embeddingState = snap.embedding || { activeProfileId: '' }
+    } else if (scope === 'embedding' && hasSnap) {
+      profiles = [...snap.profiles.filter(p => p.type !== 'embedding'), ...uiEmbedding]
+      activeProfileId = snap.activeProfileId || uiBase[0]?.id || ''
+      visionState = snap.vision || { enabled: false, activeProfileId: '' }
+      embeddingState = { activeProfileId: embeddingConfig.value.activeProfileId || '' }
     } else if (hasSnap) {
       // 基础保存：多模态档与开关取快照（UI 中未保存的多模态修改不被带走）
-      profiles = [...uiBase, ...snap.profiles.filter(p => p.type === 'vision')]
+      profiles = [...uiBase, ...snap.profiles.filter(p => p.type === 'vision' || p.type === 'embedding')]
       activeProfileId = config.value.activeProfileId
       visionState = snap.vision || { enabled: false, activeProfileId: '' }
-      embeddingState = snap.embedding || { enabled: false, useBaseConfig: true, baseURL: '', apiKey: '', model: '', autoComplete: true }
+      embeddingState = snap.embedding || { activeProfileId: '' }
     } else {
-      // 无快照的极端情况退回全量保存，避免误清其他配置
+      // 无快照的极端情况退回全量保存，避免误清另一类配置档
       profiles = uiProfiles
       activeProfileId = config.value.activeProfileId
       visionState = { enabled: !!visionConfig.value.enabled, activeProfileId: visionConfig.value.activeProfileId || '' }
-      embeddingState = JSON.parse(JSON.stringify(embeddingConfig.value))
+      embeddingState = { activeProfileId: embeddingConfig.value.activeProfileId || '' }
     }
     // 深克隆为纯数据：profiles 可能携带 Vue 响应式 Proxy，IPC 结构化克隆无法处理
     // （会抛 "An object could not be cloned"）；配置字段均为字符串/布尔，JSON 序列化无损失
-    const savedConfig = JSON.parse(JSON.stringify({ profiles, activeProfileId, vision: visionState, embedding: embeddingState }))
+    const savedConfig = JSON.parse(JSON.stringify({
+      profiles,
+      activeProfileId,
+      vision: visionState,
+      embedding: embeddingState,
+      temperature: Number(config.value.temperature ?? 0.7),
+      thinking: config.value.thinking || { enabled: false, level: 'medium' }
+    }))
     await window.electronAPI.setAIConfig(savedConfig)
     savedSnapshot.value = JSON.parse(JSON.stringify(savedConfig))
-    // 只回写本次作用域的配置档；其他作用域 UI 中未保存的修改保持原样，等待各自按钮提交
-    if (scope === 'embedding' && hasSnap) {
-      // embedding 保存不影响 profiles，只更新快照里的 embedding
-    } else if (scope === 'vision' && hasSnap) {
+    // 只回写本次作用域的配置档；另一作用域 UI 中未保存的修改保持原样，等待各自按钮提交
+    if (scope === 'vision' && hasSnap) {
       config.value.profiles = [...config.value.profiles.filter(p => p.type !== 'vision'), ...uiVision]
+    } else if (scope === 'embedding' && hasSnap) {
+      config.value.profiles = [...config.value.profiles.filter(p => p.type !== 'embedding'), ...uiEmbedding]
     } else if (hasSnap) {
-      config.value.profiles = [...uiBase, ...config.value.profiles.filter(p => p.type === 'vision')]
+      config.value.profiles = [...uiBase, ...config.value.profiles.filter(p => p.type === 'vision' || p.type === 'embedding')]
     } else {
       config.value.profiles = uiProfiles
     }
     aiService.resetConfig()
-    const msgMap = { base: '基础模型配置已保存', vision: '多模态配置已保存', embedding: 'Embedding 配置已保存' }
-    ElMessage.success(msgMap[scope] || '配置已保存')
+    ElMessage.success(scope === 'vision' ? '多模态配置已保存' : (scope === 'embedding' ? 'Embedding 配置已保存' : '基础模型配置已保存'))
     emit('saved')
   } catch (e) {
     ElMessage.error('保存失败: ' + e.message)
@@ -2562,11 +2564,49 @@ const saveTemperature = async () => {
       profiles,
       activeProfileId,
       vision: visionState,
-      temperature: Number(config.value.temperature ?? 0.7)
+      embedding: snap?.embedding || { activeProfileId: '' },
+      temperature: Number(config.value.temperature ?? 0.7),
+      thinking: config.value.thinking || { enabled: false, level: 'medium' }
     }))
     await window.electronAPI.setAIConfig(savedConfig)
     aiService.resetConfig()
     ElMessage.success('AI temperature 已保存')
+    emit('saved')
+  } catch (e) {
+    ElMessage.error('保存失败: ' + e.message)
+  }
+}
+
+const saveThinking = async () => {
+  if (!(window.electronAPI && window.electronAPI.setAIConfig)) {
+    ElMessage.warning('当前为浏览器模式，无法保存 AI 配置（请使用桌面应用）')
+    return
+  }
+  try {
+    const snap = savedSnapshot.value
+    const profiles = snap && Array.isArray(snap.profiles)
+      ? snap.profiles
+      : config.value.profiles.map(p => ({
+          ...p,
+          type: p.type === 'vision' ? 'vision' : 'base',
+          autoComplete: p.autoComplete !== false
+        }))
+    const activeProfileId = snap ? snap.activeProfileId : config.value.activeProfileId
+    const visionState = snap
+      ? snap.vision
+      : { enabled: !!visionConfig.value.enabled, activeProfileId: visionConfig.value.activeProfileId || '' }
+    const savedConfig = JSON.parse(JSON.stringify({
+      profiles,
+      activeProfileId,
+      vision: visionState,
+      embedding: snap?.embedding || { activeProfileId: '' },
+      temperature: Number(config.value.temperature ?? 0.7),
+      thinking: config.value.thinking || { enabled: false, level: 'medium' }
+    }))
+    await window.electronAPI.setAIConfig(savedConfig)
+    savedSnapshot.value = JSON.parse(JSON.stringify(savedConfig))
+    aiService.resetConfig()
+    ElMessage.success('深度思考模式已保存')
     emit('saved')
   } catch (e) {
     ElMessage.error('保存失败: ' + e.message)
@@ -2590,214 +2630,7 @@ const saveAiTimeout = async () => {
 
 const saveVisionConfig = () => saveConfig('vision')
 
-// ========== Embedding 向量化配置 ==========
-function getEmbeddingEffectiveConfig() {
-  if (embeddingConfig.value.useBaseConfig && activeProfile.value) {
-    return {
-      baseURL: activeProfile.value.baseURL || '',
-      apiKey: activeProfile.value.apiKey || '',
-      model: embeddingConfig.value.model || '',
-      autoComplete: activeProfile.value.autoComplete !== false,
-      profileId: activeProfile.value.id || ''
-    }
-  }
-  return {
-    baseURL: embeddingConfig.value.baseURL || '',
-    apiKey: embeddingConfig.value.apiKey || '',
-    model: embeddingConfig.value.model || '',
-    autoComplete: embeddingConfig.value.autoComplete !== false,
-    profileId: ''
-  }
-}
-
-function embeddingFetchSignature() {
-  const cfg = getEmbeddingEffectiveConfig()
-  return `${cfg.baseURL}|${cfg.apiKey ? cfg.apiKey.slice(0, 8) : ''}`
-}
-
-const onEmbeddingDropdownOpen = async (visible) => {
-  if (!visible) return
-  const sig = embeddingFetchSignature()
-  if (!sig || !sig.split('|')[0]) {
-    ElMessage.warning('请先填写 API 地址再检测模型')
-    return
-  }
-  if (embeddingFetchedModels.value.length > 0 && sig === embeddingLastFetchSig) return
-  await detectEmbeddingModels(true)
-}
-
-const detectEmbeddingModels = async (silent = false) => {
-  if (!(window.electronAPI && window.electronAPI.listEmbeddingModels)) {
-    if (!silent) ElMessage.warning('当前为浏览器模式，无法检测 Embedding 模型')
-    return
-  }
-  const cfg = getEmbeddingEffectiveConfig()
-  if (!cfg.baseURL) {
-    if (!silent) ElMessage.warning('请先填写 API 地址')
-    return
-  }
-  detectingEmbedding.value = true
-  try {
-    const res = await window.electronAPI.listEmbeddingModels(cfg.baseURL, cfg.apiKey, cfg.profileId, cfg.autoComplete)
-    if (res.success) {
-      embeddingFetchedModels.value = res.models || []
-      embeddingLastFetchSig = embeddingFetchSignature()
-      if (!silent) {
-        if (res.models.length > 0) {
-          ElMessage.success(`检测到 ${res.models.length} 个 Embedding 模型`)
-        } else {
-          ElMessage.warning('未检测到 Embedding 模型，可手动输入模型名称')
-        }
-      }
-    } else {
-      embeddingFetchedModels.value = []
-      if (!silent) ElMessage.error('检测失败: ' + (res.error || '未知错误'))
-    }
-  } catch (e) {
-    embeddingFetchedModels.value = []
-    if (!silent) ElMessage.error('检测失败: ' + e.message)
-  } finally {
-    detectingEmbedding.value = false
-  }
-}
-
-const testEmbeddingConfig = async () => {
-  if (!(window.electronAPI && window.electronAPI.testEmbedding)) {
-    ElMessage.warning('当前为浏览器模式，无法测试')
-    return
-  }
-  const cfg = getEmbeddingEffectiveConfig()
-  if (!cfg.baseURL) {
-    ElMessage.warning('请先填写 API 地址')
-    return
-  }
-  if (!cfg.model) {
-    ElMessage.warning('请先选择或输入模型名称')
-    return
-  }
-  testingEmbedding.value = true
-  embeddingTestResult.value = null
-  try {
-    const res = await window.electronAPI.testEmbedding(cfg.baseURL, cfg.apiKey, cfg.model, cfg.autoComplete, cfg.profileId)
-    if (res.success) {
-      embeddingTestResult.value = {
-        success: true,
-        message: `配置可用！向量维度：${res.dimension}，模型：${res.model || cfg.model}`
-      }
-    } else {
-      embeddingTestResult.value = {
-        success: false,
-        message: '测试失败：' + (res.error || '未知错误')
-      }
-    }
-  } catch (e) {
-    embeddingTestResult.value = {
-      success: false,
-      message: '测试失败：' + e.message
-    }
-  } finally {
-    testingEmbedding.value = false
-  }
-}
-
-// ========== 向量索引管理 ==========
-const vectorStats = ref({ files: 0, vectors: 0, docFiles: 0, smmFiles: 0, unindexed: 0 })
-const rebuildingVectors = ref(false)
-const rebuildPercent = ref(0)
-const rebuildDoneCount = ref(0)
-const rebuildTotalCount = ref(0)
-const rebuildCurrentFile = ref('')
-const rebuildFinished = ref(false)
-const rebuildResult = ref(null)
-
-const refreshVectorStats = async () => {
-  try {
-    const { searchService } = await import('../services/searchService')
-    const stats = await searchService.getVectorStats()
-    vectorStats.value = {
-      files: stats.files || 0,
-      vectors: stats.vectors || 0,
-      docFiles: stats.docFiles || 0,
-      smmFiles: stats.smmFiles || 0,
-      unindexed: stats.unindexed || 0
-    }
-  } catch (e) {
-    console.warn('获取向量统计失败:', e)
-  }
-}
-
-let rebuildController = null
-
-const onRebuildVectors = async () => {
-  if (rebuildingVectors.value) return
-  try {
-    await ElMessageBox.confirm(
-      '确定要重建全部向量索引吗？\n\n重建过程可能需要较长时间（取决于文件数量和 Embedding 速度），期间可以继续使用软件，但语义搜索结果可能不完整。',
-      '重建向量索引',
-      {
-        confirmButtonText: '开始重建',
-        cancelButtonText: '取消',
-        type: 'warning',
-        dangerouslyUseHTMLString: false
-      }
-    )
-  } catch {
-    return
-  }
-
-  rebuildingVectors.value = true
-  rebuildFinished.value = false
-  rebuildResult.value = null
-  rebuildPercent.value = 0
-  rebuildDoneCount.value = 0
-  rebuildTotalCount.value = 0
-  rebuildCurrentFile.value = ''
-  rebuildController = { cancelled: false }
-
-  try {
-    const { searchService } = await import('../services/searchService')
-    const result = await searchService.rebuildAllVectors((current, total, fileName) => {
-      rebuildDoneCount.value = current
-      rebuildTotalCount.value = total
-      rebuildCurrentFile.value = fileName
-      rebuildPercent.value = total > 0 ? Math.round((current / total) * 100) : 0
-    }, rebuildController)
-    rebuildResult.value = result
-    rebuildFinished.value = true
-    if (result.cancelled) {
-      rebuildPercent.value = rebuildTotalCount.value > 0
-        ? Math.round((rebuildDoneCount.value / rebuildTotalCount.value) * 100)
-        : 0
-      ElMessage.info('已取消重建')
-    } else {
-      rebuildPercent.value = 100
-      if (result.success && result.failedCount === 0) {
-        ElMessage.success(`向量索引重建完成（${result.successCount}/${result.total}）`)
-      } else if (result.success) {
-        ElMessage.warning(`重建完成，${result.failedCount} 个文件失败（${result.successCount} 个成功）`)
-      } else {
-        ElMessage.error('重建失败：' + (result.error || '未知错误'))
-      }
-    }
-    await refreshVectorStats()
-  } catch (e) {
-    ElMessage.error('重建失败：' + e.message)
-  } finally {
-    rebuildingVectors.value = false
-    rebuildController = null
-  }
-}
-
-const onCancelRebuild = () => {
-  if (rebuildController) {
-    rebuildController.cancelled = true
-  }
-}
-
-// 进入设置页时加载一次向量统计
-const loadVectorStatsOnMount = () => {
-  if (window.electronAPI?.vector) refreshVectorStats()
-}
+const saveEmbeddingConfig = () => saveConfig('embedding')
 
 // ========== MCP 管理 ==========
 const mcpServers = ref([])
@@ -2814,6 +2647,13 @@ const loadMcp = async () => {
 const addMcp = async () => {
   if (!window.electronAPI?.mcp?.create) return
   try {
+    if (newMcp.value.transport === 'stdio') {
+      await ElMessageBox.confirm('stdio MCP 将在本机启动外部程序，请确认来源可信。是否继续？', '安全确认', {
+        confirmButtonText: '继续',
+        cancelButtonText: '取消',
+        type: 'warning'
+      })
+    }
     await window.electronAPI.mcp.create(newMcp.value)
     newMcp.value = { name: '', transport: 'http', url: '', command: '', args: [], headers: {}, enabled: true }
     showMcpForm.value = false
@@ -2841,18 +2681,44 @@ const importMcpJson = async () => {
   const existing = await window.electronAPI.mcp.list()
   let created = 0
   let updated = 0
+  let hasStdio = false
+  for (const [name, raw] of Object.entries(source)) {
+    if (!raw || typeof raw !== 'object') continue
+    const transportRaw = String(raw.transport || raw.transportType || raw.type || '').toLowerCase()
+    const hasUrl = !!(raw.url || raw.baseUrl)
+    const transport = (hasUrl || ['http', 'sse', 'streamable-http', 'streamable_http'].includes(transportRaw)) ? 'http' : 'stdio'
+    if (transport === 'stdio') hasStdio = true
+  }
+  if (hasStdio) {
+    try {
+      await ElMessageBox.confirm('导入内容中包含 stdio MCP，导入后本程序可能启动外部命令。请确认 JSON 来源可信，是否继续？', '安全确认', {
+        confirmButtonText: '继续导入',
+        cancelButtonText: '取消',
+        type: 'warning'
+      })
+    } catch {
+      return
+    }
+  }
   try {
     for (const [name, raw] of Object.entries(source)) {
       if (!raw || typeof raw !== 'object') continue
+      const transportRaw = String(raw.transport || raw.transportType || raw.type || '').toLowerCase()
+      const hasUrl = !!(raw.url || raw.baseUrl)
+      const transport = (hasUrl || ['http', 'sse', 'streamable-http', 'streamable_http'].includes(transportRaw))
+        ? 'http'
+        : 'stdio'
       const cfg = {
         name,
-        transport: raw.url ? 'http' : 'stdio',
-        url: raw.url || '',
-        command: raw.command || '',
+        transport,
+        url: raw.url || raw.baseUrl || '',
+        command: raw.command || raw.cmd || '',
         args: Array.isArray(raw.args) ? raw.args.map(String) : [],
-        env: raw.env && typeof raw.env === 'object' ? raw.env : {},
+        env: (raw.env && typeof raw.env === 'object') || (raw.environment && typeof raw.environment === 'object')
+          ? (raw.env || raw.environment)
+          : {},
         headers: raw.headers && typeof raw.headers === 'object' ? raw.headers : {},
-        enabled: raw.disabled !== true
+        enabled: raw.disabled !== true && raw.enabled !== false
       }
       const found = existing.find(s => s.name === name)
       if (found) {
@@ -2883,33 +2749,12 @@ const removeMcp = async (id) => {
   try { await window.electronAPI.mcp.remove(id); await loadMcp(); ElMessage.success('MCP 服务已删除') } catch (e) { ElMessage.error('删除失败: ' + e.message) }
 }
 
-// 测试单条 MCP 服务：首次拉取失败（主进程内部已自动按 60 秒重试一次）若仍失败，
-// 在界面上提供"再试一次（60 秒超时）"按钮方便用户手动重试。
-const testMcp = async (server, opts = {}) => {
+const testMcp = async (server) => {
   if (!window.electronAPI?.mcp?.listTools) return
-  const overrideTimeoutMs = Number(opts.overrideTimeoutMs)
   try {
-    const tools = await window.electronAPI.mcp.listTools(server.id, Number.isFinite(overrideTimeoutMs) && overrideTimeoutMs > 0 ? overrideTimeoutMs : 0)
-    if (Number.isFinite(overrideTimeoutMs) && overrideTimeoutMs > 0) {
-      ElMessage.success(`重试连接成功，发现 ${tools.length} 个工具（已临时使用 ${Math.round(overrideTimeoutMs / 1000)} 秒超时）`)
-    } else {
-      ElMessage.success(`连接成功，发现 ${tools.length} 个工具`)
-    }
-  } catch (e) {
-    const msg = (e && e.message) ? e.message : '未知错误'
-    // 区分：超时错误展示详细提示 + 重试按钮；其他错误直接显示
-    const isTimeout = /超时|timeout/i.test(msg) || (e && e.code === 'MCP_TIMEOUT')
-    if (isTimeout) {
-      ElMessage({
-        type: 'error',
-        message: msg + '\n\n可点「再试一次（60 秒超时）」继续拉取',
-        duration: 12000,
-        dangerouslyUseHTMLString: false
-      })
-    } else {
-      ElMessage.error('连接失败: ' + msg)
-    }
-  }
+    const tools = await window.electronAPI.mcp.listTools(server.id)
+    ElMessage.success(`连接成功，发现 ${tools.length} 个工具`)
+  } catch (e) { ElMessage.error('连接失败: ' + e.message) }
 }
 
 // ========== Skills 管理 ==========
@@ -2951,45 +2796,6 @@ const openSkillDir = async () => {
     const res = await window.electronAPI.skills.openDir()
     if (res && !res.ok) ElMessage.error(`打开目录失败：${res.error || '未知错误'}`)
   } catch (e) { ElMessage.error('打开 Skill 目录失败') }
-}
-
-// 下载「AI 能力扩展引导」Skill 的 SKILL.md 到用户选定的位置（用于分享给其他 AI 或备份）
-const downloadSkillCreationGuide = async () => {
-  if (!window.electronAPI?.skills?.getBuiltinGuideContent || !window.electronAPI?.dialog?.showSaveDialog) {
-    ElMessage.error('当前环境不支持导出 Skill 文档')
-    return
-  }
-  try {
-    const r = await window.electronAPI.skills.getBuiltinGuideContent()
-    if (!r || !r.ok) { ElMessage.error('读取内置指南失败：' + (r && r.error || '未知错误')); return }
-    const target = await window.electronAPI.dialog.showSaveDialog({
-      title: '保存 Skill 创建指南',
-      defaultPath: 'SKILL.md',
-      filters: [{ name: 'Markdown', extensions: ['md'] }]
-    })
-    if (!target || target.canceled || !target.filePath) return
-    const content = String(r.content || '')
-    // 复用 save-file：传绝对路径即可写到任意位置
-    if (window.electronAPI.saveFile) {
-      const res = await window.electronAPI.saveFile(target.filePath, content, { overwrite: true })
-      if (res && res.success) {
-        ElMessage.success(`已下载到：${res.filePath || target.filePath}`)
-        return
-      }
-      ElMessage.error('保存失败：' + (res && res.error || '未知错误'))
-      return
-    }
-    // 兜底：fetch + showSaveDialog 已经在主进程给了路径，但前端没原生 fs；用 fs:writeFile
-    if (window.electronAPI.fs && window.electronAPI.fs.writeFile) {
-      const ok = await window.electronAPI.fs.writeFile(target.filePath, content)
-      if (ok) ElMessage.success(`已下载到：${target.filePath}`)
-      else ElMessage.error('保存失败')
-      return
-    }
-    ElMessage.error('当前环境不支持保存文件')
-  } catch (e) {
-    ElMessage.error('下载失败：' + (e.message || '未知错误'))
-  }
 }
 
 const readFileAsBase64 = (file) => new Promise((res, rej) => {
@@ -3091,18 +2897,44 @@ const openCustomToolsDir = async () => {
   }
 }
 
-const downloadCustomToolsSpec = async () => {
+const getExtensionDoc = async () => {
+  if (!window.electronAPI?.customTools?.getSpec) return ''
+  const res = await window.electronAPI.customTools.getSpec()
+  return res?.ok ? String(res.content || '') : ''
+}
+
+const copyExtensionDoc = async () => {
+  const content = await getExtensionDoc()
+  if (!content) {
+    ElMessage.error('未找到官方扩展文档')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(content)
+    ElMessage.success('官方扩展文档已复制到剪贴板')
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = content
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    ElMessage.success('官方扩展文档已复制到剪贴板')
+  }
+}
+
+const downloadExtensionDoc = async () => {
   if (!window.electronAPI?.customTools?.saveSpec) return
   try {
     const res = await window.electronAPI.customTools.saveSpec()
     if (!res || !res.ok) {
-      ElMessage.error(`保存规范失败：${res?.error || '未知错误'}`)
+      ElMessage.error(`保存失败：${res?.error || '未知错误'}`)
       return
     }
-    ElMessage.success(`编写规范已保存到工具目录：${res.path}`)
+    ElMessage.success(`官方扩展文档已保存到工具目录：${res.path}`)
     await openCustomToolsDir()
-  } catch (e) {
-    ElMessage.error('下载编写规范失败')
+  } catch {
+    ElMessage.error('下载官方扩展文档失败')
   }
 }
 
@@ -3174,21 +3006,45 @@ const onCustomToolFolderDrop = async (event) => {
 // ========== 侧边目录导航 ==========
 const tocSections = [
   { id: 'sec-ai-config', label: 'AI 模型配置' },
+  { id: 'sec-thinking', label: '深度思考模式' },
   { id: 'sec-temperature', label: 'AI temperature 设置' },
+  { id: 'sec-timeout', label: 'AI 请求超时设置' },
   { id: 'sec-vision', label: '多模态识别' },
-  { id: 'sec-embedding', label: 'Embedding 向量化' },
-  { id: 'sec-safety', label: 'AI 安全与记忆' },
-  { id: 'sec-system', label: '系统' },
-  { id: 'sec-token', label: '全局 Token 管理' },
-  { id: 'sec-password', label: '全局管理访问密码' },
+  { id: 'sec-embedding', label: 'Embedding 配置' },
   { id: 'sec-mcp', label: 'MCP 服务' },
   { id: 'sec-skills', label: 'Skills' },
   { id: 'sec-custom-tools', label: '工具目录' },
+  { id: 'sec-extension-doc', label: '官方扩展文档' },
+  { id: 'sec-safety', label: 'AI 安全与记忆' },
+  { id: 'sec-token', label: '全局 Token 管理' },
+  { id: 'sec-password', label: '全局管理访问密码' },
+  { id: 'sec-system', label: '系统' },
   { id: 'sec-integrations', label: '三方集成' },
+  { id: 'sec-desk-calendar', label: '同步 desktop todo calendar' },
   { id: 'sec-messages', label: '消息中心' },
   { id: 'sec-about', label: '关于' }
 ]
 const activeSection = ref('sec-ai-config')
+const settingsViewRef = ref(null)
+const deskCalendarSyncEnabled = ref(false)
+const deskCalendarToken = ref('')
+const onDeskCalendarSyncToggle = (value) => {
+  deskCalendarSyncEnabled.value = setDeskCalendarSyncEnabled(!!value, deskCalendarToken.value)
+}
+
+const onSettingsScroll = () => {
+  const container = settingsViewRef.value
+  if (!container) return
+  const rect = container.getBoundingClientRect()
+  const top = rect.top + 100
+  let current = 'sec-ai-config'
+  for (const s of tocSections) {
+    const el = document.getElementById(s.id)
+    if (!el) continue
+    if (el.getBoundingClientRect().top <= top) current = s.id
+  }
+  if (current !== activeSection.value) activeSection.value = current
+}
 
 const scrollToSection = (id) => {
   const doScroll = () => {
@@ -3246,9 +3102,9 @@ onMounted(() => {
   loadMcpTokens()
   loadSkills()
   loadCustomTools()
-  setupTocObserver()
-  // 加载向量库统计
-  if (window.electronAPI?.vector) refreshVectorStats()
+  deskCalendarSyncEnabled.value = isDeskCalendarSyncEnabled()
+  deskCalendarToken.value = getDeskCalendarToken()
+  nextTick(onSettingsScroll)
 })
 
 onBeforeUnmount(() => {
@@ -3277,17 +3133,9 @@ onBeforeUnmount(() => {
   height: auto;
   max-height: 70vh;
   overflow-y: auto;
-  /* 性能：开启 GPU 合成层，让滚动只在合成线程跑，不触发主线程 reflow */
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
   padding: 0;
   background: linear-gradient(180deg, #f5f5f7 0%, #ffffff 100%);
-  /* 自定义滚动条：更细，不抢视觉 */
-  scrollbar-gutter: stable;
 }
-.settings-view::-webkit-scrollbar { width: 8px; }
-.settings-view::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border-radius: 4px; }
-.settings-view::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.32); }
 
 .settings-layout {
   display: flex;
@@ -3297,17 +3145,13 @@ onBeforeUnmount(() => {
 /* ---------- 侧边粘性目录 ---------- */
 .settings-toc {
   position: sticky;
-  top: 12px;
+  top: 24px;
   width: 150px;
   min-width: 150px;
-  align-self: flex-start;
   height: fit-content;
-  max-height: calc(100vh - 24px);
   padding: 12px 0;
-  margin: 12px 0 0 16px;
+  margin: 24px 0 0 24px;
   background: transparent;
-  /* contain: paint 让 sticky 元素只在自己的合成层重绘 */
-  contain: layout paint;
 }
 
 .settings-toc ul {
@@ -3325,7 +3169,7 @@ onBeforeUnmount(() => {
   color: #86868b;
   cursor: pointer;
   border-radius: 8px;
-  transition: background-color 0.2s, color 0.2s, border-color 0.2s, background-position 0.2s;
+  transition: all 0.2s ease;
   line-height: 1.4;
   border-left: 2px solid transparent;
 }
@@ -3351,16 +3195,14 @@ onBeforeUnmount(() => {
 
 /* ---------- 设置区块 ---------- */
 .settings-section {
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 16px;
   padding: 24px;
-  margin-bottom: 16px;
-  /* 关键性能优化：contain 隔离每节渲染区域，避免 14 节叠加触发全页重绘 */
-  contain: layout style paint;
-  /* 提前合成层（仅在 GPU 内存允许时生效），避免 scroll 时逐帧重绘 */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 600px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 .settings-section h3 {
@@ -3673,6 +3515,19 @@ onBeforeUnmount(() => {
   line-height: 1.6;
   margin: 0;
 }
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.setting-label {
+  font-size: 14px;
+  color: #1c1c1e;
+}
+.desk-token-input {
+  width: 300px;
+}
 
 /* ---------- 配置档管理栏 ---------- */
 .profile-bar {
@@ -3895,7 +3750,7 @@ onBeforeUnmount(() => {
   padding: 10px 24px;
   font-size: 14px;
   font-weight: 500;
-  transition: background-color 0.2s, color 0.2s, border-color 0.2s, box-shadow 0.2s;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .settings-actions :deep(.el-button:not(.el-button--primary)) {
@@ -3939,63 +3794,6 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(255, 59, 48, 0.15);
 }
 
-.vector-manage-block {
-  margin-top: 24px;
-  padding: 16px;
-  background: var(--settings-card-bg);
-  border: 1px solid var(--settings-card-border);
-  border-radius: 12px;
-}
-
-.vector-manage-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--settings-text-primary);
-  margin-bottom: 6px;
-}
-
-.vector-manage-desc {
-  font-size: 12px;
-  color: var(--settings-text-secondary);
-  line-height: 1.6;
-  margin-bottom: 12px;
-}
-
-.vector-stats-row {
-  font-size: 13px;
-  color: var(--settings-text-secondary);
-  margin-bottom: 10px;
-}
-
-.vector-stats-warning {
-  color: var(--el-color-warning, #e6a23c);
-  font-size: 12px;
-}
-
-.rebuild-progress {
-  margin-top: 12px;
-  padding: 8px 12px;
-  background: var(--settings-input-bg);
-  border-radius: 8px;
-  border: 1px solid var(--settings-input-border);
-}
-
-.rebuild-progress {
-  margin-top: 12px;
-}
-
-.rebuild-progress-text {
-  font-size: 12px;
-  color: var(--settings-text-secondary);
-  margin-top: 6px;
-  text-align: center;
-}
-
-.rebuild-actions {
-  text-align: center;
-  margin-top: 8px;
-}
-
 @keyframes fadeIn {
   from {
     opacity: 0;
@@ -4013,18 +3811,6 @@ onBeforeUnmount(() => {
   color: #86868b;
   line-height: 1.8;
   margin: 0;
-}
-
-/* 关于区块的可点击链接 */
-.about-link {
-  color: #007aff;
-  cursor: pointer;
-  text-decoration: underline;
-  word-break: break-all;
-}
-.about-link:hover {
-  color: #0066d6;
-  text-decoration: none;
 }
 
 .mcp-skill-row,

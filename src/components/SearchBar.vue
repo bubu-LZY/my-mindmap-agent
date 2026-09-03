@@ -15,105 +15,152 @@
         @keydown.enter.exact.prevent="onEnter"
         @keydown.esc="showResults = false"
       />
-      <span v-if="currentSearchRunning" class="semantic-spinner" :title="searching ? '关键词搜索中' : '语义检索中'"></span>
+      <span v-if="semanticSearching" class="semantic-spinner" title="语义检索中"></span>
       <button v-if="query" class="clear-btn" @click="clearSearch">✕</button>
     </div>
 
     <Transition name="search-dropdown">
-      <div v-if="showResults && (hasAnyResult || searching || semanticSearching || searched)" class="search-results">
-        <!-- 第一层 tab：关键词 / 语义 -->
-        <div class="search-tabs">
-          <button
-            class="search-tab"
-            :class="{ active: activeMode === 'keyword' }"
-            @mousedown.prevent="onModeChange('keyword')"
-          >关键词</button>
-          <button
-            class="search-tab"
-            :class="{ active: activeMode === 'semantic' }"
-            @mousedown.prevent="onModeChange('semantic')"
-          >语义
-            <span v-if="semanticSearching" class="semantic-spinner tab-spinner"></span>
-          </button>
-        </div>
-        <!-- 第二层 tab：当前文件 / 全局文件 -->
-        <div class="search-subtabs">
-          <button
-            class="search-subtab"
-            :class="{ active: activeScope === 'current' }"
-            @mousedown.prevent="onScopeChange('current')"
-          >当前文件 <span class="tab-count">{{ countByModeAndScope(activeMode, 'current') }}</span></button>
-          <button
-            class="search-subtab"
-            :class="{ active: activeScope === 'global' }"
-            @mousedown.prevent="onScopeChange('global')"
-          >全局文件 <span class="tab-count">{{ countByModeAndScope(activeMode, 'global') }}</span></button>
-        </div>
-
-        <!-- 结果状态提示 -->
-        <div v-if="visibleItems.length === 0 && !currentSearchRunning" class="search-status">
-          {{ activeScope === 'current' && !currentFilePath ? '当前未打开文件，请先打开一个文件' : '未找到匹配内容' }}
-        </div>
-
-        <div
-          v-for="item in visibleItems"
-          :key="item.filePath + '::' + item.nodeUid + '::' + (item.semanticWord || '')"
-          class="search-result-item"
-          @mousedown.prevent="openResult(item)"
-        >
-          <div class="result-file-name">
-            <span
-              v-if="item.isTag"
-              class="tag-atomic"
-            >标签</span>
-            <span class="result-file-name-text">{{ item.fileName }}</span>
-            <span class="result-file-name-tags">
-              <span
-                v-if="item.semanticWord"
-                class="semantic-tag"
-                :title="'语义匹配: ' + item.semanticWord + (item.similarity != null ? '（' + item.similarity + '%）' : '')"
-              >语义</span>
-              <span v-if="item.similarity != null" class="similarity-badge" title="近似匹配值">{{ item.similarity }}%</span>
-            </span>
+      <div v-if="showResults && (results.length > 0 || searching || semanticSearching || searched)" class="search-results">
+        <template v-if="results.length">
+          <div class="search-tabs">
+            <button
+              class="search-tab"
+              :class="{ active: activeTab === 'keyword' }"
+              @mousedown.prevent="activeTab = 'keyword'"
+            >关键词 <span class="tab-count">{{ keywordItems.length }}</span></button>
+            <button
+              class="search-tab"
+              :class="{ active: activeTab === 'semantic' }"
+              @mousedown.prevent="activeTab = 'semantic'"
+            >语义
+              <span class="tab-count">{{ semanticItems.length }}</span>
+              <span v-if="semanticSearching" class="semantic-spinner tab-spinner"></span>
+            </button>
           </div>
-          <div class="result-snippet" v-html="item.safeSnippet"></div>
-        </div>
+          <div v-if="activeTab === 'semantic' && !semanticItems.length" class="search-status">
+            {{ semanticSearching ? '语义检索中...' : (semanticTimeout ? '语义检索超时（模型响应慢），关键词结果不受影响' : '暂无语义匹配结果') }}
+          </div>
+          <div
+            v-for="item in safeTabItems"
+            :key="item.filePath + '::' + item.nodeUid"
+            class="search-result-item"
+            @mousedown.prevent="openResult(item)"
+          >
+            <div class="result-file-name">
+              <span
+                v-if="item.isTag"
+                class="tag-atomic"
+              >标签</span>
+              <el-icon v-else class="result-file-icon" :style="{ color: fileIcon(item.fileName).color }">
+                <component :is="fileIcon(item.fileName).icon" />
+              </el-icon>
+              <span class="result-file-name-text">{{ item.fileName }}</span>
+              <span class="result-file-name-tags">
+                <span
+                  v-if="item.semanticWord"
+                  class="semantic-tag"
+                  :title="'语义匹配: ' + item.semanticWord + (item.similarity != null ? '（' + item.similarity + '%）' : '')"
+                >语义</span>
+                <span v-if="item.similarity != null" class="similarity-badge" title="近似匹配值">{{ item.similarity }}%</span>
+              </span>
+            </div>
+            <div class="result-snippet" v-html="item.safeSnippet"></div>
+          </div>
+        </template>
+        <div v-else-if="searching" class="search-status">关键词搜索中...</div>
+        <div v-else-if="semanticSearching" class="search-status">语义检索中...</div>
+        <div v-else-if="query.trim()" class="search-status">未找到匹配内容</div>
       </div>
     </Transition>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { searchService } from '../services/searchService'
 import { getTags } from '../utils/tagStore'
 import { sanitizeSafeHtml } from '../utils/sanitizeHtml'
+import { Files, Reading, Grid, Memo, Document } from '@element-plus/icons-vue'
 
-const props = defineProps({
-  currentFilePath: { type: String, default: '' }
-})
 const emit = defineEmits(['open-file'])
 
 const inputRef = ref(null)
 const query = ref('')
-// 两套结果分别存储，互不干扰
-const keywordResultsAll = ref([])     // 全局关键词命中（未过滤当前文件）
-const semanticResultsAll = ref([])    // 全局语义命中
-const keywordSearching = ref(false)
+const results = ref([])
+const searching = ref(false)
 const semanticSearching = ref(false)
-const semanticRan = ref(false)        // 用户是否已触发过一次语义检索（避免每次切 tab 都重跑）
+const semanticTimeout = ref(false)
 const showResults = ref(false)
 const searched = ref(false)
-const activeMode = ref('keyword')     // 'keyword' | 'semantic'
-const activeScope = ref('global')     // 'global' | 'current'
+const activeTab = ref('keyword')
 let debounceTimer = null
 let semanticSeq = 0
 
-// 兼容旧引用：让模板里 searching 表示"当前模式下还在搜索中"
-const searching = computed(() => activeMode.value === 'keyword' ? keywordSearching.value : false)
-const currentSearchRunning = computed(() => keywordSearching.value || semanticSearching.value)
+const keywordItems = computed(() => results.value.filter(r => !r.semanticWord))
+// 语义结果按相似度从高到低排序（同分保持命中顺序）
+const semanticItems = computed(() =>
+  results.value
+    .filter(r => r.semanticWord)
+    .sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0))
+)
+const tabItems = computed(() => activeTab.value === 'keyword' ? keywordItems.value : semanticItems.value)
 
-// 标签搜索：匹配标签名 + 备注，结果项带 isTag 标记
+// 文件类型图标（与目录树保持一致的辨识方式）
+const fileIcon = (name) => {
+  const ext = String(name || '').split('.').pop().toLowerCase()
+  if (ext === 'pdf') return { icon: Files, color: '#e5484d' }
+  if (ext === 'pptx') return { icon: Reading, color: '#ff8f00' }
+  if (['xlsx', 'xls', 'csv', 'tsv'].includes(ext)) return { icon: Grid, color: '#1d9d59' }
+  if (['md', 'markdown'].includes(ext)) return { icon: Reading, color: '#4a6cf7' }
+  if (['txt', 'log', 'json', 'html', 'xml'].includes(ext)) return { icon: Memo, color: '#8a8f99' }
+  if (ext === 'smm') return { icon: Document, color: '#f59e0b' }
+  return { icon: Document, color: '#8a8f99' }
+}
+
+const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const highlightSnippet = (snippet, item) => {
+  let out = escapeHtml(snippet || '')
+  const terms = []
+  if (query.value.trim()) terms.push(query.value.trim())
+  if (Array.isArray(item.hitTerms)) terms.push(...item.hitTerms)
+  for (const raw of new Set(terms.filter(Boolean))) {
+    const et = escapeRegExp(escapeHtml(raw))
+    if (!et) continue
+    out = out.replace(new RegExp(et, 'gi'), (m) => `<mark>${m}</mark>`)
+  }
+  return out
+}
+
+// 安全消毒后的搜索结果（避免 XSS），并高亮命中关键词
+const safeTabItems = computed(() =>
+  tabItems.value.map(item => ({
+    ...item,
+    safeSnippet: sanitizeSafeHtml(highlightSnippet(item.snippet || '', item))
+  }))
+)
+
+const runKeywordSearch = async (q) => {
+  const res = await searchService.search(q)
+  const dbResults = (res && res.results) || []
+  // 目录树实时兜底：补充尚未索引的文档内容，让 Ctrl+F 能搜到 PDF/DOCX/PPTX 等文件。
+  try {
+    const live = await searchService.searchDirectoryTree(q)
+    if (live?.results?.length) {
+      const merged = new Map()
+      for (const r of [...dbResults, ...live.results]) {
+        const key = `${r.filePath}::${r.nodeUid || ''}`
+        if (!merged.has(key)) merged.set(key, r)
+      }
+      return [...merged.values()]
+    }
+  } catch {
+    // 实时兜底失败不影响 DB 结果
+  }
+  return dbResults
+}
+
+// 标签搜索：匹配标签名 + 备注，结果项带 isTag 标记（渲染层显示「标签」原子标识）
 const searchTags = (q) => {
   try {
     const tags = getTags()
@@ -126,10 +173,11 @@ const searchTags = (q) => {
       const hitName = name.includes(ql)
       const hitNote = note.includes(ql)
       if (!hitName && !hitNote) continue
+      // 命中词高亮：优先展示备注命中，否则标签名
       const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       const mark = (s) => {
         const e = esc(s)
-        const eq = esc(q).replace(/[.*+?^${}()|[\]\\]/g, '\\\\$&')
+        const eq = esc(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
         return e.replace(new RegExp(eq, 'gi'), (m) => `<mark>${m}</mark>`)
       }
       const snippet = hitNote
@@ -153,165 +201,101 @@ const searchTags = (q) => {
   } catch { return [] }
 }
 
-const runKeywordSearch = async (q) => {
-  const res = await searchService.search(q)
-  // eslint-disable-next-line no-console
-  console.log('[SearchBar DEBUG] q=', JSON.stringify(q), 'results.length=', (res?.results || []).length, 'first.filePath=', res?.results?.[0]?.filePath?.slice(-30))
-  return (res && res.results) || []
-}
-
-// 语义检索：向量检索 + BM25 RRF 融合；embedding 不可用时自动降级纯 BM25
-const runSemanticSearch = async (q) => {
+// 语义检索：完全本地向量召回，不依赖大模型关键词扩展。
+// 向量库未就绪或没有相关文档时返回空，关键词结果不受影响。
+const runSemanticSearch = async (q, keywordResults) => {
   const seq = ++semanticSeq
+  const seen = new Set(keywordResults.map(r => `${r.filePath}::${r.nodeUid}`))
   try {
-    const res = await searchService.semanticSearch(q)
+    const hits = await searchService.vectorSearch(q, 20)
     if (seq !== semanticSeq) return []
-    const items = (res?.results || []).map((r, i) => ({
-      ...r,
-      source: 'semantic',
-      semanticWord: r.vectorScore ? '向量匹配' : '语义相关',
-      similarity: r.vectorScore ? Math.round(r.vectorScore * 100) : null
-    }))
+    if (!hits.length) {
+      // 向量库还没有相关文档时，退化为本地混合 BM25，避免语义页完全空白。
+      const [hybridRes, liveRes] = await Promise.all([
+        searchService.semanticSearch(q, []),
+        searchService.searchDirectoryTree(q).catch(() => ({ results: [] }))
+      ])
+      if (seq !== semanticSeq) return []
+      const merged = new Map()
+      for (const r of [...(hybridRes.results || []), ...(liveRes.results || [])]) {
+        const key = `${r.filePath}::${r.nodeUid || ''}`
+        if (seen.has(key)) continue
+        if (!merged.has(key)) merged.set(key, r)
+      }
+      return [...merged.values()].slice(0, 30).map(r => ({
+        ...r,
+        semanticWord: r.hitTerms?.length ? r.hitTerms.join('+') : '语义',
+        similarity: Math.max(0, Math.min(100, Math.round((r.score ?? 0) * 100)))
+      }))
+    }
+    const items = []
+    for (const hit of hits || []) {
+      const key = `${hit.filePath}::`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const text = String(hit.text || '').slice(0, 200)
+      items.push({
+        filePath: hit.filePath,
+        fileName: hit.fileName,
+        nodeUid: '',
+        fileType: 'doc',
+        snippet: text,
+        semanticWord: '向量',
+        similarity: Math.max(0, Math.min(100, Math.round((hit.score ?? 0) * 100)))
+      })
+      if (items.length >= 20) break
+    }
     return items
-  } catch (err) {
-    console.error('[搜索] 语义检索失败:', err)
+  } catch {
     return []
-  }
-}
-
-const doKeywordSearch = async (q) => {
-  if (!q) return []
-  keywordSearching.value = true
-  try {
-    const [hits, tagHits] = await Promise.all([
-      runKeywordSearch(q),
-      Promise.resolve(searchTags(q))
-    ])
-    // 标签结果带 isTag=true；普通命中用 source='keyword' 标记用于区分计数
-    const items = [
-      ...tagHits.map(t => ({ ...t, source: 'keyword' })),
-      ...hits.map(h => ({ ...h, source: 'keyword' }))
-    ]
-    return items
-  } catch (err) {
-    console.error('[搜索] 关键词搜索失败:', err)
-    return []
-  } finally {
-    keywordSearching.value = false
-  }
-}
-
-const doSemanticSearch = async () => {
-  const q = query.value.trim()
-  if (!q) return
-  semanticSearching.value = true
-  const myQ = q
-  try {
-    const items = await runSemanticSearch(q)
-    // 守卫：query 已变更则丢弃本次结果，避免旧回调覆盖新结果
-    if (query.value.trim() !== myQ) return
-    semanticResultsAll.value = items
-  } finally {
-    semanticSearching.value = false
-    semanticRan.value = true
   }
 }
 
 const doSearch = async () => {
   const q = query.value.trim()
   if (!q) {
-    keywordResultsAll.value = []
-    semanticResultsAll.value = []
+    results.value = []
     searched.value = false
-    semanticRan.value = false
+    semanticSeq++
+    semanticSearching.value = false
+    semanticTimeout.value = false
     return
   }
+  searching.value = true
   showResults.value = true
-  searched.value = true
-  // 每次查询都重跑关键词；同时异步触发语义（用户已经习惯语义并行追加，不再需要手动点）
-  // 关键：doKeywordSearch 异步等待期间用户可能继续输入，doSearch 也会被再次触发；
-  // 因此用本轮的 q 快照做守卫，回调时仅当 query 仍是本轮的 q 才覆盖结果，
-  // 避免晚到的并发回调把更新后的结果覆盖回旧结果（"有时候灵有时候不灵"的根因）。
-  const myQ = q
-  const items = await doKeywordSearch(myQ)
-  // 守卫：query 已变更（用户继续输入），丢弃本次结果
-  if (query.value.trim() !== myQ) return
-  keywordResultsAll.value = items
-  // 语义不阻塞关键词展示；切到语义 tab 时也能立即看到结果
-  if (!semanticRan.value && !semanticSearching.value) {
-    doSemanticSearch()
+  activeTab.value = 'keyword'
+  semanticTimeout.value = false
+  try {
+    const keywordResults = await runKeywordSearch(q)
+    // 防过期：查询期间输入可能已变化
+    if (query.value.trim() !== q) return
+    // 标签结果（标签名 + 备注命中）排在关键词结果前面
+    const tagResults = searchTags(q)
+    results.value = [...tagResults, ...keywordResults]
+  } catch (err) {
+    console.error('[搜索] 失败:', err)
+    results.value = []
+  } finally {
+    searching.value = false
+    searched.value = true
   }
+
+  // 语义增强（异步，不阻塞关键词结果展示）
+  semanticSearching.value = true
+  const baseResults = results.value
+  runSemanticSearch(q, baseResults).then(semanticItems => {
+    if (query.value.trim() !== q) return
+    results.value = [...baseResults, ...semanticItems]
+  }).finally(() => {
+    if (query.value.trim() === q) semanticSearching.value = false
+  })
 }
-
-// 当前 scope 下的关键词/语义结果
-// 关键：DB 里的 file_path 是反斜杠形式，App.vue 通过 normalizeFileId 把 currentFilePath 转成正斜杠，
-// 直接 it.filePath === props.currentFilePath 永远不匹配；统一用 normalize 后再比较。
-function normalizeFilePath(p) {
-  if (!p) return ''
-  return String(p).replace(/[\\\/]+/g, '/').replace(/\/+$/, '')
-}
-function filterByScope(items, scope) {
-  if (scope === 'current') {
-    if (!props.currentFilePath) return []
-    const target = normalizeFilePath(props.currentFilePath)
-    return items.filter(it => normalizeFilePath(it.filePath) === target)
-  }
-  return items
-}
-const keywordItems = computed(() => filterByScope(keywordResultsAll.value, activeScope.value))
-const semanticItems = computed(() =>
-  filterByScope(semanticResultsAll.value, activeScope.value)
-    .slice()
-    .sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0))
-)
-
-const currentVisible = computed(() => activeMode.value === 'keyword' ? keywordItems.value : semanticItems.value)
-const visibleItems = computed(() => currentVisible.value.map(item => ({
-  ...item,
-  safeSnippet: sanitizeSafeHtml(item.snippet || '')
-})))
-
-const hasAnyResult = computed(() => keywordResultsAll.value.length > 0 || semanticResultsAll.value.length > 0)
-
-function countByModeAndScope(mode, scope) {
-  if (mode === 'keyword') return filterByScope(keywordResultsAll.value, scope).length
-  return filterByScope(semanticResultsAll.value, scope).length
-}
-
-const onModeChange = (mode) => {
-  if (activeMode.value === mode) return
-  activeMode.value = mode
-  // doSearch 默认已经异步触发过语义，这里只补一次兜底（用户清空后又输入不会自动跑，
-  // 此时切到语义 tab 仍能立即看到结果）
-  if (mode === 'semantic' && !semanticRan.value && query.value.trim() && !semanticSearching.value && semanticResultsAll.value.length === 0) {
-    triggerSemantic()
-  }
-}
-
-const onScopeChange = (scope) => {
-  if (activeScope.value === scope) return
-  activeScope.value = scope
-}
-
-// 用户主动点击「立即触发语义检索」或切到语义 tab 时调用
-const triggerSemantic = async () => {
-  const q = query.value.trim()
-  if (!q || semanticSearching.value) return
-  await doSemanticSearch()
-}
-
-// 当前打开文件变化时，重新过滤但不需要重跑
-watch(() => props.currentFilePath, () => {
-  // activeScope 是 computed 依赖 props，无需重搜
-})
 
 const onInput = () => {
   if (debounceTimer) clearTimeout(debounceTimer)
   if (!query.value.trim()) {
-    keywordResultsAll.value = []
-    semanticResultsAll.value = []
+    results.value = []
     searched.value = false
-    semanticRan.value = false
     return
   }
   debounceTimer = setTimeout(doSearch, 300)
@@ -336,16 +320,17 @@ const openResult = (item) => {
 
 const clearSearch = () => {
   query.value = ''
-  keywordResultsAll.value = []
-  semanticResultsAll.value = []
+  results.value = []
   searched.value = false
-  semanticRan.value = false
   semanticSeq++
   semanticSearching.value = false
+  semanticTimeout.value = false
 }
 
 const onBlur = () => {
-  setTimeout(() => { showResults.value = false }, 200)
+  setTimeout(() => {
+    showResults.value = false
+  }, 200)
 }
 
 const focus = () => {
@@ -432,7 +417,7 @@ defineExpose({ focus })
   top: 100%;
   left: 0;
   right: 0;
-  max-height: 460px;
+  max-height: 400px;
   overflow-y: auto;
   background: var(--popover-bg, #ffffff);
   border: 1px solid var(--border-color, #e5e5e5);
@@ -449,16 +434,10 @@ defineExpose({ focus })
   text-align: center;
 }
 
-.run-semantic-link {
-  color: var(--apple-blue, #007aff);
-  text-decoration: underline;
-  cursor: pointer;
-}
-
 .search-tabs {
   display: flex;
   gap: 4px;
-  padding: 8px 10px 0;
+  padding: 8px 10px 6px;
   background: var(--search-bg, #fafafa);
   border-bottom: 1px solid var(--border-color, #f0f0f0);
   position: sticky;
@@ -473,14 +452,12 @@ defineExpose({ focus })
   justify-content: center;
   gap: 5px;
   border: 1px solid var(--border-color, #e5e5e5);
-  border-bottom: none;
   background: var(--popover-bg, #ffffff);
   color: var(--text-secondary, #86868b);
   font-size: 12px;
-  font-weight: 600;
-  line-height: 24px;
+  line-height: 22px;
   padding: 0 10px;
-  border-radius: 6px 6px 0 0;
+  border-radius: 6px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
@@ -490,46 +467,6 @@ defineExpose({ focus })
 }
 
 .search-tab.active {
-  background: var(--popover-bg, #ffffff);
-  border-color: var(--border-color, #e5e5e5);
-  border-bottom: 1px solid var(--popover-bg, #ffffff);
-  color: var(--apple-blue, #007aff);
-  margin-bottom: -1px;
-}
-
-.search-subtabs {
-  display: flex;
-  gap: 6px;
-  padding: 6px 10px 8px;
-  background: var(--search-bg, #fafafa);
-  border-bottom: 1px solid var(--border-color, #f0f0f0);
-  position: sticky;
-  top: 32px;
-  z-index: 2;
-}
-
-.search-subtab {
-  flex: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  border: 1px solid var(--border-color, #e5e5e5);
-  background: var(--popover-bg, #ffffff);
-  color: var(--text-secondary, #86868b);
-  font-size: 12px;
-  line-height: 22px;
-  padding: 0 10px;
-  border-radius: 5px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-.search-subtab:hover {
-  color: var(--text-primary, #1d1d1f);
-}
-
-.search-subtab.active {
   background: var(--apple-blue, #007aff);
   border-color: var(--apple-blue, #007aff);
   color: #ffffff;
@@ -544,7 +481,7 @@ defineExpose({ focus })
   color: var(--text-secondary, #86868b);
 }
 
-.search-subtab.active .tab-count {
+.search-tab.active .tab-count {
   background: rgba(255, 255, 255, 0.25);
   color: #ffffff;
 }
@@ -553,6 +490,16 @@ defineExpose({ focus })
   width: 10px;
   height: 10px;
   border-width: 1.5px;
+}
+
+.search-tab .semantic-spinner {
+  border-color: rgba(0, 122, 255, 0.25);
+  border-top-color: #007aff;
+}
+
+.search-tab.active .semantic-spinner {
+  border-color: rgba(255, 255, 255, 0.35);
+  border-top-color: #ffffff;
 }
 
 .search-result-item {
@@ -587,6 +534,10 @@ defineExpose({ focus })
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+}
+.result-file-icon {
+  flex-shrink: 0;
+  font-size: 14px;
 }
 .tag-atomic {
   display: inline-block;

@@ -33,12 +33,30 @@ export function stripThinkBlocks(text) {
 }
 
 /**
+ * 提取文本中全部 <think>...</think> 块的内容，拼接后返回
+ * 用于将思考过程单独展示，而不是混在正文中
+ */
+export function extractThinkBlocks(text) {
+  if (typeof text !== 'string' || !text.includes(OPEN_TAG)) return ''
+  const parts = []
+  const regex = /<think>([\s\S]*?)<\/think>/g
+  let match
+  while ((match = regex.exec(text)) !== null) {
+    parts.push(match[1].trim())
+  }
+  return parts.join('\n\n')
+}
+
+/**
  * 流式增量过滤器：标签可能被拆成多个 chunk（如 "<thi" + "nk>"）
  * push(delta) 返回本次新增的可见文本（可能为空）；flush() 在流结束时返回残留的可见文本
+ * 可选 onThink 回调：每当有新的思考内容片段时触发（用于实时显示思考过程）
  */
-export function createThinkStreamFilter() {
+export function createThinkStreamFilter(options = {}) {
+  const onThink = typeof options.onThink === 'function' ? options.onThink : null
   let insideThink = false
   let pending = ''
+  let thinkBuffer = '' // 累积当前思考块的内容
 
   const push = (delta) => {
     if (typeof delta !== 'string' || delta === '') return ''
@@ -53,6 +71,7 @@ export function createThinkStreamFilter() {
           out += buf.slice(0, i)
           buf = buf.slice(i + OPEN_TAG.length)
           insideThink = true
+          thinkBuffer = ''
           continue
         }
         const hold = partialTagLength(buf, OPEN_TAG)
@@ -67,13 +86,26 @@ export function createThinkStreamFilter() {
       } else {
         const i = buf.indexOf(CLOSE_TAG)
         if (i !== -1) {
+          const thinkContent = buf.slice(0, i)
+          thinkBuffer += thinkContent
+          if (onThink && thinkContent) onThink(thinkContent, false) // false = 未结束
           buf = buf.slice(i + CLOSE_TAG.length)
           insideThink = false
+          if (onThink) onThink('', true) // true = 思考块结束
           continue
         }
-        // 思考内容中等待闭合标签，其余直接丢弃；末尾可能是半截 </think>，暂存
+        // 思考内容中等待闭合标签；末尾可能是半截 </think>，暂存
         const hold = partialTagLength(buf, CLOSE_TAG)
-        pending = hold > 0 ? buf.slice(buf.length - hold) : ''
+        if (hold > 0) {
+          const thinkContent = buf.slice(0, buf.length - hold)
+          thinkBuffer += thinkContent
+          if (onThink && thinkContent) onThink(thinkContent, false)
+          pending = buf.slice(buf.length - hold)
+        } else {
+          thinkBuffer += buf
+          if (onThink && buf) onThink(buf, false)
+          pending = ''
+        }
         buf = ''
       }
     }

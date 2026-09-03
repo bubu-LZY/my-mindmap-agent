@@ -8,67 +8,7 @@ const crypto = require('crypto')
 const STORE_KEY = 'agentSkills'
 const SKILL_DIR_NAME = 'skills'
 
-// ============ 内置 Skill：AI 能力扩展引导 ============
-// 用途：当用户说"帮我写个 Skill / 工具 / MCP"时，AI 可自动调用本 Skill 加载引导流程
-// - 固定 id：避免与用户创建的 Skill 重名；AI 通过 invoke_skill(skillId=...) 精准加载
-// - source='builtin'：在 UI 上可识别为"系统预设"，UI 决定是否允许编辑/删除
-// - 文档文件：docs/skill-creation-guide.md（开发态与打包后都能定位到）
-const BUILTIN_SKILL_ID = '__builtin_skill_creation_guide__'
-const BUILTIN_SKILL_NAME = 'AI 能力扩展引导'
-const BUILTIN_SKILL_DESC = '当你希望添加 Skill、自定义工具或 MCP 服务时，自动加载此引导流程。'
-
-const resolveBuiltinSkillPath = () => {
-  // 打包后：app.getAppPath() 指向 resources/app.asar 或 app 目录
-  // 开发态：指向项目根目录；兜底从 __dirname 往上一层（electron/ipc → electron → 根目录）
-  const candidates = [
-    require('path').join(process.cwd(), 'docs', 'skill-creation-guide.md'),
-    require('path').join(__dirname, '..', '..', 'docs', 'skill-creation-guide.md')
-  ]
-  for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p } catch (e) {}
-  }
-  return ''
-}
-
-const loadBuiltinSkillContent = () => {
-  const p = resolveBuiltinSkillPath()
-  if (!p) return ''
-  try { return fs.readFileSync(p, 'utf8') } catch (e) { return '' }
-}
-
-// 启动时调用：确保内置 Skill 已登记到 store（同名 name 不重复创建；用户删了就重新建）
-const ensureBuiltinSkill = () => {
-  const content = loadBuiltinSkillContent()
-  if (!content) return // 文档缺失（开发期未放置）静默跳过，不影响其他功能
-  const skills = listSkills()
-  // 用固定 id 找（避免 name 重名导致覆盖用户同名 Skill）
-  const existing = skills.find(s => s.id === BUILTIN_SKILL_ID)
-  const next = normalizeSkill({
-    id: BUILTIN_SKILL_ID,
-    name: BUILTIN_SKILL_NAME,
-    description: BUILTIN_SKILL_DESC,
-    instructions: content,
-    enabled: true,
-    autoInvoke: false, // 始终手动触发：避免 AI 在普通对话里无故加载
-    source: 'builtin'
-  })
-  if (existing) {
-    // 已存在：仅当 instructions 不同或被禁用时才更新（用户禁用则尊重）
-    if (existing.enabled === false) return
-    const idx = skills.findIndex(s => s.id === BUILTIN_SKILL_ID)
-    if (existing.instructions !== content) {
-      skills[idx] = { ...existing, ...next, createdAt: existing.createdAt, updatedAt: Date.now() }
-      saveSkills(skills)
-    }
-    return
-  }
-  skills.push(next)
-  saveSkills(skills)
-}
-
 const listSkills = () => {
-  // 每次 list 时确保内置 Skill 存在（用户删除后可自动重建）
-  try { ensureBuiltinSkill() } catch (e) {}
   const list = store.get(STORE_KEY, []) || []
   return list.filter(s => s && s.id)
 }
@@ -86,7 +26,7 @@ const normalizeSkill = (input = {}) => {
     instructions: String(input.instructions || '').trim(),
     enabled: input.enabled !== false,
     autoInvoke: input.autoInvoke === true,
-    source: ['builtin', 'ai', 'import'].includes(input.source) ? input.source : 'manual',
+    source: input.source === 'ai' ? 'ai' : (input.source === 'import' ? 'import' : 'manual'),
     dir: String(input.dir || ''),
     createdAt: Number(input.createdAt) || Date.now(),
     updatedAt: Number(input.updatedAt) || Date.now()
@@ -111,8 +51,6 @@ const updateSkill = (id, patch) => {
 }
 
 const deleteSkill = (id) => {
-  // 内置 Skill 不允许删除（避免误删；如确需关闭，前端用 enabled=false 即可）
-  if (id === BUILTIN_SKILL_ID) throw new Error('系统内置 Skill 不可删除（可点停用按钮关闭）')
   const skills = listSkills().filter(s => s.id !== id)
   saveSkills(skills)
   return true
@@ -177,7 +115,6 @@ const buildSkillFromMd = (fileName, relativePath, content) => {
 }
 
 // 解压 zip，返回扁平文件列表（跳过 __MACOSX / .DS_Store 等无关内容）
-// 安全加固：校验每个文件的相对路径，防止 Zip Slip 路径遍历
 const unzipFiles = async (zipEntry) => {
   const buf = Buffer.from(zipEntry.base64 || '', 'base64')
   const zip = await JSZip.loadAsync(buf)
@@ -186,14 +123,9 @@ const unzipFiles = async (zipEntry) => {
   zip.forEach((relPath, file) => {
     if (file.dir) return
     if (/(^|\/)__MACOSX\//.test(relPath) || /(^|\/)\.DS_Store$/.test(relPath)) return
-    // Zip Slip 防护：拒绝含 .. 的路径、绝对路径、空字节等
-    const normalized = String(relPath || '').replace(/\\/g, '/')
-    if (!normalized || normalized.includes('..') || normalized.startsWith('/') || normalized.includes('\0')) {
-      return // 跳过可疑路径文件
-    }
     jobs.push((async () => {
       const content = await file.async('nodebuffer')
-      out.push({ name: normalized.split('/').pop(), relativePath: normalized, buf: content })
+      out.push({ name: relPath.split('/').pop(), relativePath: relPath, buf: content })
     })())
   })
   await Promise.all(jobs)
@@ -237,17 +169,12 @@ const writeSkillToDir = (skill, fullContent, group) => {
     suffix++
   }
   fs.mkdirSync(target, { recursive: true })
-  const targetResolved = path.resolve(target)
   fs.writeFileSync(path.join(target, 'SKILL.md'), fullContent, 'utf8')
   const rootDir = group.rootDir || ''
   for (const f of group.supporting || []) {
     const rel = rootDir ? f.relativePath.slice(rootDir.length + 1) : f.relativePath
     if (!rel) continue
-    // 二次防护：支持文件路径不得包含 ..，且解析后必须在 target 内
-    if (rel.includes('..')) continue
     const dest = path.join(target, rel)
-    const destResolved = path.resolve(dest)
-    if (!destResolved.startsWith(targetResolved + path.sep)) continue
     fs.mkdirSync(path.dirname(dest), { recursive: true })
     fs.writeFileSync(dest, f.buf)
   }
@@ -314,17 +241,6 @@ ipcMain.handle('skills:openDir', async () => {
   const dir = ensureUserSkillDir()
   const err = await shell.openPath(dir)
   return { ok: !err, error: err || '', dir }
-})
-// 让前端能拿到内置 Skill 创建指南的 SKILL.md 文本（用于"下载 Skill 创建指南"按钮）
-ipcMain.handle('skills:getBuiltinGuideContent', async () => {
-  const p = resolveBuiltinSkillPath()
-  if (!p) return { ok: false, error: '内置 Skill 创建指南文件不存在' }
-  try {
-    const content = fs.readFileSync(p, 'utf-8')
-    return { ok: true, content, path: p }
-  } catch (e) {
-    return { ok: false, error: e.message }
-  }
 })
 
 module.exports = {}

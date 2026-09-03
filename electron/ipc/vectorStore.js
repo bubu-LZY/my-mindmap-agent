@@ -1,137 +1,129 @@
 /**
- * 文档向量库（主进程，三期：本地语义检索）
- * - 存储每个文件的分块/节点向量 + 文本（userData/doc_vectors.json）
- * - 支持文档（doc）和思维导图（smm）两类文件
- * - 向量已归一化（embeddingService 输出），余弦相似度 = 点积
- * - 个人知识库规模（万级 chunk）全量内存扫描即可毫秒级返回
+ * 文档向量库（主进程，文件分片存储）
+ * - 每个文档一个 JSON 分片：chunks + vectors
+ * - 搜索时逐个分片读取，避免一次性把全库向量读进内存
+ * - 大文档按批 append，索引过程内存峰值可控
  */
 const { ipcMain, app } = require('electron')
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 
-// store 结构：
-// {
-//   [filePath]: {
-//     fileName, mtime, fileType,  // fileType: 'doc' | 'smm'
-//     chunks: string[],            // 分块文本 / 节点文本
-//     vectors: number[][],         // 对应向量
-//     nodeUids?: string[]          // 仅 smm：节点 uid，与 chunks/vectors 一一对应
-//   }
-// }
-let store = null
-let loaded = false
-let saveTimer = null
+const MAX_CHUNKS_PER_FILE = 800
 
-function getStorePath() {
+function getStoreDir() {
+  return path.join(app.getPath('userData'), 'doc_vectors')
+}
+
+function getLegacyPath() {
   return path.join(app.getPath('userData'), 'doc_vectors.json')
 }
 
-function loadStore() {
-  if (loaded) return
-  loaded = true
+function ensureDir() {
+  const dir = getStoreDir()
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function shardName(filePath) {
+  return crypto.createHash('sha256').update(String(filePath || '')).digest('hex') + '.json'
+}
+
+function shardPath(filePath) {
+  return path.join(ensureDir(), shardName(filePath))
+}
+
+function readShard(filePath) {
+  const p = shardPath(filePath)
+  if (!fs.existsSync(p)) return null
   try {
-    if (fs.existsSync(getStorePath())) {
-      const parsed = JSON.parse(fs.readFileSync(getStorePath(), 'utf8'))
-      store = Object.create(null)
-      if (parsed && typeof parsed === 'object') {
-        for (const key of Object.keys(parsed)) {
-          store[key] = parsed[key]
-        }
-      }
-    } else {
-      store = Object.create(null)
-    }
-  } catch (e) {
-    console.error('[Vector] 向量库加载失败:', e)
-    store = Object.create(null)
+    const raw = JSON.parse(fs.readFileSync(p, 'utf8'))
+    if (!raw || !Array.isArray(raw.chunks) || !Array.isArray(raw.vectors)) return null
+    return raw
+  } catch {
+    return null
   }
-  if (!store || typeof store !== 'object') store = Object.create(null)
 }
 
-// 安全键名校验：防止原型污染
-function safeKey(key) {
-  const k = String(key || '')
-  if (k === '__proto__' || k === 'constructor' || k === 'prototype') {
-    return '__unsafe_' + k
-  }
-  return k
+function writeShard(entry) {
+  const p = shardPath(entry.filePath)
+  fs.writeFileSync(p, JSON.stringify(entry), 'utf8')
 }
 
-// 安全校验向量数据：必须是数字数组，防止注入异常数据
-function validateVectors(vectors, expectedDim = null) {
-  if (!Array.isArray(vectors)) return false
-  for (let i = 0; i < vectors.length; i++) {
-    const v = vectors[i]
-    if (!Array.isArray(v)) return false
-    if (expectedDim !== null && v.length !== expectedDim) return false
-    for (let j = 0; j < v.length; j++) {
-      if (typeof v[j] !== 'number' || !Number.isFinite(v[j])) return false
-    }
+function removeShard(filePath) {
+  const p = shardPath(filePath)
+  if (fs.existsSync(p)) {
+    try { fs.unlinkSync(p) } catch {}
   }
-  return true
 }
 
-function saveStore() {
-  if (saveTimer) return
-  saveTimer = setTimeout(() => {
-    saveTimer = null
-    try {
-      fs.writeFileSync(getStorePath(), JSON.stringify(store))
-    } catch (e) {
-      console.error('[Vector] 向量库保存失败:', e)
+function migrateLegacyStore() {
+  const legacy = getLegacyPath()
+  if (!fs.existsSync(legacy)) return
+  try {
+    const old = JSON.parse(fs.readFileSync(legacy, 'utf8'))
+    if (!old || typeof old !== 'object') return
+    for (const [filePath, entry] of Object.entries(old)) {
+      if (!entry || !Array.isArray(entry.chunks) || !Array.isArray(entry.vectors)) continue
+      writeShard({
+        filePath,
+        fileName: entry.fileName || '',
+        mtime: entry.mtime || '',
+        chunks: entry.chunks.slice(0, MAX_CHUNKS_PER_FILE),
+        vectors: entry.vectors.slice(0, MAX_CHUNKS_PER_FILE)
+      })
     }
-  }, 1000)
+    try { fs.unlinkSync(legacy) } catch {}
+  } catch {}
+}
+
+function listShards() {
+  ensureDir()
+  migrateLegacyStore()
+  return fs.readdirSync(getStoreDir()).filter(f => f.endsWith('.json'))
+}
+
+function capEntry(entry) {
+  return {
+    filePath: entry.filePath || '',
+    fileName: entry.fileName || '',
+    mtime: entry.mtime || '',
+    chunks: (entry.chunks || []).slice(0, MAX_CHUNKS_PER_FILE),
+    vectors: (entry.vectors || []).slice(0, MAX_CHUNKS_PER_FILE)
+  }
 }
 
 function registerVectorHandlers() {
-  // 文档向量索引（doc 类型）
+  ensureDir()
+  migrateLegacyStore()
+
   ipcMain.handle('vector:indexDocument', async (event, { filePath, fileName, mtime, chunks, vectors }) => {
     try {
-      loadStore()
       if (!Array.isArray(chunks) || !Array.isArray(vectors) || !chunks.length || chunks.length !== vectors.length) {
         return { success: false, error: '向量与分块数量不匹配' }
       }
-      if (!validateVectors(vectors)) {
-        return { success: false, error: '向量数据格式无效' }
-      }
-      const key = safeKey(filePath)
-      store[key] = {
-        fileName: fileName || '',
-        mtime: mtime || '',
-        fileType: 'doc',
-        chunks,
-        vectors
-      }
-      saveStore()
-      return { success: true, indexed: chunks.length }
+      writeShard(capEntry({ filePath, fileName, mtime, chunks, vectors }))
+      return { success: true, indexed: Math.min(chunks.length, MAX_CHUNKS_PER_FILE) }
     } catch (e) {
       return { success: false, error: e.message }
     }
   })
 
-  // 思维导图节点向量索引（smm 类型）
-  ipcMain.handle('vector:indexMindMap', async (event, { filePath, fileName, mtime, nodes, vectors }) => {
+  ipcMain.handle('vector:appendDocument', async (event, { filePath, fileName, mtime, chunks, vectors }) => {
     try {
-      loadStore()
-      if (!Array.isArray(nodes) || !Array.isArray(vectors) || !nodes.length || nodes.length !== vectors.length) {
-        return { success: false, error: '向量与节点数量不匹配' }
+      if (!Array.isArray(chunks) || !Array.isArray(vectors) || !chunks.length || chunks.length !== vectors.length) {
+        return { success: false, error: '向量与分块数量不匹配' }
       }
-      if (!validateVectors(vectors)) {
-        return { success: false, error: '向量数据格式无效' }
-      }
-      const key = safeKey(filePath)
-      const texts = nodes.map(n => n.text || '')
-      const uids = nodes.map(n => n.uid || '')
-      store[key] = {
-        fileName: fileName || '',
-        mtime: mtime || '',
-        fileType: 'smm',
-        chunks: texts,
-        vectors,
-        nodeUids: uids
-      }
-      saveStore()
-      return { success: true, indexed: nodes.length }
+      const existing = readShard(filePath) || { filePath, fileName: fileName || '', mtime: mtime || '', chunks: [], vectors: [] }
+      const merged = capEntry({
+        filePath,
+        fileName: fileName || existing.fileName,
+        mtime: mtime || existing.mtime,
+        chunks: [...existing.chunks, ...chunks],
+        vectors: [...existing.vectors, ...vectors]
+      })
+      writeShard(merged)
+      return { success: true, indexed: merged.chunks.length }
     } catch (e) {
       return { success: false, error: e.message }
     }
@@ -139,78 +131,49 @@ function registerVectorHandlers() {
 
   ipcMain.handle('vector:remove', async (event, { filePath }) => {
     try {
-      loadStore()
-      const key = safeKey(filePath)
-      if (store[key]) {
-        delete store[key]
-        saveStore()
-      }
+      removeShard(filePath)
       return { success: true }
     } catch (e) {
       return { success: false, error: e.message }
     }
   })
 
-  // 清空全部向量（用于重建）
-  ipcMain.handle('vector:clearAll', async () => {
-    try {
-      loadStore()
-      store = Object.create(null)
-      saveStore()
-      return { success: true }
-    } catch (e) {
-      return { success: false, error: e.message }
-    }
-  })
-
-  // 列出所有已向量化的文件
-  ipcMain.handle('vector:listFiles', async () => {
-    try {
-      loadStore()
-      const files = []
-      for (const [filePath, entry] of Object.entries(store)) {
-        files.push({
-          filePath,
-          fileName: entry.fileName || '',
-          fileType: entry.fileType || 'doc',
-          mtime: entry.mtime || '',
-          vectorCount: (entry.vectors || []).length
-        })
-      }
-      return { success: true, files }
-    } catch (e) {
-      return { success: false, error: e.message, files: [] }
-    }
-  })
-
-  // 余弦（= 点积，向量已归一化）全量扫描，返回 topK 命中
   ipcMain.handle('vector:search', async (event, { queryVector, topK = 8 }) => {
     try {
-      loadStore()
       const q = Array.isArray(queryVector) ? queryVector : null
       if (!q || !q.length) return { success: false, error: '无效查询向量' }
-      const k = Math.max(1, Math.min(Number(topK) || 8, 50))
+      const k = Math.max(1, Math.min(Number(topK) || 8, 30))
       const hits = []
-      for (const [filePath, entry] of Object.entries(store)) {
+
+      let scanned = 0
+      for (const name of listShards()) {
+        scanned++
+        if (scanned % 10 === 0) await new Promise((resolve) => setImmediate(resolve))
+        const p = path.join(getStoreDir(), name)
+        let entry
+        try {
+          entry = JSON.parse(fs.readFileSync(p, 'utf8'))
+        } catch {
+          continue
+        }
         const vecs = entry.vectors || []
         for (let i = 0; i < vecs.length; i++) {
           const v = vecs[i]
           if (!Array.isArray(v) || v.length !== q.length) continue
           let dot = 0
           for (let j = 0; j < q.length; j++) dot += q[j] * v[j]
-          if (dot > 0.25) {
+          if (dot > 0.12) {
             hits.push({
-              filePath,
+              filePath: entry.filePath || '',
               fileName: entry.fileName || '',
-              fileType: entry.fileType || 'doc',
               chunkIdx: i,
               text: entry.chunks?.[i] || '',
-              nodeUid: entry.nodeUids?.[i] || '',
               score: Math.round(dot * 1000) / 1000
             })
           }
         }
       }
+
       hits.sort((a, b) => b.score - a.score)
       return { success: true, results: hits.slice(0, k) }
     } catch (e) {
@@ -220,24 +183,18 @@ function registerVectorHandlers() {
 
   ipcMain.handle('vector:getStats', async () => {
     try {
-      loadStore()
+      let files = 0
       let vectorCount = 0
-      let docCount = 0
-      let smmCount = 0
-      for (const entry of Object.values(store)) {
-        const vc = (entry.vectors || []).length
-        vectorCount += vc
-        if (entry.fileType === 'smm') smmCount++
-        else docCount++
+      for (const name of listShards()) {
+        try {
+          const entry = JSON.parse(fs.readFileSync(path.join(getStoreDir(), name), 'utf8'))
+          files++
+          vectorCount += (entry.vectors || []).length
+        } catch {}
       }
-      return {
-        files: Object.keys(store).length,
-        vectors: vectorCount,
-        docFiles: docCount,
-        smmFiles: smmCount
-      }
+      return { files, vectors: vectorCount }
     } catch (e) {
-      return { files: 0, vectors: 0, docFiles: 0, smmFiles: 0, error: e.message }
+      return { files: 0, vectors: 0, error: e.message }
     }
   })
 }

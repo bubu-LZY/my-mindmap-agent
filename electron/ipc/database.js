@@ -27,17 +27,11 @@ async function initDatabase() {
   }
 
   // sql.js 的 WASM 构建不含 FTS5 模块，使用普通表 + LIKE 实现关键词检索
-  // 仅当 search_index 是 FTS5 虚拟表时才删除（旧版本遗留），普通表必须保留
+  // 清理历史遗留的 FTS5 虚拟表（建表失败时可能存在残留）
   try {
-    const vtabCheck = db.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='search_index'")
-    if (vtabCheck.length && vtabCheck[0].values.length) {
-      const sql = String(vtabCheck[0].values[0][0] || '')
-      if (sql.toUpperCase().includes('VIRTUAL TABLE') && sql.toUpperCase().includes('FTS5')) {
-        db.run('DROP TABLE IF EXISTS search_index')
-      }
-    }
+    db.run('DROP TABLE IF EXISTS search_index')
   } catch (e) {
-    // 旧虚拟表无法 DROP 时忽略；普通表查询失败不影响主流程
+    // 旧虚拟表无法 DROP 时忽略
   }
 
   db.run(`
@@ -196,6 +190,7 @@ const zhQueryTokenize = (s) => {
 
 let miniIndex = null
 let miniLoaded = false
+let miniLoadPromise = null
 
 function getMiniIndex() {
   if (miniIndex) return miniIndex
@@ -213,9 +208,11 @@ function getMiniIndex() {
   return miniIndex
 }
 
-// 懒加载全量：首次 BM25 检索时把 SQLite 内容构建进内存索引
+// 懒加载全量：首次 BM25 检索时把 SQLite 内容分片构建进内存索引。
+// 分片 + setImmediate 让出主进程事件循环，避免大索引一次性 addAll 卡死界面。
 function ensureMiniLoaded() {
-  if (miniLoaded) return
+  if (miniLoaded) return Promise.resolve()
+  if (miniLoadPromise) return miniLoadPromise
   const rows = queryRows('SELECT id, content, file_path, file_name, node_uid, file_type FROM search_index')
   const docs = rows.map(r => ({
     id: r.id,
@@ -225,18 +222,29 @@ function ensureMiniLoaded() {
     node_uid: r.node_uid || '',
     file_type: r.file_type || 'smm'
   }))
-  try {
-    getMiniIndex().addAll(docs)
-  } catch (e) {
-    console.error('[DB] MiniSearch 全量加载失败:', e)
-  }
-  miniLoaded = true
+  miniLoadPromise = (async () => {
+    try {
+      const mini = getMiniIndex()
+      const BATCH = 1000
+      for (let i = 0; i < docs.length; i += BATCH) {
+        mini.addAll(docs.slice(i, i + BATCH))
+        if (i + BATCH < docs.length) await new Promise((resolve) => setImmediate(resolve))
+      }
+      miniLoaded = true
+    } catch (e) {
+      console.error('[DB] MiniSearch 全量加载失败:', e)
+    } finally {
+      miniLoadPromise = null
+    }
+  })()
+  return miniLoadPromise
 }
 
 // 写入 SQLite 后同步内存索引（失败不影响主流程，下次全量重建自动修复）
 function miniAddRows(rows) {
   try {
-    ensureMiniLoaded()
+    // 未做过全量加载时不在这里同步构建：新数据已写入 SQLite，下一次全量加载会一并读入。
+    if (!miniLoaded) return
     const mini = getMiniIndex()
     for (const r of rows) {
       if (!mini.has(r.id)) {
@@ -266,7 +274,6 @@ function miniRemoveFile(filePath) {
 
 // BM25 检索：MiniSearch 打分排序；出错时降级 LIKE
 function bm25Search(query, limit = 50) {
-  ensureMiniLoaded()
   // 中文查询：用 bigram 查询分词 + AND 组合 + 关闭 fuzzy，避免单字/模糊匹配产生大量无关结果
   const hasHan = /[\u4e00-\u9fff]/.test(query)
   const mini = getMiniIndex()
@@ -345,6 +352,7 @@ function registerDatabaseHandlers() {
       if (!query || !query.trim()) return { results: [] }
       // BM25 优先（支持中文分词、模糊与相关度排序）；失败降级 LIKE 关键词
       try {
+        await ensureMiniLoaded()
         return { results: bm25Search(String(query)) }
       } catch (e) {
         console.error('[DB] BM25 检索失败，降级 LIKE:', e)
@@ -393,15 +401,9 @@ function registerDatabaseHandlers() {
       if (!Array.isArray(chunks) || !chunks.length) return { success: false, error: '没有可索引的内容' }
 
       // 同文件且未修改则跳过重索引
-      // 但如果 search_index 里没有该文件的索引条目（历史 bug：files 表被写过但 chunks 没写入），
-      // 必须强制重新索引，否则永远无法入库
       if (mtime) {
         const prev = queryRows('SELECT mtime FROM files WHERE file_path = ?', [filePath])
-        if (prev.length && prev[0].mtime === String(mtime)) {
-          const chunkCount = (queryRows('SELECT COUNT(*) as c FROM search_index WHERE file_path = ?', [filePath])[0] || {}).c || 0
-          if (chunkCount > 0) return { success: true, skipped: true, indexed: 0 }
-          // files 存在但 search_index 为空 → 强制重新索引
-        }
+        if (prev.length && prev[0].mtime === String(mtime)) return { success: true, skipped: true, indexed: 0 }
       }
 
       db.run('DELETE FROM search_index WHERE file_path = ?', [filePath])
@@ -444,32 +446,6 @@ function registerDatabaseHandlers() {
     }
   })
 
-  // 删除目录下所有文件的索引（递归子目录）
-  ipcMain.handle('db:removeDir', async (event, { dirPath }) => {
-    try {
-      await initDatabase()
-      if (!dirPath) return { success: false, error: '缺少目录路径' }
-      const prefix = dirPath.replace(/\\/g, '/').replace(/\/+$/, '') + '/'
-      // 用 LIKE 匹配前缀（Windows 下路径分隔符可能是 \\，所以两种都要考虑）
-      const rows = queryRows("SELECT file_path FROM files WHERE file_path LIKE ? OR file_path LIKE ?", [
-        prefix + '%',
-        prefix.replace(/\//g, '\\') + '%'
-      ])
-      const removed = []
-      for (const r of rows) {
-        const fp = r.file_path
-        db.run('DELETE FROM search_index WHERE file_path = ?', [fp])
-        db.run('DELETE FROM files WHERE file_path = ?', [fp])
-        miniRemoveFile(fp)
-        removed.push(fp)
-      }
-      if (removed.length > 0) saveDatabase()
-      return { success: true, removed: removed.length, files: removed }
-    } catch (e) {
-      return { success: false, error: e.message, removed: 0, files: [] }
-    }
-  })
-
   ipcMain.handle('db:getStats', async () => {
     try {
       await initDatabase()
@@ -488,20 +464,6 @@ function registerDatabaseHandlers() {
       return queryRows('SELECT file_path, file_name, file_type, mtime, indexed_at FROM files ORDER BY indexed_at DESC')
     } catch (e) {
       return []
-    }
-  })
-
-  // 获取某个文件的所有索引条目（用于向量重建）
-  ipcMain.handle('db:getFileEntries', async (event, { filePath }) => {
-    try {
-      await initDatabase()
-      const rows = queryRows(
-        'SELECT content, node_uid, file_type FROM search_index WHERE file_path = ? ORDER BY rowid ASC',
-        [filePath]
-      )
-      return { success: true, entries: rows }
-    } catch (e) {
-      return { success: false, error: e.message, entries: [] }
     }
   })
 }

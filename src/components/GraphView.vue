@@ -2,6 +2,31 @@
   <div ref="containerRef" class="graph-view">
     <div ref="graphDomRef" class="graph-canvas-wrap"></div>
 
+    <!-- 点击节点后的上下级悬浮预览（可拖动，不切回思维导图） -->
+    <div
+      v-if="previewNode"
+      class="graph-node-preview"
+      :style="{ left: previewPos.x + 'px', top: previewPos.y + 'px' }"
+      @mousedown.stop
+    >
+      <div class="gpreview-header" @mousedown.prevent="onPreviewDragStart">
+        <span class="gpreview-title">{{ previewNode.name || '节点预览' }}</span>
+        <button class="gpreview-close" @click="previewNode = null">×</button>
+      </div>
+      <div class="gpreview-body">
+        <div v-if="previewNode.fullName" class="gpreview-row gpreview-main">{{ previewNode.fullName }}</div>
+        <div v-if="previewNode.note" class="gpreview-row gpreview-note">备注：{{ previewNode.note }}</div>
+        <div v-if="previewNode.parent" class="gpreview-row">
+          <span class="gpreview-label">上级</span>{{ previewNode.parent.fullName || previewNode.parent.name || '—' }}
+        </div>
+        <div v-if="previewNode.children.length" class="gpreview-row">
+          <span class="gpreview-label">下级</span>
+          <span class="gpreview-children">{{ previewNode.children.map(c => c.fullName || c.name).join('、') }}</span>
+        </div>
+        <div v-if="!previewNode.parent && !previewNode.children.length" class="gpreview-row gpreview-empty">该节点没有上下级节点</div>
+      </div>
+    </div>
+
     <!-- 空状态 -->
     <div v-if="empty && !initError" class="graph-empty">
       <svg viewBox="0 0 24 24" fill="none" width="28" height="28">
@@ -69,6 +94,59 @@ let graph = null
 let resizeObserver = null
 let hoveredNode = null
 let ForceGraphModule = null
+let currentNodes = []
+let currentLinks = []
+
+// 关联图节点悬浮预览（点击节点后显示其上下级，不再立即切回思维导图）
+const previewNode = ref(null)
+const previewPos = ref({ x: 28, y: 28 })
+let previewDragOffset = null
+
+const nodeMapFromCurrent = () => {
+  const map = new Map()
+  for (const n of currentNodes) map.set(String(n.id), n)
+  return map
+}
+
+const buildNodePreview = (nodeId) => {
+  const id = String(nodeId || '')
+  const map = nodeMapFromCurrent()
+  const self = map.get(id)
+  if (!self) return null
+  const parentLink = currentLinks.find(l => l.type === 'tree' && String(l.target?.id ?? l.target) === id)
+  const parentId = parentLink ? String(parentLink.source?.id ?? parentLink.source) : ''
+  const childrenIds = currentLinks
+    .filter(l => l.type === 'tree' && String(l.source?.id ?? l.source) === id)
+    .map(l => String(l.target?.id ?? l.target))
+  return {
+    id,
+    name: self.name,
+    fullName: self.fullName,
+    note: self.note || '',
+    parent: parentId ? (map.get(parentId) || null) : null,
+    children: childrenIds.map(cid => map.get(cid)).filter(Boolean)
+  }
+}
+
+const onPreviewDragStart = (e) => {
+  const rect = e.currentTarget.closest('.graph-node-preview')?.getBoundingClientRect()
+  if (!rect) return
+  previewDragOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  const onMove = (ev) => {
+    if (!previewDragOffset) return
+    previewPos.value = {
+      x: Math.max(0, ev.clientX - previewDragOffset.x),
+      y: Math.max(0, ev.clientY - previewDragOffset.y)
+    }
+  }
+  const onUp = () => {
+    previewDragOffset = null
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
 
 // 富文本 HTML 转纯文本
 const htmlToText = (html) => {
@@ -261,6 +339,8 @@ const render = () => {
   if (!graph) return
   try {
     const { nodes, links } = buildGraphData()
+    currentNodes = nodes
+    currentLinks = links
     computeTreeLayout(nodes, links)
     empty.value = nodes.length === 0
     nodeCount.value = nodes.length
@@ -427,9 +507,12 @@ const initGraph = async () => {
         container.style.cursor = node ? 'pointer' : 'grab'
       })
       .onNodeClick(node => {
-        if (node && node.id) emit('locate-node', node.id)
+        if (node && node.id) {
+          previewNode.value = buildNodePreview(node.id)
+          previewPos.value = { x: 28, y: 28 }
+        }
       })
-      .onBackgroundClick(() => { /* 空实现，屏蔽默认行为 */ })
+      .onBackgroundClick(() => { previewNode.value = null })
 
     // 力导向参数（默认值）
     try {
@@ -442,54 +525,6 @@ const initGraph = async () => {
 
     render()
     initError.value = ''
-
-    // 关闭浏览器右键菜单，并接管右键拖动（默认 force-graph 只响应左键 pan）
-    const onContextMenu = (e) => e.preventDefault()
-    container.addEventListener('contextmenu', onContextMenu)
-    container.__onContextMenu = onContextMenu
-    // 自定义右键 pan：mousedown 记录起点，mousemove 调用 centerAt 调整视口，
-    // mouseup 结束。这样不需要 hack force-graph 内部事件，直接覆盖用户交互层。
-    let rightDragging = false
-    let startClientX = 0
-    let startClientY = 0
-    let startCenterX = 0
-    let startCenterY = 0
-    const onRightMouseDown = (e) => {
-      if (e.button !== 2) return
-      rightDragging = true
-      startClientX = e.clientX
-      startClientY = e.clientY
-      try {
-        const c = graph.centerAt()
-        startCenterX = c.x
-        startCenterY = c.y
-      } catch (_) { /* ignore */ }
-      container.style.cursor = 'grabbing'
-      e.preventDefault()
-    }
-    const onRightMouseMove = (e) => {
-      if (!rightDragging) return
-      // 直接调用 pan 内部：dx/dy 为屏幕像素位移
-      const dx = e.clientX - startClientX
-      const dy = e.clientY - startClientY
-      try {
-        const k = graph.zoom() || 1
-        graph.centerAt(startCenterX - dx / k, startCenterY - dy / k, 0)
-      } catch (_) { /* ignore */ }
-      e.preventDefault()
-    }
-    const onRightMouseUp = () => {
-      if (!rightDragging) return
-      rightDragging = false
-      container.style.cursor = 'grab'
-    }
-    container.addEventListener('mousedown', onRightMouseDown)
-    window.addEventListener('mousemove', onRightMouseMove)
-    window.addEventListener('mouseup', onRightMouseUp)
-    container.__rightDragCleanup = () => {
-      window.removeEventListener('mousemove', onRightMouseMove)
-      window.removeEventListener('mouseup', onRightMouseUp)
-    }
   } catch (e) {
     console.error('[GraphView] initGraph error:', e)
     initError.value = e.message || String(e)
@@ -532,12 +567,6 @@ watch(() => props.mindMapData, () => {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
-  // 清理自定义右键拖动监听器
-  try {
-    const c = graphDomRef.value
-    if (c && c.__onContextMenu) c.removeEventListener('contextmenu', c.__onContextMenu)
-    if (c && c.__rightDragCleanup) c.__rightDragCleanup()
-  } catch (e) { /* 忽略 */ }
   try { graph?._destructor?.() } catch (e) { /* 忽略 */ }
   graph = null
   ForceGraphModule = null
@@ -589,6 +618,92 @@ onBeforeUnmount(() => {
   font-size: 13px;
   z-index: 3;
   background: rgba(255, 255, 255, 0.9);
+}
+.graph-node-preview {
+  position: absolute;
+  z-index: 5;
+  width: 280px;
+  max-width: calc(100% - 24px);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  overflow: hidden;
+  user-select: none;
+}
+.gpreview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 11px;
+  background: rgba(0, 122, 255, 0.07);
+  cursor: move;
+}
+.gpreview-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1c1c1e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gpreview-close {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #8e8e93;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.gpreview-close:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: #1c1c1e;
+}
+.gpreview-body {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 300px;
+  overflow: auto;
+}
+.gpreview-row {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #3a3a3c;
+  word-break: break-word;
+}
+.gpreview-main {
+  font-weight: 600;
+  color: #1c1c1e;
+}
+.gpreview-note {
+  color: #8a6d1a;
+}
+.gpreview-label {
+  display: inline-block;
+  flex-shrink: 0;
+  margin-right: 6px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #007aff;
+  background: rgba(0, 122, 255, 0.1);
+  border-radius: 5px;
+}
+.gpreview-children {
+  color: #4b5563;
+}
+.gpreview-empty {
+  color: #a8abb2;
 }
 .err-title {
   font-weight: 600;

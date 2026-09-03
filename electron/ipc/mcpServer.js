@@ -24,25 +24,6 @@ let writeConfig = () => {}
 let tokenMatches = () => false
 let getPort = () => 0
 let isRunning = () => false
-// MCP 用户配置（用户在设置里加的 stdio / http MCP 服务）：外部 Agent 可通过 /mcp 调用它们
-let getUserMcpServers = () => []
-let callUserMcpTool = async () => ({ success: false, error: '未注册 userMcpToolBridge' })
-// 用户 MCP 工具列表的进程级缓存：5 秒内复用，避免每次外部 tools/list 都重新 spawn 子进程拉工具
-const USER_MCP_TOOLS_CACHE_TTL_MS = 5000
-const userMcpToolsCache = new Map() // serverId -> { at: number, tools: Array }
-const getCachedUserMcpTools = async (server, timeoutMs) => {
-  const hit = userMcpToolsCache.get(server.id)
-  if (hit && Date.now() - hit.at < USER_MCP_TOOLS_CACHE_TTL_MS) return hit.tools
-  const mcpManager = require('./mcpManager')
-  const tools = await mcpManager.listTools(server.id, timeoutMs).catch(() => [])
-  const arr = Array.isArray(tools) ? tools : []
-  userMcpToolsCache.set(server.id, { at: Date.now(), tools: arr })
-  return arr
-}
-const invalidateUserMcpToolsCache = (serverId) => {
-  if (serverId) userMcpToolsCache.delete(serverId)
-  else userMcpToolsCache.clear()
-}
 
 // 渲染进程请求等待队列：id -> { resolve, reject, timer }
 const pendingMcpRequests = new Map()
@@ -59,8 +40,6 @@ const init = (opts = {}) => {
   tokenMatches = opts.tokenMatches || (() => false)
   getPort = opts.getPort || (() => 0)
   isRunning = opts.isRunning || (() => false)
-  getUserMcpServers = opts.getUserMcpServers || (() => [])
-  callUserMcpTool = opts.callUserMcpTool || (async () => ({ success: false, error: 'userMcpToolBridge 未注册' }))
 
   const { ipcMain } = require('electron')
   ipcMain.on('mcp-server:response', (event, payload) => {
@@ -320,8 +299,7 @@ const handleMcpRequest = async (req, res, url, readBody) => {
       sendRpcResult(res, {
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        // 版本号与 package.json 保持一致；外部 MCP 客户端可据此判断能力集
-        serverInfo: { name: 'my-mindmap-agent', version: '3.0.0', title: 'My-Mindmap Agent（思维导图智能体）' }
+        serverInfo: { name: 'my-mindmap-agent', version: '2.1.0', title: 'My-Mindmap Agent（思维导图智能体）' }
       }, id, { 'Mcp-Session-Id': sessionId })
       return true
     }
@@ -345,29 +323,7 @@ const handleMcpRequest = async (req, res, url, readBody) => {
       if (!tokenCtx.full) {
         tools = tools.filter(t => t && isToolAllowed(tokenCtx, t.name))
       }
-      // 合并用户配置的 MCP 服务的工具（外部 Agent 可一并调用）。命名规范：mcp__<serverId>__<toolName>，
-      // 避免与本程序工具重名。前缀是 MCP 生态常见做法（参见 zed/mcp-naming）。
-      // 走 5 秒缓存（userMcpToolsCache），避免每次外部请求都重新 spawn 子进程拉工具。
-      let extra = []
-      try {
-        const userServers = (getUserMcpServers() || []).filter(s => s && s.enabled !== false && s.id)
-        for (const s of userServers) {
-          const timeoutMs = Number.isFinite(s.timeoutMs) && s.timeoutMs > 0 ? s.timeoutMs : 10000
-          const serverTools = await getCachedUserMcpTools(s, timeoutMs)
-          if (!Array.isArray(serverTools)) continue
-          for (const t of serverTools) {
-            if (!t || !t.name) continue
-            // 避免 serverId 含 __ 时让命名解析器误匹配（前缀式正则要求第一段只含安全字符）
-            const safeId = String(s.id).replace(/[^A-Za-z0-9_-]/g, '_')
-            extra.push({
-              name: `mcp__${safeId}__${t.name}`,
-              description: `[MCP ${s.name || s.id}] ${t.description || t.name}`,
-              inputSchema: t.inputSchema || { type: 'object', properties: {} }
-            })
-          }
-        }
-      } catch (_) { /* 忽略：用户 MCP 服务的工具拉取失败不影响主程序工具的下发 */ }
-      sendRpcResult(res, { tools: [...tools, ...extra] }, id)
+      sendRpcResult(res, { tools }, id)
       return true
     }
 
@@ -376,29 +332,6 @@ const handleMcpRequest = async (req, res, url, readBody) => {
       const toolArgs = (params && params.arguments) || {}
       if (!toolName) {
         sendRpcError(res, 200, -32602, 'params.name 不能为空', id)
-        return true
-      }
-      // 用户配置的 MCP 服务工具：mcp__<serverId>__<toolName> 前缀
-      const mcpBridgeMatch = typeof toolName === 'string' && /^mcp__([A-Za-z0-9_-]+)__(.+)$/.exec(toolName)
-      if (mcpBridgeMatch) {
-        const [, serverIdSafe, realName] = mcpBridgeMatch
-        try {
-          // 用用户真实 serverId 做调用（safeId 只是为了命名不冲突，调用方仍按原 id 路由）
-          const allServers = (getUserMcpServers() || []).filter(s => s && s.enabled !== false && s.id)
-          const matched = allServers.find(s => String(s.id).replace(/[^A-Za-z0-9_-]/g, '_') === serverIdSafe)
-          const serverId = matched ? matched.id : serverIdSafe
-          const result = await callUserMcpTool(serverId, realName, toolArgs)
-          const text = (result && (result.message || (typeof result === 'string' ? result : JSON.stringify(result)))) || '（无返回内容）'
-          sendRpcResult(res, {
-            content: [{ type: 'text', text }],
-            isError: !(result && result.success !== false)
-          }, id)
-        } catch (e) {
-          sendRpcResult(res, {
-            content: [{ type: 'text', text: '调用用户 MCP 工具失败：' + (e.message || String(e)) }],
-            isError: true
-          }, id)
-        }
         return true
       }
       // 权限校验：访问令牌只能调用勾选的工具
@@ -437,10 +370,4 @@ const buildInstallConfig = (port, token) => {
   }
 }
 
-module.exports = {
-  init,
-  handleMcpRequest,
-  buildInstallConfig,
-  requestRenderer,
-  invalidateUserMcpToolsCache
-}
+module.exports = { init, handleMcpRequest, buildInstallConfig, requestRenderer }

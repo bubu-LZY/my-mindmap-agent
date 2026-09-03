@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="820" viewBox="0 0 1040 820" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#007aff"/>
+    </marker>
+    <marker id="arrowGray" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#8e8e93"/>
+    </marker>
+  </defs>
+
+  <rect width="1040" height="820" rx="18" fill="#f7f9fc"/>
+  <text x="520" y="42" text-anchor="middle" font-size="24" font-weight="700" fill="#1c1c1e">AI 全文背诵改写流程</text>
+  <text x="520" y="68" text-anchor="middle" font-size="13" fill="#6b7280">右键空白处 / 菜单 →「AI 全文背诵改写」；目标是生成可复习、可记忆的整图框架</text>
+
+  <!-- Node 1 -->
+  <rect x="320" y="92" width="400" height="50" rx="12" fill="#eef4ff" stroke="#007aff" stroke-width="1.5"/>
+  <text x="520" y="122" text-anchor="middle" font-size="15" font-weight="600" fill="#1c1c1e">1. 扫描整张导图并分块</text>
+  <text x="520" y="138" text-anchor="middle" font-size="11" fill="#4b5563">收集节点层级/路径；≤50 节点一块，&gt;50 按一级分支拆块</text>
+
+  <!-- arrow -->
+  <line x1="520" y1="142" x2="520" y2="172" stroke="#007aff" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <!-- Node 2 -->
+  <rect x="320" y="176" width="400" height="50" rx="12" fill="#eef4ff" stroke="#007aff" stroke-width="1.5"/>
+  <text x="520" y="206" text-anchor="middle" font-size="15" font-weight="600" fill="#1c1c1e">2. 阶段一：骨架关联分析</text>
+  <text x="520" y="222" text-anchor="middle" font-size="11" fill="#4b5563">只发送「根节点 + 一级分支」，快速得到全局逻辑关系</text>
+
+  <!-- arrow -->
+  <line x1="520" y1="226" x2="520" y2="256" stroke="#007aff" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <!-- Node 3 -->
+  <rect x="200" y="260" width="640" height="72" rx="12" fill="#eef4ff" stroke="#007aff" stroke-width="1.5"/>
+  <text x="520" y="288" text-anchor="middle" font-size="15" font-weight="600" fill="#1c1c1e">3. 阶段二：各分支并行深度提取</text>
+  <text x="520" y="306" text-anchor="middle" font-size="11" fill="#4b5563">每个分支块并发调用模型，只返回精简 JSON：corePoints ≤2 条、keywords ≤6 个</text>
+  <text x="520" y="322" text-anchor="middle" font-size="11" fill="#6b7280">控制并发上限，失败自动降级重试；不是把整张导图一次性塞给模型</text>
+
+  <!-- side parallel boxes -->
+  <rect x="58" y="300" width="120" height="34" rx="8" fill="#ffffff" stroke="#c7cdd6"/>
+  <text x="118" y="321" text-anchor="middle" font-size="11" fill="#1c1c1e">分支 1</text>
+  <rect x="58" y="342" width="120" height="34" rx="8" fill="#ffffff" stroke="#c7cdd6"/>
+  <text x="118" y="363" text-anchor="middle" font-size="11" fill="#1c1c1e">分支 2</text>
+  <rect x="58" y="384" width="120" height="34" rx="8" fill="#ffffff" stroke="#c7cdd6"/>
+  <text x="118" y="405" text-anchor="middle" font-size="11" fill="#1c1c1e">分支 N</text>
+  <line x1="178" y1="317" x2="200" y2="296" stroke="#8e8e93" stroke-width="1.2" marker-end="url(#arrowGray)"/>
+  <line x1="178" y1="359" x2="200" y2="296" stroke="#8e8e93" stroke-width="1.2" marker-end="url(#arrowGray)"/>
+  <line x1="178" y1="401" x2="200" y2="296" stroke="#8e8e93" stroke-width="1.2" marker-end="url(#arrowGray)"/>
+
+  <!-- arrow -->
+  <line x1="520" y1="332" x2="520" y2="366" stroke="#007aff" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <!-- Node 4 -->
+  <rect x="280" y="370" width="480" height="56" rx="12" fill="#eef4ff" stroke="#007aff" stroke-width="1.5"/>
+  <text x="520" y="398" text-anchor="middle" font-size="15" font-weight="600" fill="#1c1c1e">4. 阶段三：汇总生成精炼 Markdown</text>
+  <text x="520" y="416" text-anchor="middle" font-size="11" fill="#4b5563">把关联图谱 + 压缩后的分支摘要合成一份大纲</text>
+
+  <!-- arrow -->
+  <line x1="520" y1="426" x2="520" y2="460" stroke="#007aff" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <!-- Node 5 -->
+  <rect x="260" y="464" width="520" height="58" rx="12" fill="#eef4ff" stroke="#007aff" stroke-width="1.5"/>
+  <text x="520" y="492" text-anchor="middle" font-size="15" font-weight="600" fill="#1c1c1e">5. 生成三部分内容（700 字内）</text>
+  <text x="520" y="510" text-anchor="middle" font-size="11" fill="#4b5563">全文逻辑框架图 · 易混淆/关联点辨析表 · 背诵口诀与记忆策略</text>
+
+  <!-- arrow -->
+  <line x1="520" y1="522" x2="520" y2="556" stroke="#007aff" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <!-- Node 6 -->
+  <rect x="260" y="560" width="520" height="58" rx="12" fill="#eef4ff" stroke="#007aff" stroke-width="1.5"/>
+  <text x="520" y="588" text-anchor="middle" font-size="15" font-weight="600" fill="#1c1c1e">6. Markdown 解析为思维导图树</text>
+  <text x="520" y="606" text-anchor="middle" font-size="11" fill="#4b5563">标题/列表转层级；表格拆成「每行一个多行节点」并可正常编辑</text>
+
+  <!-- arrow -->
+  <line x1="520" y1="618" x2="520" y2="652" stroke="#007aff" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <!-- Node 7 -->
+  <rect x="260" y="656" width="520" height="58" rx="12" fill="#eafaf0" stroke="#34c759" stroke-width="1.5"/>
+  <text x="520" y="684" text-anchor="middle" font-size="15" font-weight="600" fill="#1c1c1e">7. 插入根节点并完全重绘（reRender）</text>
+  <text x="520" y="702" text-anchor="middle" font-size="11" fill="#3a3a3c">在根节点下新建「📘 全文背诵框架」节点，避免布局重叠</text>
+
+  <!-- arrow -->
+  <line x1="520" y1="714" x2="520" y2="744" stroke="#34c759" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <!-- final -->
+  <rect x="340" y="748" width="360" height="42" rx="12" fill="#eafaf0" stroke="#34c759" stroke-width="1.5"/>
+  <text x="520" y="774" text-anchor="middle" font-size="14" font-weight="700" fill="#1c1c1e">输出：📘 全文背诵框架（蓝色边框）</text>
+
+  <text x="860" y="120" text-anchor="middle" font-size="11" fill="#8e8e93">Ctrl+Z 可撤销</text>
+  <text x="860" y="330" text-anchor="middle" font-size="11" fill="#8e8e93">只传压缩摘要，速度快</text>
+</svg>

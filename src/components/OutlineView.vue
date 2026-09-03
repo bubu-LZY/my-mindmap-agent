@@ -64,7 +64,7 @@
               :class="{ 'node-selected': selectedUid === data.uid && editingUid !== data.uid }"
               contenteditable="true"
               :data-uid="data.uid"
-              @focus="onNodeFocus(data)"
+              @focus="onNodeFocus($event, data)"
               @blur="onNodeBlur($event, data)"
               @keydown.enter.prevent="onEnterKey($event, data)"
               @keydown.tab.prevent="onTabKey($event, data)"
@@ -207,6 +207,8 @@ import Contextmenu from './Contextmenu.vue'
 import NoteDialog from './NoteDialog.vue'
 import PreviewOverlay from './PreviewOverlay.vue'
 import { applyTextStyleToNodes, ensureIsolatedInlineSpan, setTextDecorationToken } from '../utils/textStyle'
+import { legacyTableHtmlToText } from '../utils/markdownParser'
+import { clonePlainTree } from '../utils/treeUtils'
 import Tribute from 'tributejs'
 import 'tributejs/dist/tribute.css'
 import {
@@ -579,6 +581,10 @@ let isPerformingTabOp = false        // Tab/Shift+Tab 操作进行中，阻止 o
 // Backspace 长按保护锁：删除空节点后置 true，退格键松开（keyup）前阻止一切删除动作，
 // 防止焦点跳到上一节点后继续长按清空其文字（"穿透删除"）
 let backspaceHoldLock = false
+// 跨节点删除"停顿"标记：记录已按过一次 Backspace 但尚未执行的节点 uid。
+// 光标在节点最前面（或节点已空）时，第一次按下只标记不删除，
+// 松开后再次按下才真正删除该节点并把光标交还给上一节点。
+let armedBackspaceUid = null
 
 // 标志位：避免自身操作触发的 data_change 导致重复刷新
 let notHandleDataChange = false
@@ -791,6 +797,9 @@ const ensureUids = () => {
       node.data.uid = createUid()
     }
     if (!node.data.richText) node.data.richText = true
+    if (node.data.text && /<table\b/i.test(node.data.text)) {
+      node.data.text = legacyTableHtmlToText(node.data.text)
+    }
     if (node.data.text && !node.data.text.startsWith('<')) {
       node.data.text = `<p><span>${node.data.text}</span></p>`
     }
@@ -865,7 +874,7 @@ const refresh = () => {
   // 记录待选节点：折叠恢复时保持其祖先链展开，保证新节点可见
   const focusUidForExpand = pendingSelectUid.value
   if (data) {
-    treeData.value = transformToTreeData(JSON.parse(JSON.stringify(data)))
+    treeData.value = transformToTreeData(clonePlainTree(data))
   }
 
   // 刷新后选中待选节点
@@ -998,9 +1007,13 @@ const unregisterListeners = (mindMap) => {
  * 节点编辑：焦点 / 失焦
  * ============================================================ */
 
-const onNodeFocus = (data) => {
+const onNodeFocus = (event, data) => {
   editingUid.value = data.uid
   selectedUid.value = null
+  // 进入编辑时重置跨节点删除的"停顿"标记：
+  // - 空节点：预置标记，使第一次 Backspace 就能删掉它（新建空节点后按一下即删，保持原手感）；
+  // - 有内容节点：清空标记，必须先停顿一次才能跨节点删除，避免误删整段文字。
+  armedBackspaceUid = isNodeEmpty(event?.target) ? data.uid : null
   if (blurTimer) {
     clearTimeout(blurTimer)
     blurTimer = null
@@ -1124,6 +1137,10 @@ const onTreeKeydown = (event) => {
   // 引用块原子删除：Backspace/Delete 一下删除整个 ref-tag（编辑态）
   if (event.key === 'Backspace' || event.key === 'Delete') {
     if (deleteRefTagAtomically(event)) return
+  } else {
+    // 按下其它键（打字/方向键/粘贴等）说明用户已不在"停顿→跨节点删除"的连续操作中，
+    // 清除停顿标记，避免之后在行首误删整个节点
+    armedBackspaceUid = null
   }
 
   // 方向键：节点间导航（编辑态下光标处于行边界时跨节点移动）
@@ -1238,15 +1255,27 @@ const getCaretBoundary = () => {
     const nodeText = parentEl?.closest?.('.node-text')
     if (!nodeText) return null
 
-    const startRange = document.createRange()
-    startRange.selectNodeContents(nodeText)
-    startRange.collapse(true)
-    const atStart = range.compareBoundaryPoints(Range.START_TO_START, startRange) <= 0
+    // 用"光标前后的纯文本长度"判定边界，而不是 compareBoundaryPoints：
+    // 节点内容是富文本（文字被 <span>/<b> 等标签包裹）时，光标位于内层文本节点的开头，
+    // 用位置比较会判定成"不在最前面"（内层节点位置永远在容器起点之后），
+    // 导致在第一个字前面按 Backspace 时无法触发跨节点删除。
+    const preRange = document.createRange()
+    preRange.selectNodeContents(nodeText)
+    try {
+      preRange.setEnd(range.startContainer, range.startOffset)
+    } catch (e) {
+      return null
+    }
+    const atStart = (preRange.toString() || '').length === 0
 
-    const endRange = document.createRange()
-    endRange.selectNodeContents(nodeText)
-    endRange.collapse(false)
-    const atEnd = range.compareBoundaryPoints(Range.START_TO_END, endRange) >= 0
+    const postRange = document.createRange()
+    postRange.selectNodeContents(nodeText)
+    try {
+      postRange.setStart(range.endContainer, range.endOffset)
+    } catch (e) {
+      return null
+    }
+    const atEnd = (postRange.toString() || '').length === 0
 
     return { atStart, atEnd }
   } catch (e) {
@@ -1460,6 +1489,25 @@ const findNodeRobust = (uid, nodeText) => {
  * 回车：插入兄弟节点
  * 直接修改 renderer.renderTree（源数据），避免 getData() 深拷贝导致 uid 丢失
  */
+/**
+ * 检查光标后是否有实际文字内容（用于富文本场景下更可靠的行尾判断）
+ */
+const hasTextAfterCaret = (el) => {
+  try {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return false
+    const range = sel.getRangeAt(0)
+    const afterRange = document.createRange()
+    afterRange.setStart(range.startContainer, range.startOffset)
+    afterRange.setEnd(el, el.childNodes.length)
+    const testWrap = document.createElement('div')
+    testWrap.appendChild(afterRange.cloneContents())
+    return !!testWrap.textContent.trim()
+  } catch (e) {
+    return false
+  }
+}
+
 // 编辑态回车：Shift+Enter 在当前节点内换行（插入 <br>）；普通 Enter 走 onEnter 新增兄弟/子节点
 const onEnterKey = (event, data) => {
   if (event.shiftKey) {
@@ -1483,8 +1531,13 @@ const onEnterKey = (event, data) => {
   }
   // 光标位于文本中间（非行首/行尾）：执行"拆分并降级"——
   // 光标后的文字剪切到新子节点（缩进一级），符合大纲的父子层级递进逻辑
+  // 注意：getCaretBoundary 在富文本场景下可能判断不准，需额外检查光标后是否有实际文字
   const boundary = getCaretBoundary()
-  if (boundary && !boundary.atStart && !boundary.atEnd) {
+  const el = event.target
+  const hasTextAfter = hasTextAfterCaret(el)
+  const atStart = boundary?.atStart
+  const atEnd = boundary?.atEnd || !hasTextAfter
+  if (!atStart && !atEnd && hasTextAfter) {
     event.preventDefault()
     splitNodeAtCaret(event, data)
     return
@@ -1753,16 +1806,35 @@ const removeNode = () => {
 }
 
 /**
- * Backspace：当节点文字为空时删除当前节点并聚焦前一个兄弟节点
- * 长按保护：
- * 1. 长按（key repeat）只删除当前节点内的文字，文字删空后动作立即停止，
- *    不会删除该空节点，更不会穿透删除上一个节点的内容；
- * 2. 删除空节点后加锁，退格键松开（keyup）前不再响应任何删除，
- *    防止焦点跳到上一节点后继续长按清空其文字；
- * 3. 要删除空节点必须松手后再次按下退格键（单次按键）。
+ * Backspace：光标在节点最前面 / 节点已空时，删除当前节点并聚焦前一个兄弟节点
+ * 两段式保护（长按与非长按走同一套节奏）：
+ * 1. 第一次按下只是"停顿"：不删除当前节点的任何内容，仅标记该节点；
+ * 2. 松开后再次按下，才删除该节点、把光标交还给上一节点（跨节点删除）；
+ * 3. 长按（键盘自动重复）只删除当前节点内的文字，且永不跨节点删除，
+ *    文字删空后自动"武装"，松手后再按一次即可跨节点；
+ * 4. 跨节点删除后加锁，退格键松开（keyup）前不再响应任何删除，
+ *    防止焦点跳到上一节点后继续长按清空其文字。
  */
 const onBackspaceKeyup = (e) => {
   if (e.key === 'Backspace' || e.key === 'Delete') backspaceHoldLock = false
+}
+
+/**
+ * 检查节点是否为空（无实际文字内容），兼容富文本结构
+ */
+const isNodeEmpty = (el) => {
+  try {
+    if (!el) return true
+    // 优先用 textContent，比 innerText 更可靠（不受 <br> 等元素影响）
+    const text = el.textContent || ''
+    if (text.trim()) return false
+    // 双重检查：innerText 也可能包含可见内容
+    const inner = el.innerText || ''
+    if (inner.trim()) return false
+    return true
+  } catch (e) {
+    return false
+  }
 }
 
 const onBackspace = (event, data) => {
@@ -1772,14 +1844,36 @@ const onBackspace = (event, data) => {
     return
   }
   const el = event.target
-  const text = (el.innerText || '').trim()
-  if (text !== '') return // 有文字时不拦截，正常删除字符
+  const boundary = getCaretBoundary()
+  const atStart = boundary?.atStart ?? false
+  const isEmpty = isNodeEmpty(el)
 
+  // 情况一：节点有文字且光标不在最前面 → 不拦截，正常删除字符。
+  // 若这一下正好把节点删空，则顺带"武装"跨节点删除，
+  // 使松手后只需再按一次即可跨节点（与长按删空后的体验一致）。
+  if (!isEmpty && !atStart) {
+    const uid = data.uid
+    nextTick(() => {
+      if (!el || !el.isConnected) return
+      armedBackspaceUid = isNodeEmpty(el) ? uid : null
+    })
+    return
+  }
+
+  // 情况二：光标在最前面 或 节点已空 → 进入"停顿 / 跨节点删除"两段式判断
   event.preventDefault()
 
-  // 长按产生的重复退格：当前节点文字已删空，删除动作到此为止；
-  // 需删除该空节点时须松手后再次按下
+  // 长按产生的重复按键永远不跨节点删除，避免一次按住清空多个节点
   if (event.repeat) return
+
+  // 第一次按下：只做停顿，不删除任何内容（包括当前节点里的文字）
+  if (armedBackspaceUid !== data.uid) {
+    armedBackspaceUid = data.uid
+    return
+  }
+
+  // 第二次按下：删除当前节点并聚焦上一节点
+  armedBackspaceUid = null
 
   if (!props.mindMap?.renderer?.renderTree) return
   ensureUids()
@@ -2275,10 +2369,12 @@ const onGenSave = (text) => {
     if (!html) {
       if (existing.length > 0) {
         node.setData({ generalization: [] })
+        commitData(node.getData('uid'))
         try { ElMessage.success('已清除概括') } catch (e) {}
       }
     } else if (existing.length > 0) {
       node.setData({ generalization: [{ ...existing[0], text: html, richText: true }] })
+      commitData(node.getData('uid'))
       try { ElMessage.success('已保存概括') } catch (e) {}
     } else {
       if (node.isRoot) {
@@ -2304,6 +2400,7 @@ const onGenClear = () => {
   if (mm && node) {
     try {
       node.setData({ generalization: [] })
+      commitData(node.getData('uid'))
       try { ElMessage.success('已清除概括') } catch (e) {}
     } catch (err) {
       console.error('[OutlineView] 清除概括失败:', err)
@@ -3705,18 +3802,22 @@ defineExpose({
 
 /* ========== 顶部固定工具栏 ========== */
 .outline-toolbar-bar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 6px 12px 2px;
-  flex-shrink: 0;
-  position: relative;
+  position: absolute;
+  inset: 0;
+  display: block;
+  padding: 0;
+  pointer-events: none;
   z-index: 20;
+}
+
+.outline-toolbar-bar :deep(.outline-dock-toolbar) {
+  pointer-events: auto;
 }
 
 .tree-container {
   position: relative;
   z-index: 1;
+  padding: 52px 24px 24px;
 }
 
 /* 大纲根节点/最上方选区时，浮动文字工具栏必须压在顶部工具栏和树内容之上 */
@@ -3887,6 +3988,33 @@ defineExpose({
 
 <!-- Tribute.js 菜单全局样式（菜单渲染在 body 上，不受 scoped 限制） -->
 <style>
+.mm-md-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 4px 0;
+}
+.mm-md-table th,
+.mm-md-table td {
+  border: 1px solid #e2e5ea;
+  padding: 4px 7px;
+  text-align: left;
+  vertical-align: top;
+}
+.mm-md-table th {
+  background: #f2f5f9;
+  font-weight: 600;
+}
+.mm-md-quote {
+  display: inline-block;
+  border-left: 3px solid #9aa5b1;
+  background: #f6f8fa;
+  color: #4b5563;
+  padding: 3px 8px;
+  border-radius: 0 6px 6px 0;
+}
+
 .tribute-container {
   z-index: 10002 !important;
   background: rgba(255, 255, 255, 0.98) !important;

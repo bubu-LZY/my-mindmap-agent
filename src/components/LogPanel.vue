@@ -63,12 +63,6 @@
         title="点击只看错误日志（含工具报错），再次点击取消筛选"
       >错误 {{ errorCount }}</button>
       <span class="stat-badge auto-clear">30天自动清除</span>
-      <button
-        class="stat-badge download-trace"
-        v-if="logs.length > 0"
-        @click="downloadTraceJsonl"
-        title="下载本次会话的全部日志为 .jsonl 文件（review #16 行为回放）"
-      >下载回放 .jsonl</button>
     </div>
 
     <!-- 日志列表 -->
@@ -87,8 +81,6 @@
       >
         <div class="log-entry-header">
           <span class="log-type-tag" :class="log.type">{{ typeLabel(log.type) }}</span>
-          <span v-if="log.level && log.level !== 'info'" class="log-level-tag" :class="'level-' + log.level">{{ log.level }}</span>
-          <span v-if="log.event" class="log-event-tag" :title="log.event">{{ log.event }}</span>
           <span class="log-time">{{ formatLogTime(log.timestamp) }}</span>
           <span class="log-duration" v-if="log.durationMs !== undefined">{{ log.durationMs }}ms</span>
           <span class="log-model" v-if="log.model">{{ log.model }}</span>
@@ -225,7 +217,12 @@ const copyAllLogs = async () => {
     let line = `[${time}] [${type}]`
     if (log.model) line += ` [${log.model}]`
     if (log.toolName) line += ` [工具: ${log.toolName}]`
+    if (log.durationMs !== undefined) line += ` [耗时: ${log.durationMs}ms]`
     line += `\n${log.content}`
+    if (log.toolArgs) line += `\n参数: ${log.toolArgs}`
+    if (log.result) line += `\n结果: ${log.result}`
+    if (log.error) line += `\n错误: ${log.error}`
+    if (Array.isArray(log.workers) && log.workers.length) line += `\n子Agent: ${JSON.stringify(log.workers)}`
     return line
   }).join('\n\n---\n\n')
 
@@ -263,7 +260,12 @@ const copyLastTurnLogs = async () => {
     let line = `[${time}] [${type}]`
     if (log.model) line += ` [${log.model}]`
     if (log.toolName) line += ` [工具: ${log.toolName}]`
+    if (log.durationMs !== undefined) line += ` [耗时: ${log.durationMs}ms]`
     line += `\n${log.content}`
+    if (log.toolArgs) line += `\n参数: ${log.toolArgs}`
+    if (log.result) line += `\n结果: ${log.result}`
+    if (log.error) line += `\n错误: ${log.error}`
+    if (Array.isArray(log.workers) && log.workers.length) line += `\n子Agent: ${JSON.stringify(log.workers)}`
     return line
   }).join('\n\n---\n\n')
 
@@ -431,27 +433,6 @@ onMounted(() => {
   flex: 1;
   overflow-y: auto;
   padding: 8px 12px;
-}
-
-.log-level-tag {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  margin-left: 4px;
-  text-transform: uppercase;
-}
-.log-level-tag.level-error { background: #fef0f0; color: #f56c6c; border: 1px solid #fbc4c4; }
-.log-level-tag.level-warn { background: #fdf6ec; color: #e6a23c; border: 1px solid #f5dab1; }
-.log-level-tag.level-debug { background: #f0f9ff; color: #909399; border: 1px solid #dcdfe6; }
-.log-event-tag {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  margin-left: 4px;
-  background: rgba(64, 158, 255, 0.1);
-  color: #409eff;
-  border: 1px solid rgba(64, 158, 255, 0.3);
-  font-family: monospace;
 }
 
 .log-empty {

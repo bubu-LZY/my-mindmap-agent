@@ -1,43 +1,5 @@
-# 依赖与构建产物（不应进入 git）
 node_modules/
 dist/
 release/
 *.log
 .DS_Store
-
-# 隐私 / 本地工作目录痕迹
-.workbuddy/
-.workbuddy-*/
-
-# 历史发布包 / 临时文件
-my-mindmap-agent-setup.zip
-my-mindmap-agent-source-*.zip
-simple-mind-map-*.tgz
-AI工具测试对话.md
-对话总结.md
-多窗口多标签改造计划.md
-_probe.cjs
-electron/_syntax_check_stub_electron.cjs
-electron/ipc/_syntax_check_stub_electron.cjs
-
-# 一次性调试 / 内部脚本
-tools/fix-prompt.ps1
-tools/make-icons.mjs
-tools/inspect-legacy.js
-tools/test-*.mjs
-tools/api-toolcall-probe.js
-tools/make-package.ps1
-
-# 保留以下构建/发布工具：
-#   tools/gen-integrity-manifest.js   - electron-builder 用，生成完整性清单
-#   tools/make-source-zip.cjs         - 脱敏源码打包脚本
-#   tools/release.ps1                 - 一键 GitHub Release 发布脚本
-
-# 用户运行时产生的数据库
-*.ldb
-*.ldb-shm
-*.ldb-wal
-
-# 系统垃圾
-Thumbs.db
-*.tmp

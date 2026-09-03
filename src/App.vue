@@ -19,6 +19,16 @@
 
       <!-- 工具按钮组 -->
       <div class="navbar-actions">
+        <button class="nav-btn feishu-btn" title="记事本（悬浮可编辑框，内容自动保存，跨文件可用）" @click="notepadVisible = !notepadVisible">
+          <svg viewBox="0 0 16 16" fill="none" width="14" height="14" style="margin-right: 4px; flex-shrink: 0;">
+            <rect x="2.5" y="2.5" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.3"/>
+            <path d="M5.5 6h5M5.5 8.5h5M5.5 11h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+          <span class="feishu-btn-text">记事本</span>
+        </button>
+        <button class="nav-btn feishu-btn" title="内置浏览器（DeepSeek / 豆包 / Kimi 等常用 AI 网页）" @click="browserVisible = !browserVisible">
+          <span class="feishu-btn-text">浏览器</span>
+        </button>
         <button
           v-if="refNavigationStack.length > 0"
           class="nav-btn feishu-btn return-map-btn"
@@ -110,7 +120,7 @@
 
         <!-- 文件树（始终挂载，仅切换可见性，避免 v-if 导致组件销毁重建后数据丢失） -->
         <div class="file-tree-wrapper" v-show="viewMode !== 'review' && viewMode !== 'tag'">
-          <SearchBar ref="searchBarRef" :current-file-path="currentFilePath" @open-file="onSearchOpenFile" />
+          <SearchBar ref="searchBarRef" @open-file="onSearchOpenFile" />
           <FileTree
             ref="fileTreeRef"
             :currentFilePath="currentFilePath"
@@ -244,7 +254,6 @@
               @ai-rewrite="handleAiRewrite"
               @ai-cloze="handleAiCloze"
               @ai-cloze-full-map="handleAiClozeFullMap"
-              @ai-rewrite-full-map="handleAiRewriteFullMap"
               @reorganize-mindmap="handleReorganizeMindmap"
               @ai-quiz="handleAiQuiz"
               @ai-add-to-chat="handleAiAddToChat"
@@ -316,69 +325,13 @@
           @mousedown="startSplitterDrag(sp, $event)"
         ></div>
 
-        <!-- ============ 右下角全局按钮组（思维导图/大纲/关联图/全屏，跟随主内容区） ============ -->
-        <div
-          v-if="hasFile && activePane && activePane.fileType === 'mindmap' && (viewMode === 'mindmap' || viewMode === 'outline' || viewMode === 'graph')"
-          class="global-bottom-right-actions"
-          :class="{ 'in-fullscreen': activePane.fullscreen }"
-        >
-          <button
-            class="global-action-btn"
-            :class="{ active: (viewMode === 'mindmap' || viewMode === 'outline') && activePane.view !== 'outline' }"
-            title="思维导图模式"
-            @click="switchToMindMapView"
-          >
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="5" cy="12" r="2" />
-              <circle cx="18.5" cy="5" r="1.8" />
-              <circle cx="18.5" cy="12" r="1.8" />
-              <circle cx="18.5" cy="19" r="1.8" />
-              <path d="M7 12h3.5M10.5 12l4.4-4.8M10.5 12h6.2M10.5 12l4.4 4.8" />
-            </svg>
-          </button>
-          <button
-            class="global-action-btn"
-            :class="{ active: (viewMode === 'mindmap' || viewMode === 'outline') && activePane.view === 'outline' }"
-            title="大纲模式"
-            @click="switchToOutlineView"
-          >
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 6h16M4 12h16M4 18h10" />
-            </svg>
-          </button>
-          <button
-            class="global-action-btn"
-            :class="{ active: viewMode === 'graph' }"
-            title="关联图模式"
-            @click="toggleGraphView"
-          >
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="5" cy="6" r="2.5" />
-              <circle cx="19" cy="6" r="2.5" />
-              <circle cx="12" cy="18" r="2.5" />
-              <path d="M7 7.5l3.5 8.5M17 7.5l-3.5 8.5" />
-            </svg>
-          </button>
-          <button
-            class="global-action-btn"
-            :class="{ active: activePane.fullscreen }"
-            :title="activePane.fullscreen ? '退出全屏 (ESC)' : '全屏展示 (ESC 退出)'"
-            @click="toggleActivePaneFullscreen"
-          >
-            <svg v-if="!activePane.fullscreen" viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
-              <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" />
-            </svg>
-            <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
-              <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z" />
-            </svg>
-          </button>
-        </div>
-      </main>
+        </main>
 
       <!-- ===== 右侧 AI 面板折叠/展开按钮 ===== -->
       <button
         class="ai-collapse-btn"
         :class="{ collapsed: !aiPanelExpanded }"
+        :style="aiPanelExpanded ? { right: aiCollapseBtnRight } : null"
         :title="aiPanelExpanded ? '折叠AI助手' : '展开AI助手'"
         @click="toggleAiPanel"
       >
@@ -473,6 +426,65 @@
         <span class="status-text">{{ viewMode === 'mindmap' ? '思维导图视图' : viewMode === 'outline' ? '大纲视图' : viewMode === 'graph' ? '关联图视图' : viewMode === 'tag' ? '标签模式' : '复习模式' }}</span>
       </div>
     </footer>
+
+    <!-- ============ 右下角全局按钮组（思维导图/大纲/关联图/全屏，四个固定按钮） ============ -->
+    <div
+      v-if="hasFile && activePane && activePane.fileType === 'mindmap' && (viewMode === 'mindmap' || viewMode === 'outline' || viewMode === 'graph')"
+      class="global-bottom-right-actions"
+      :class="{ 'in-fullscreen': activePane.fullscreen }"
+      :style="{ right: globalActionsRight }"
+    >
+      <button
+        class="global-action-btn"
+        :class="{ active: (viewMode === 'mindmap' || viewMode === 'outline') && activePane.view !== 'outline' }"
+        title="思维导图模式"
+        @click="switchToMindMapView"
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="5" cy="12" r="2" />
+          <circle cx="18.5" cy="5" r="1.8" />
+          <circle cx="18.5" cy="12" r="1.8" />
+          <circle cx="18.5" cy="19" r="1.8" />
+          <path d="M7 12h3.5M10.5 12l4.4-4.8M10.5 12h6.2M10.5 12l4.4 4.8" />
+        </svg>
+      </button>
+      <button
+        class="global-action-btn"
+        :class="{ active: (viewMode === 'mindmap' || viewMode === 'outline') && activePane.view === 'outline' }"
+        title="大纲模式"
+        @click="switchToOutlineView"
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 6h16M4 12h16M4 18h10" />
+        </svg>
+      </button>
+      <button
+        class="global-action-btn"
+        :class="{ active: viewMode === 'graph' }"
+        title="关联图模式"
+        @click="toggleGraphView"
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="5" cy="6" r="2.5" />
+          <circle cx="19" cy="6" r="2.5" />
+          <circle cx="12" cy="18" r="2.5" />
+          <path d="M7 7.5l3.5 8.5M17 7.5l-3.5 8.5" />
+        </svg>
+      </button>
+      <button
+        class="global-action-btn"
+        :class="{ active: activePane.fullscreen }"
+        :title="activePane.fullscreen ? '退出全屏 (ESC)' : '全屏展示 (ESC 退出)'"
+        @click="toggleActivePaneFullscreen"
+      >
+        <svg v-if="!activePane.fullscreen" viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+          <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+          <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z" />
+        </svg>
+      </button>
+    </div>
 
     <!-- ============ 设置弹窗 ============ -->
     <el-dialog
@@ -585,6 +597,12 @@
     <!-- ============ 快捷键中心（悬浮小窗口） ============ -->
     <ShortcutCenter :visible="shortcutCenterVisible" @close="shortcutCenterVisible = false" />
 
+    <!-- ============ 内置浏览器（悬浮 iframe/webview） ============ -->
+    <FloatingBrowser v-if="browserVisible" @close="browserVisible = false" />
+
+    <!-- ============ 记事本（悬浮可编辑框，跨文件显示，内容长期保存） ============ -->
+    <FloatingNotepad v-if="notepadVisible" @close="notepadVisible = false" />
+
     <!-- ============ 全屏节点搜索框（Ctrl+F） ============ -->
     <div v-if="nodeSearchVisible" class="node-search-bar">
       <input
@@ -609,6 +627,8 @@ import { ref, computed, shallowReactive, onMounted, onBeforeUnmount, nextTick, w
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, FolderOpened, Document } from '@element-plus/icons-vue'
 import MindMapEditor from './components/MindMapEditor.vue'
+import FloatingBrowser from './components/FloatingBrowser.vue'
+import FloatingNotepad from './components/FloatingNotepad.vue'
 import OutlineView from './components/OutlineView.vue'
 import FixedToolbar from './components/FixedToolbar.vue'
 import ReviewView from './components/ReviewView.vue'
@@ -626,8 +646,10 @@ import TaskSchedulerPanel from './components/TaskSchedulerPanel.vue'
 import ShortcutCenter from './components/ShortcutCenter.vue'
 import { taskSchedulerService } from './services/taskSchedulerService'
 import { searchService } from './services/searchService'
+import { parseDocument, chunkText } from './services/docParseService'
 import { countNodes } from './utils/treeUtils'
 import { addToReviewPlan, isInReviewPlan, extractNodeText, removeOrphanReviewItems, remapReviewPaths, getTodayReviewItems, getReminderConfig, getToday } from './utils/reviewPlan'
+import { initDeskCalendarStatusListener } from './services/deskCalendarSync'
 import { addTag, getTagsByFilePath, removeTagsByFilePath, remapTagPaths } from './utils/tagStore'
 import { addFeishuLog } from './utils/feishuLogStore'
 import { addPanelLog } from './utils/panelLogStore'
@@ -724,6 +746,12 @@ const settingsVisible = ref(false)
 
 // 快捷键中心（悬浮小窗口）
 const shortcutCenterVisible = ref(false)
+
+// 内置浏览器（悬浮 iframe/webview）
+const browserVisible = ref(false)
+
+// 记事本（悬浮可编辑框，跨文件显示，内容长期保存在 localStorage）
+const notepadVisible = ref(false)
 
 // 文档查看器（PDF/DOCX/XLSX/CSV/MD/TXT）：点击目录树中的文档文件原样打开（内嵌中间区域，支持多标签）
 const showDocViewer = ref(false)
@@ -1112,6 +1140,7 @@ const recomputeLayouts = () => {
 }
 
 watch(layoutRoot, () => recomputeLayouts(), { deep: true, immediate: true })
+watch(layoutRoot, () => persistLastLayout(), { deep: true })
 
 const updateSplitSizes = (splitId, ratio) => {
   const findSplit = (node) => {
@@ -1339,6 +1368,7 @@ const layoutDialogVisible = ref(false)
 const layoutSaveName = ref('')
 
 const LAYOUT_TEMPLATES_KEY = 'mindmap-layout-templates'
+const LAST_LAYOUT_KEY = 'mindmap-last-layout'
 
 const loadLayoutTemplates = () => {
   try {
@@ -1351,6 +1381,33 @@ const persistLayoutTemplates = () => {
   try {
     localStorage.setItem(LAYOUT_TEMPLATES_KEY, JSON.stringify(layoutTemplates.value))
   } catch (e) { /* 忽略 */ }
+}
+
+const persistLastLayout = () => {
+  try {
+    if (!layoutRoot.value) {
+      localStorage.removeItem(LAST_LAYOUT_KEY)
+      return
+    }
+    localStorage.setItem(LAST_LAYOUT_KEY, JSON.stringify(layoutRoot.value))
+  } catch {
+    // 布局持久化失败不影响使用
+  }
+}
+
+const restoreLastLayout = async () => {
+  if (layoutRoot.value) return
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAST_LAYOUT_KEY) || 'null')
+    if (!saved) return
+    const root = await buildPaneTree(saved)
+    if (!root) return
+    layoutRoot.value = root
+    const first = collectPanes(root)[0]
+    if (first) focusPane(first.id)
+  } catch {
+    // 上次布局失效时静默回退到空白界面
+  }
 }
 
 // 递归重建分屏树（读文件 + 建 pane/split）
@@ -1376,21 +1433,13 @@ const buildPaneTree = async (node) => {
   const fp = node.fileId || node.filePath
   if (!fp) return null
   const res = await window.electronAPI?.refReadFile?.(fp)
-  if (!(res?.success && res.data != null)) return null
+  if (!(res?.success && res.type === 'json' && res.data)) return null
   const fid = normalizeFileId(fp)
-  // 兼容 markdown 等类型：恢复时前端解析为导图树
-  let fileData = res.data
-  if (res.type === 'markdown' && typeof res.data === 'string') {
-    try {
-      const { parseMarkdownToTree } = await import('./utils/markdownParser')
-      fileData = parseMarkdownToTree(res.data)
-    } catch (e) { fileData = res.data }
-  }
   if (!tabs.value.some(t => t.fileId === fid)) {
-    tabs.value.push({ fileId: fid, fileName: node.title || fid.split('/').pop() || '未命名', data: fileData, isImported: false })
+    tabs.value.push({ fileId: fid, fileName: node.title || fid.split('/').pop() || '未命名', data: res.data, isImported: false })
   }
   const p = makePane('mindmap', { fileId: fid, title: node.title || fid.split('/').pop() || '未命名' })
-  p.view = node.view === 'outline' ? 'outline' : node.view === 'graph' ? 'graph' : 'map'
+  p.view = ['outline', 'graph', 'map'].includes(node.view) ? node.view : 'map'
   return p
 }
 
@@ -1408,6 +1457,7 @@ const saveLayoutTemplate = () => {
     name,
     createdAt: Date.now(),
     paneCount: collectPanes(layoutRoot.value).length,
+    activePaneId: activePaneId.value || '',
     layout: JSON.parse(JSON.stringify(layoutRoot.value))
   }
   const idx = layoutTemplates.value.findIndex(t => t.name === name)
@@ -1421,48 +1471,18 @@ const saveLayoutTemplate = () => {
 const restoreLayoutTemplate = async (tpl) => {
   if (!tpl || !tpl.layout) return
   try {
-    // 恢复前：把布局中所有文件的所在目录注册到白名单。
-    // refReadFile 受路径白名单约束，而白名单是内存态（仅含当前活跃文件目录）；
-    // 历史布局可能横跨多个目录，若不预先注册，跨目录文件会被拒读、pane 被静默丢弃导致布局折叠。
-    await registerLayoutDirs(tpl.layout)
     const root = await buildPaneTree(tpl.layout)
     if (!root) {
       ElMessage.warning('布局中的文件已不存在，无法恢复')
       return
     }
     layoutRoot.value = root
-    const first = collectPanes(root)[0]
-    if (first) focusPane(first.id)
+    const target = findPaneById(root, tpl.activePaneId) || collectPanes(root)[0]
+    if (target) focusPane(target.id)
     ElMessage.success(`已恢复布局「${tpl.name}」`)
   } catch (e) {
     console.error('恢复布局失败:', e)
     ElMessage.error('恢复布局失败: ' + (e?.message || e))
-  }
-}
-
-// 收集布局树中所有文件所在目录，注册到主进程 fsGuard 白名单（供 refReadFile 跨目录读取）
-const registerLayoutDirs = async (node) => {
-  try {
-    if (!window.electronAPI?.fsGuard?.addAllowed) return
-    const dirs = new Set()
-    const collect = (n) => {
-      if (!n) return
-      if (n.kind === 'pane') {
-        const fp = n.fileId || n.filePath
-        if (!fp) return
-        const dir = fp.replace(/[\\/][^\\/]*$/, '')
-        if (dir && dir !== fp) dirs.add(dir)
-        return
-      }
-      ;(n.children || []).forEach(collect)
-    }
-    collect(node)
-    const arr = [...dirs].filter(Boolean)
-    if (arr.length) {
-      await window.electronAPI.fsGuard.addAllowed(arr)
-    }
-  } catch (e) {
-    console.warn('注册布局目录白名单失败（将回退到默认白名单）:', e)
   }
 }
 
@@ -1557,8 +1577,24 @@ const sidebarLeftOffset = computed(() => {
 
 // AI 面板折叠状态（启动时默认收起，可通过右侧按钮展开）
 const aiPanelExpanded = ref(false)
+// 右下角视图切换按钮应保持在画布区域内，右侧 AI 助手展开时向右偏移，避免盖在侧边窗上。
+const globalActionsRight = computed(() => {
+  let offset = 16
+  if (aiPanelExpanded.value) offset += 360
+  if (logPanelVisible.value) offset += 300
+  return offset + 'px'
+})
+const aiCollapseBtnRight = computed(() => {
+  let offset = 360
+  if (logPanelVisible.value) offset += 300
+  return offset + 'px'
+})
 const floatingChatVisible = ref(false)
 const toggleAiPanel = () => {
+  // AI 助手与日志同时展开时，收起 AI 助手也一并收起日志，避免日志盖住画布。
+  if (aiPanelExpanded.value && logPanelVisible.value) {
+    closeLogPanel()
+  }
   aiPanelExpanded.value = !aiPanelExpanded.value
   if (aiPanelExpanded.value) floatingChatVisible.value = false
   nextTick(() => {
@@ -1753,10 +1789,30 @@ const toggleGraphView = () => {
 // 数据变化回调（fileId 由编辑器上报，多窗口下据此按文件独立跟踪脏标记）
 const onDataChange = (data, fileId) => {
   const fid = fileId || activeFileId.value
-  mindMapData.value = data
+  // 清理污染对象（概要节点渲染会把实例引用写进概要项，导致数据无法结构化克隆、
+  // 切换文件时概要丢失）。清理后再同步，保证 tab.data 始终是纯数据。
+  let cleanData = data
+  try { cleanData = deepCleanForSave(data) } catch (e) { cleanData = data }
+  // 概要诊断：对比清理前后的概要数量，若清理后丢失说明 deepCleanForSave 误删了概要数据
+  try {
+    const countTree = (n, c = { items: 0 }) => {
+      if (!n || !n.data) return c
+      const g = n.data.generalization
+      const list = Array.isArray(g) ? g : (g ? [g] : [])
+      c.items += list.length
+      if (Array.isArray(n.children)) n.children.forEach(ch => countTree(ch, c))
+      return c
+    }
+    const before = countTree(data).items
+    const after = countTree(cleanData).items
+    if (before !== after) {
+      console.warn(`[概要诊断] onDataChange 清理后概要丢失：清理前 ${before} 条 → 清理后 ${after} 条`, data)
+    }
+  } catch (e) {}
+  mindMapData.value = cleanData
   if (fid) {
     const tab = tabs.value.find(t => t.fileId === fid)
-    if (tab) tab.data = data
+    if (tab) tab.data = cleanData
   }
   scheduleAutoSave(fid)
 }
@@ -1842,7 +1898,7 @@ const onExternalFileCreated = () => {
 
 // AI 撤销后删除了本轮生成的文件，刷新目录树让这些文件消失。
 // 左侧目录树删除当前文件时，filePath 为被删除文件；关闭对应 Tab 并解绑 AI 任务。
-const onFileDeleted = (filePath = '', isDir = false) => {
+const onFileDeleted = (filePath = '') => {
   if (filePath) {
     const fid = normalizeFileId(filePath)
     const store = useMindMapStore()
@@ -1853,14 +1909,6 @@ const onFileDeleted = (filePath = '', isDir = false) => {
     // 清理该文件的复习计划与标签（删除后残留会指向不存在的文件）
     try { removeOrphanReviewItems() } catch (e) {}
     try { getTagsByFilePath(filePath).length && removeTagsByFilePath(filePath) } catch (e) {}
-    // 清理搜索索引与向量索引（删除后残留会导致搜索结果出现已删除文件）
-    try {
-      if (isDir) {
-        searchService.removeDir(filePath)
-      } else {
-        searchService.removeFile(filePath)
-      }
-    } catch (e) { console.warn('清理搜索索引失败:', e) }
     // 文件已删除：清除其脏标记，避免关闭窗口时把已删除文件重新写回磁盘
     markClean(null, fid)
     const idx = tabs.value.findIndex(t => t.fileId === fid)
@@ -1887,8 +1935,13 @@ const onFileDeleted = (filePath = '', isDir = false) => {
 // 统一打开右下角悬浮球悬浮对话窗（floating-chat），不展开右侧侧栏，
 // 避免挤占画布；全屏时全屏层(z-index 5000)会盖住侧栏，悬浮窗 z-index 6000 仍可见
 const ensureAiPanelVisible = () => {
-  aiPanelExpanded.value = false
-  floatingChatVisible.value = true
+  // 右侧 AI 助手已展开时直接复用侧边窗；只有未展开时才打开悬浮对话窗。
+  if (aiPanelExpanded.value) {
+    floatingChatVisible.value = false
+  } else {
+    aiPanelExpanded.value = false
+    floatingChatVisible.value = true
+  }
 }
 
 const handleAiContinue = (nodes) => {
@@ -1924,13 +1977,6 @@ const handleAiClozeFullMap = () => {
   ensureAiPanelVisible()
   if (chatPanelRef.value && chatPanelRef.value.aiCloze) {
     chatPanelRef.value.aiCloze([], { scope: 'root' })
-  }
-}
-
-const handleAiRewriteFullMap = () => {
-  ensureAiPanelVisible()
-  if (chatPanelRef.value && chatPanelRef.value.aiRewriteFullMap) {
-    chatPanelRef.value.aiRewriteFullMap()
   }
 }
 
@@ -3133,7 +3179,10 @@ const saveFile = async () => {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
         filename = `mindmap_${timestamp}.smm`
       }
-      const result = await window.electronAPI.saveFile(filename, data, { overwrite: true })
+      // 保存前强制清理：过滤函数/DOM 节点/循环引用，避免 IPC 结构化克隆失败
+      let cleanData = data
+      try { cleanData = deepCleanForSave(data) } catch (e) { cleanData = data }
+      const result = await window.electronAPI.saveFile(filename, cleanData, { overwrite: true })
       if (result && result.success) {
         currentFilePath.value = result.filePath
         currentFileIsImported.value = false
@@ -3173,144 +3222,18 @@ const saveFile = async () => {
   }
 }
 
-// 自定义工具发起的「导图编辑」请求的统一入口（context.mindmap.* 走 IPC 到这里）
-// 工具跑在主进程，导图实例在渲染层；这里把每种 kind 映射到对应的渲染层 API。
-const handleCustomToolMindmapRequest = async (payload) => {
-  if (!payload || !payload.kind) return { success: false, error: '请求缺少 kind' }
-  const getMm = () => {
-    if (editorRef.value && typeof editorRef.value.getMindMap === 'function') {
-      return editorRef.value.getMindMap()
-    }
-    return mindMapInstance.value
-  }
-  switch (payload.kind) {
-    case 'listNodes': {
-      const mm = getMm()
-      if (!mm) return { success: false, error: '当前没有打开思维导图' }
-      try {
-        const nodes = []
-        const walk = (n, depth, parentUid) => {
-          if (!n) return
-          const data = (typeof n.getData === 'function' ? n.getData() : null) || {}
-          nodes.push({
-            uid: n.uid,
-            text: String(data.text || '').replace(/<[^>]+>/g, '').trim(),
-            depth,
-            parentUid: parentUid || '',
-            isRoot: !parentUid,
-            childCount: (n.children || []).length,
-            expanded: data.expand !== false
-          })
-          ;(n.children || []).forEach(c => walk(c, depth + 1, n.uid))
-        }
-        if (mm.renderer && mm.renderer.root) walk(mm.renderer.root, 0, '')
-        return { success: true, nodes, total: nodes.length, fileName: currentFileName.value || '' }
-      } catch (e) {
-        return { success: false, error: e.message }
-      }
-    }
-    case 'getNodeText': {
-      const mm = getMm()
-      if (!mm) return { success: false, error: '当前没有打开思维导图' }
-      try {
-        const findByUid = (root, uid) => {
-          if (!root) return null
-          if (root.uid === uid) return root
-          for (const c of root.children || []) {
-            const r = findByUid(c, uid)
-            if (r) return r
-          }
-          return null
-        }
-        const target = payload.uid
-          ? findByUid(mm.renderer?.root, payload.uid)
-          : mm.renderer?.root
-        if (!target) return { success: false, error: '未找到节点: ' + (payload.uid || '') }
-        const data = (typeof target.getData === 'function' ? target.getData() : null) || {}
-        const text = String(data.text || '').replace(/<[^>]+>/g, '').trim()
-        const html = String(data.text || '')
-        return { success: true, uid: target.uid, text, html }
-      } catch (e) {
-        return { success: false, error: e.message }
-      }
-    }
-    case 'setNodeText': {
-      const mm = getMm()
-      if (!mm) return { success: false, error: '当前没有打开思维导图' }
-      try {
-        const findByUid = (root, uid) => {
-          if (!root) return null
-          if (root.uid === uid) return root
-          for (const c of root.children || []) {
-            const r = findByUid(c, uid)
-            if (r) return r
-          }
-          return null
-        }
-        const target = findByUid(mm.renderer?.root, payload.uid)
-        if (!target) return { success: false, error: '未找到节点: ' + payload.uid }
-        if (typeof target.setText !== 'function') {
-          return { success: false, error: '节点不支持 setText' }
-        }
-        // 第三个参数 true 表示 resizable / 第四个 false 表示不选中。保持与 SET_NODE_TEXT 一致。
-        mm.execCommand('SET_NODE_TEXT', target, payload.html, true, false)
-        return { success: true, uid: payload.uid }
-      } catch (e) {
-        return { success: false, error: e.message }
-      }
-    }
-    case 'applyTextStyle': {
-      const mm = getMm()
-      if (!mm) return { success: false, error: '当前没有打开思维导图' }
-      const opts = payload.opts || {}
-      if (!opts.action) return { success: false, error: 'action 必填' }
-      try {
-        // 收集待处理的节点：uid 指定单个；否则按 textRegex / textContains 过滤全部节点
-        const matched = []
-        const visit = (n) => {
-          if (!n) return
-          const data = (typeof n.getData === 'function' ? n.getData() : null) || {}
-          const plain = String(data.text || '').replace(/<[^>]+>/g, '')
-          let ok = true
-          if (opts.uid && n.uid !== opts.uid) ok = false
-          if (ok && opts.textContains && !plain.includes(opts.textContains)) ok = false
-          if (ok && opts.textRegex) {
-            try {
-              const re = new RegExp(opts.textRegex)
-              if (!re.test(plain)) ok = false
-            } catch (e) { /* 非法正则视为不匹配 */ ok = false }
-          }
-          if (ok) matched.push(n)
-          ;(n.children || []).forEach(visit)
-        }
-        if (mm.renderer && mm.renderer.root) visit(mm.renderer.root)
-        if (!matched.length) return { success: true, matched: 0, changed: 0 }
-        const { applyTextStyleToNodes } = await import('./utils/textStyle.js')
-        const changed = applyTextStyleToNodes(mm, matched, opts.action)
-        return { success: true, matched: matched.length, changed }
-      } catch (e) {
-        return { success: false, error: e.message }
-      }
-    }
-    case 'save': {
-      const ok = await saveFile()
-      return { success: !!ok, filePath: currentFilePath.value || '' }
-    }
-    case 'currentFile': {
-      return {
-        success: true,
-        filePath: currentFilePath.value || '',
-        fileName: currentFileName.value || ''
-      }
-    }
-    default:
-      return { success: false, error: '未知请求类型: ' + payload.kind }
-  }
-}
-
 // 软重启：先确保当前文档已保存，再整页刷新恢复界面状态（用于界面卡死/异常显示时自救）
 // 对话记录、运行日志、挖空状态等均已持久化，刷新后自动恢复
 const refreshUI = async () => {
+  try {
+    await ElMessageBox.confirm('将保存当前所有已打开文件，然后完全重启程序。是否继续？', '重启程序', {
+      confirmButtonText: '保存并重启',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
   // 保存所有脏文件（含各窗口未提交的文本编辑），全部落盘后再刷新
   const saved = await flushAutoSave()
   if (saved === false) {
@@ -3321,15 +3244,17 @@ const refreshUI = async () => {
   // preventDefault —— Electron 下这会静默取消 reload（无任何弹窗），随后兜底的 window.close()
   // 又被主进程"点叉仅隐藏窗口驻留托盘"的逻辑拦截，表现为软重启点了完全没反应。
   // 此时数据刚保存过，放行刷新没有丢失风险。
-  allowReload = true
-  ElMessage.info('正在刷新界面…')
-  // 优先走主进程 webContents.reload（更可靠）；不可用时退回 location.reload
-  if (window.electronAPI && typeof window.electronAPI.reloadUI === 'function') {
+  if (window.electronAPI?.restartApp) {
+    allowReload = true
+    allowClose = true
+    ElMessage.info('正在保存并重启程序…')
     setTimeout(() => {
-      try { window.electronAPI.reloadUI() } catch (e) { location.reload() }
-    }, 300)
+      window.electronAPI.restartApp()
+    }, 250)
   } else {
-    setTimeout(() => location.reload(), 300)
+    allowReload = true
+    ElMessage.info('正在刷新界面…')
+    setTimeout(() => location.reload(), 250)
   }
 }
 
@@ -3341,7 +3266,13 @@ const refreshUI = async () => {
  * ============================================================ */
 const isDirty = ref(false)
 const AUTOSAVE_DELAY = 3000
+// 处于节点编辑态时自动保存的延后重试间隔
+const AUTOSAVE_RETRY_DELAY = 1000
+// 持续编辑超过该时长仍未退出编辑时，强制提交一次编辑并落盘（数据安全兜底）
+const AUTOSAVE_FORCE_DELAY = 60000
 let autoSaveTimer = null
+let autoSaveRetryTimer = null
+let autoSaveDeferStart = 0
 let allowClose = false
 let allowReload = false
 // 每个文件的脏标记与最后保存内容（fileId -> JSON），多窗口各自独立保存，避免漏存/串存
@@ -3405,6 +3336,53 @@ const remapImportedFileId = (oldFid, newFid) => {
   if (normalizeFileId(currentFilePath.value) === oldFid) currentFilePath.value = newFid
 }
 
+// 递归清理待保存数据：移除函数/DOM 节点/循环引用等不能结构化克隆的对象。
+// 概要节点渲染会把概要项与实例共享引用，导致 IPC 保存时报 "An object could not be cloned"。
+function deepCleanForSave(val, seen = new WeakSet()) {
+  if (val === null || val === undefined) return val
+  if (typeof val === 'function') return undefined
+  if (typeof val !== 'object') return val
+  if (val instanceof Date) return val.toISOString()
+  if (typeof Element !== 'undefined' && val instanceof Element) return undefined
+  if (seen.has(val)) return undefined // 循环引用
+  seen.add(val)
+  let out
+  if (Array.isArray(val)) {
+    out = []
+    for (const item of val) {
+      const c = deepCleanForSave(item, seen)
+      if (c !== undefined) out.push(c)
+    }
+  } else {
+    out = {}
+    for (const key of Object.keys(val)) {
+      const c = deepCleanForSave(val[key], seen)
+      if (c !== undefined) out[key] = c
+    }
+  }
+  seen.delete(val)
+  return out
+}
+
+// 检测数据里的污染对象（函数/DOM 节点/循环引用），返回污染字段路径列表（用于诊断日志）
+function detectPollution(val, path = 'root', seen = new WeakSet(), out = []) {
+  if (val === null || val === undefined) return out
+  if (typeof val === 'function') { out.push(`${path} (function)`); return out }
+  if (typeof val !== 'object') return out
+  if (typeof Element !== 'undefined' && val instanceof Element) { out.push(`${path} (DOM节点)`); return out }
+  if (seen.has(val)) { out.push(`${path} (循环引用)`); return out }
+  seen.add(val)
+  if (Array.isArray(val)) {
+    val.forEach((item, i) => detectPollution(item, `${path}[${i}]`, seen, out))
+  } else {
+    for (const key of Object.keys(val)) {
+      detectPollution(val[key], `${path}.${key}`, seen, out)
+    }
+  }
+  seen.delete(val)
+  return out
+}
+
 // 保存单个文件：成功/无需保存返回 true，失败返回 false
 const saveFileById = async (fid) => {
   const pane = findPaneByFile(layoutRoot.value, 'mindmap', fid)
@@ -3414,7 +3392,10 @@ const saveFileById = async (fid) => {
     dirtyFiles.delete(fid)
     return true
   }
-  try { editor?.commitEditing?.() } catch (e) { /* 忽略 */ }
+  // 这里不再调用 commitEditing()：它会 hideEditTextBox() 关闭用户正在编辑的节点并整树
+  // render（表现为编辑被打断、焦点跳走）。编辑中的保存已由 quietSaveCore 延后到编辑结束，
+  // 走到这里时必然不在编辑态，数据早已在节点里；真正需要结束编辑的场景（切换文件/关窗/
+  // 重启/导出）统一由 flushAutoSave → commitAllEditors 负责。
   const data = editor?.getData?.() || tab?.data || null
   if (!data) {
     dirtyFiles.delete(fid)
@@ -3437,7 +3418,14 @@ const saveFileById = async (fid) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
     filename = `mindmap_${timestamp}.smm`
   }
-  const result = await window.electronAPI.saveFile(filename, data, { overwrite: true })
+  // 保存前强制清理：过滤函数/DOM 节点/循环引用，避免 IPC 结构化克隆失败
+  const pollution = detectPollution(data)
+  if (pollution.length > 0) {
+    console.warn('[保存诊断] 数据含不能结构化克隆的对象，已自动清理，污染字段路径：', pollution.slice(0, 30))
+  }
+  let cleanData = data
+  try { cleanData = deepCleanForSave(data) } catch (e) { cleanData = data }
+  const result = await window.electronAPI.saveFile(filename, cleanData, { overwrite: true })
   if (result && result.success) {
     // 导入文件（md/xmind）首次落盘为 .smm：迁移 fileId 到新路径
     const savedPath = result.filePath || filename
@@ -3461,8 +3449,43 @@ const saveFileById = async (fid) => {
   return false
 }
 
+// 是否有导图编辑器正处于节点文本编辑态
+// 背景：节点编辑中的内容只有在退出编辑时才会写回节点数据，此前 getData() 拿到的是进入
+// 编辑前的旧文本；为了让编辑内容入库，旧实现在保存前调用 commitEditing()，而它内部执行
+// hideEditTextBox() —— 会关闭用户正在打字的编辑框并触发整树 render，表现为"写着写着突然
+// 退出编辑 / 跳到别的节点"。因此改为：编辑中一律延后保存，等编辑结束再落盘。
+const hasEditingEditor = () => {
+  return Object.keys(editorRefs).some(fid => {
+    try {
+      return !!editorRefs[fid]?.isEditing?.()
+    } catch (e) {
+      return false
+    }
+  })
+}
+
 // 静默保存实现：遍历所有脏文件逐个保存
 const quietSaveCore = async () => {
+  // 正在编辑节点时不打断用户：延后重试。编辑结束会走 SET_NODE_TEXT → data_change，
+  // 重新排一次自动保存，编辑内容不会丢。
+  if (hasEditingEditor()) {
+    if (!autoSaveDeferStart) autoSaveDeferStart = Date.now()
+    if (Date.now() - autoSaveDeferStart >= AUTOSAVE_FORCE_DELAY) {
+      // 持续编辑超过阈值：不得已强制提交一次（会关闭编辑框）以保证内容落盘，
+      // 避免长时间编辑时修改一直停留在内存里
+      autoSaveDeferStart = 0
+      commitAllEditors()
+    } else {
+      if (autoSaveRetryTimer) clearTimeout(autoSaveRetryTimer)
+      autoSaveRetryTimer = setTimeout(() => {
+        autoSaveRetryTimer = null
+        quietSave()
+      }, AUTOSAVE_RETRY_DELAY)
+      return true
+    }
+  } else {
+    autoSaveDeferStart = 0
+  }
   const fids = Array.from(dirtyFiles)
   if (fids.length === 0) {
     isDirty.value = false
@@ -3543,10 +3566,10 @@ const openSettings = () => {
 }
 
 // 设置保存回调（保存后不关闭弹窗，便于继续配置其他分区）
-const onSettingsSaved = async () => {
-  // 通知 ChatPanel 重新加载模型名称（await 确保拿到主进程最新数据，避免 race 导致仍显示旧档模型）
+const onSettingsSaved = () => {
+  // 通知 ChatPanel 重新加载模型名称
   if (chatPanelRef.value && chatPanelRef.value.reloadModel) {
-    try { await chatPanelRef.value.reloadModel() } catch (e) { /* ignore */ }
+    chatPanelRef.value.reloadModel()
   }
   // 默认保存目录与左侧目录树保存位置共用同一数据：设置变化后同步目录树根目录
   nextTick(async () => {
@@ -3796,6 +3819,15 @@ const nodeSearchPrev = () => {
 const handleKeyDown = (e) => {
   const ctrl = e.ctrlKey || e.metaKey
 
+  // Ctrl+Shift+I：临时打开/切换 Electron 开发者工具（可查看元素与渲染层报错）
+  if (ctrl && e.shiftKey && !e.altKey && e.code === 'KeyI') {
+    e.preventDefault()
+    if (window.electronAPI?.openDevTools) {
+      window.electronAPI.openDevTools()
+    }
+    return
+  }
+
   // Alt+1：截图识别文字（OCR）
   if (e.altKey && !ctrl && e.code === 'Digit1') {
     e.preventDefault()
@@ -3950,13 +3982,13 @@ const handleKeyDown = (e) => {
     return
   }
 
-  // Ctrl+F: 用户需求 - 全局只有一个搜索入口（左上角 SearchBar）。
-  // 不管当前是导图/大纲/文档/全屏，Ctrl+F 都聚焦左上角全局搜索栏，由它做关键词搜索；
-  // 用户可手动切到「语义」tab 触发 AI 扩展，不再自动跑 AI 语义检索。
+  // Ctrl+F: 全屏（思维导图/大纲）下打开节点搜索框；否则聚焦左侧搜索栏
   if (key === 'f') {
     e.preventDefault()
-    if (textCtx === 'input') return // 输入框内放行，不抢占全局搜索
-    if (searchBarRef.value && searchBarRef.value.focus) {
+    if (textCtx === 'input') return // 输入框内放行，不抢占节点搜索
+    if ((mmFullscreen.value || outlineFullscreen.value) && (viewMode.value === 'mindmap' || viewMode.value === 'outline')) {
+      openNodeSearch()
+    } else if (searchBarRef.value && searchBarRef.value.focus) {
       searchBarRef.value.focus()
     }
     return
@@ -3964,81 +3996,56 @@ const handleKeyDown = (e) => {
 }
 
 // 启动时后台重建搜索索引（覆盖从未打开过的文件，静默执行不打扰用户）
-// 修复 review：原实现仅索引 type==='json' 的思维导图，PDF/Excel/TXT/PPT/MD 等文档完全不会被索引，
-// 导致 search_knowledge_base / semantic_search 只能匹配到导图，无法命中已存在的文档内容。
-// 修复后按扩展名分支：思维导图走 indexFile，文档走 indexDocument（统一 parseDocument）。
-// 内存保护：
-//   1) 文档数量 > 50 时只索引文件名 + 前 2KB 摘要（避免大库一次加载爆内存）
-//   2) 解析单个文档失败立即跳过，绝不抛错影响主流程
-//   3) 不在启动时跑向量化（indexDocumentVectors），留给用户在 AI 读取文件或 DocViewer 打开时按需触发
 const rebuildSearchIndex = async () => {
   try {
     if (!searchService.isAvailable() || !window.electronAPI?.refScanFiles) return
-    // 扫描所有文件夹根目录（与 FileTree 保持一致），不只是默认保存目录
-    const ROOTS_KEY = 'MINDMAP_FOLDER_ROOTS'
-    let roots = []
+    // 覆盖左侧目录树当前所有根目录 + 默认保存目录，保证 Ctrl+F 能查到任意目录树文件内容。
+    const roots = []
     try {
-      const stored = localStorage.getItem(ROOTS_KEY)
-      if (stored) roots = JSON.parse(stored) || []
+      const savedRoots = JSON.parse(localStorage.getItem('MINDMAP_FOLDER_ROOTS') || '[]')
+      if (Array.isArray(savedRoots)) roots.push(...savedRoots.filter(p => typeof p === 'string' && p))
     } catch {}
-    // refScanFiles 接收数组；若为空数组则内部回退到默认保存目录
-    const res = await window.electronAPI.refScanFiles(roots.length > 0 ? roots : undefined)
+    try {
+      const saveDir = await window.electronAPI.getDefaultSaveDir?.()
+      if (saveDir) roots.push(saveDir)
+    } catch {}
+    const res = await window.electronAPI.refScanFiles([...new Set(roots)].filter(Boolean))
     if (!res?.success || !Array.isArray(res.files)) return
-    // 文档类型扩展名（与 toolHandler.docExts 保持一致）
-    const DOC_EXTS = new Set(['txt', 'md', 'markdown', 'json', 'log', 'html', 'xml', 'csv', 'tsv', 'docx', 'xlsx', 'xls', 'pdf', 'pptx', 'ppt'])
-    const isDoc = (name) => {
-      const m = /\.([a-z0-9]+)$/i.exec(name || '')
-      return !!(m && DOC_EXTS.has(m[1].toLowerCase()))
-    }
-    // 文档数量阈值：超过此值只入库文件名+小摘要，避免大库启动时内存/磁盘抖动
-    const DOC_FULL_INDEX_LIMIT = 50
-    const files = res.files.slice(0, 300)
-    const docCount = files.filter(f => isDoc(f.name)).length
-    const fullIndexDocs = docCount <= DOC_FULL_INDEX_LIMIT
-    let processed = 0
-    for (const f of files) {
+    const mapExts = new Set(['smm', 'json', 'xmind'])
+    const docExts = new Set(['csv', 'tsv', 'txt', 'md', 'markdown', 'log', 'html', 'xml'])
+    const files = res.files.slice(0, 200)
+
+    // 先建 BM25 索引（无向量推理，快速完成）。文档/导图分批次 yield，避免启动时把渲染进程卡死。
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i]
       try {
-        if (isDoc(f.name)) {
-          // 大库场景：只入库文件名（filename 命中已能匹配搜索意图，跳过全文解析省内存）
-          if (!fullIndexDocs) {
-            await searchService.indexDocument(f.path, f.name || '', 'doc',
-              [`<mark>${f.name || ''}</mark>（文件名命中：文档较多，启动时仅索引文件名，未做全文入库；用 read_local_file 读取后将自动全文索引）`],
-              f.mtime || '')
-            processed++
-            if (processed % 10 === 0) await new Promise(r => setTimeout(r, 0))
-            continue
-          }
-          // 常规场景：解析全文 → 切块 → 知识库索引
-          const { parseDocument, chunkText } = await import('./services/docParseService')
-          const parsed = await parseDocument(f.path)
-          if (!parsed.success || !parsed.text) continue
-          // 单文档文本超 200KB 时只取前 200KB，避免超大 PDF/PowerPoint 一次性入库
-          let text = parsed.text
-          const MAX_TEXT_CHARS = 200 * 1024
-          if (text.length > MAX_TEXT_CHARS) text = text.slice(0, MAX_TEXT_CHARS) + '\n\n[已截断：原文超过 200KB]'
-          const chunks = chunkText(text)
-          if (!chunks.length) continue
-          let mtime = ''
-          if (window.electronAPI?.fs?.stat) {
-            try {
-              const st = await window.electronAPI.fs.stat(f.path)
-              if (st?.success) mtime = st.mtime || ''
-            } catch {}
-          }
-          await searchService.indexDocument(f.path, f.name || '', 'doc', chunks, mtime)
-          processed++
-          // 每处理 3 个文档让出一次主线程，避免连续解析卡 UI
-          if (processed % 3 === 0) await new Promise(r => setTimeout(r, 0))
-        } else {
+        const ext = (f.name || '').split('.').pop().toLowerCase()
+        if (mapExts.has(ext)) {
           const r = await window.electronAPI.refReadFile(f.path)
           if (r?.success && r.type === 'json' && r.data) {
             await searchService.indexFile(f.path, r.fileName || f.name, r.data)
+          }
+        } else if (docExts.has(ext)) {
+          const doc = await parseDocument(f.path)
+          if (doc?.success && String(doc.text || '').trim()) {
+            const chunks = chunkText(doc.text)
+            if (chunks.length) {
+              let mtime = ''
+              if (window.electronAPI?.fs?.stat) {
+                const st = await window.electronAPI.fs.stat(f.path)
+                if (st?.success) mtime = st.mtime
+              }
+              await searchService.indexDocument(f.path, f.name, 'doc', chunks, mtime)
+            }
           }
         }
       } catch (e) {
         // 单个文件索引失败忽略
       }
+      // 每处理 8 个文件让出主线程，避免索引/解析挤满 UI
+      if (i % 8 === 7) await new Promise((r) => setTimeout(r, 0))
     }
+
   } catch (e) {
     // 忽略
   }
@@ -4182,7 +4189,10 @@ const startReviewReminder = () => {
 
 onMounted(() => {
   initMindMapInstance()
+  initDeskCalendarStatusListener()
   loadLayoutTemplates()
+  // 延迟恢复上次多屏布局，给目录树和文件系统预热留出时间。
+  setTimeout(() => { restoreLastLayout() }, 800)
   window.addEventListener('keydown', handleKeyDown)
   // 多窗口拖拽/缩放
   window.addEventListener('mousemove', onGlobalMouseMove)
@@ -4195,23 +4205,6 @@ onMounted(() => {
   setTimeout(() => { checkOrphanReviewItems() }, 1500)
   // 每日复习定时提醒（30 秒轮询，跨天/修改配置自动生效）
   startReviewReminder()
-
-  // 监听大图未自动建向量提示（整个会话只提示一次）
-  if (searchService.on) {
-    searchService.on((event, payload) => {
-      if (event === 'large-map') {
-        ElMessageBox.alert(
-          `当前思维导图有 ${payload.nodeCount} 个节点，为避免卡顿未自动构建向量索引。\n\n如需使用语义搜索，请前往「设置 → Embedding 向量化 → 重建向量索引」手动构建。`,
-          '提示',
-          {
-            confirmButtonText: '知道了',
-            type: 'info',
-            dangerouslyUseHTMLString: false
-          }
-        ).catch(() => {})
-      }
-    })
-  }
 
   // 双击 .smm 文件拉起应用：接收主进程转发的文件路径并打开
   if (window.electronAPI?.onOpenFile) {
@@ -4267,22 +4260,6 @@ onMounted(() => {
     })
   }
 
-  // 渲染层处理自定义工具发起的「导图编辑」请求（context.mindmap.*）
-  // 工具在主进程内执行，但导图实例在渲染层，所以走「请求-响应」桥接。
-  if (window.electronAPI?.customTools?.onMindmapRequest) {
-    window.electronAPI.customTools.onMindmapRequest(async (msg) => {
-      const reqId = msg && msg.reqId
-      const payload = msg && msg.payload
-      if (!reqId || !payload || !window.electronAPI.customTools.replyMindmapRequest) return
-      try {
-        const result = await handleCustomToolMindmapRequest(payload)
-        window.electronAPI.customTools.replyMindmapRequest(reqId, result)
-      } catch (err) {
-        window.electronAPI.customTools.replyMindmapRequest(reqId, null, err?.message || String(err))
-      }
-    })
-  }
-
   // 飞书机器人消息处理：走飞书端独立通道（不弹出 AI 面板、不污染用户对话），使用 AI 工具链执行
   if (window.electronAPI?.feishuBot?.onProcessMessage) {
     window.electronAPI.feishuBot.onProcessMessage(async (data) => {
@@ -4334,6 +4311,10 @@ onBeforeUnmount(() => {
   if (autoSaveTimer) {
     clearTimeout(autoSaveTimer)
     autoSaveTimer = null
+  }
+  if (autoSaveRetryTimer) {
+    clearTimeout(autoSaveRetryTimer)
+    autoSaveRetryTimer = null
   }
   if (reviewReminderTimer) {
     clearInterval(reviewReminderTimer)
@@ -4509,6 +4490,24 @@ onBeforeUnmount(() => {
   color: var(--apple-blue);
   background: rgba(0, 0, 0, 0.1);
   transform: translateX(-2px);
+}
+
+/* 展开态不再作为 flex 占位条：绝对定位在 AI 面板左边缘，只显示小箭头，避免下方多出一段白底宽度 */
+.ai-collapse-btn:not(.collapsed) {
+  position: absolute;
+  right: var(--ai-panel-width);
+  top: 50%;
+  width: 18px;
+  height: 36px;
+  background: transparent;
+  border-radius: 6px 0 0 6px;
+  transform: translateY(-50%);
+}
+
+.ai-collapse-btn:not(.collapsed):hover {
+  background: rgba(0, 0, 0, 0.08);
+  transform: translateY(-50%);
+  color: var(--apple-blue);
 }
 
 /* 收起态：绝对定位浮在屏幕右边缘（不占 flex 布局宽度），仅显示箭头图标本身 */
@@ -5046,6 +5045,18 @@ onBeforeUnmount(() => {
   z-index: 6000;
 }
 
+/* 悬浮对话更紧凑：让消息列表在有限高度内显示更多内容 */
+.ai-panel.floating-chat :deep(.chat-messages) {
+  font-size: 12px;
+}
+.ai-panel.floating-chat :deep(.message-content) {
+  font-size: 12px;
+  line-height: 1.45;
+}
+.ai-panel.floating-chat :deep(.chat-input) {
+  font-size: 12px;
+}
+
 /* Log Panel (right of AI panel) */
 .log-panel-container {
   width: 300px;
@@ -5096,11 +5107,11 @@ onBeforeUnmount(() => {
 }
 
 /* ============ 右下角全局按钮组（视图切换 + 全屏，共用一套） ============ */
-/* 默认跟随主内容区（absolute），全屏模式下固定到视口（fixed） */
+/* 层级高于全屏覆盖层(5000)，全屏模式下同样可见可点 */
 .global-bottom-right-actions {
-  position: absolute;
+  position: fixed;
   right: 16px;
-  bottom: 16px;
+  bottom: calc(var(--status-bar-height) + 16px);
   z-index: 7000;
   display: flex;
   align-items: center;
@@ -5135,9 +5146,8 @@ onBeforeUnmount(() => {
   color: #007aff;
 }
 
-/* 全屏模式下配色加深 + 固定到视口 */
+/* 全屏模式下配色加深 */
 .global-bottom-right-actions.in-fullscreen {
-  position: fixed;
   bottom: 16px;
   background: rgba(0, 0, 0, 0.5);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);

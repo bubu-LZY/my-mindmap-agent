@@ -1,48 +1,13 @@
-const { ipcMain, app } = require('electron')
+const { ipcMain } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { resolveProfileForVision, isVisionEnabled } = require('./aiConfig')
 
 // worker 复用缓存：按语言缓存，避免每次 OCR 都重新初始化（语言模型加载是慢的主要来源）
 const workerCache = new Map()
-// worker 最后使用时间戳，用于 LRU 淘汰
-const workerLastUsed = new Map()
-// 最大缓存 worker 数量（每种语言一个 worker，内存占用不小，限制上限）
-const MAX_CACHED_WORKERS = 3
-// worker 空闲超时（30 分钟未使用自动清理）
-const WORKER_IDLE_TIMEOUT_MS = 30 * 60 * 1000
-
-// 清理过期 worker（LRU + 空闲超时）
-function cleanupIdleWorkers() {
-  const now = Date.now()
-  // 先按空闲超时清理
-  for (const [key, lastTime] of workerLastUsed) {
-    if (now - lastTime > WORKER_IDLE_TIMEOUT_MS) {
-      const worker = workerCache.get(key)
-      if (worker) {
-        try { worker.terminate && worker.terminate() } catch (e) {}
-      }
-      workerCache.delete(key)
-      workerLastUsed.delete(key)
-    }
-  }
-  // 再按数量上限清理（淘汰最久未用的）
-  if (workerCache.size > MAX_CACHED_WORKERS) {
-    const sorted = [...workerLastUsed.entries()].sort((a, b) => a[1] - b[1])
-    const toRemove = sorted.slice(0, sorted.length - MAX_CACHED_WORKERS)
-    for (const [key] of toRemove) {
-      const worker = workerCache.get(key)
-      if (worker) {
-        try { worker.terminate && worker.terminate() } catch (e) {}
-      }
-      workerCache.delete(key)
-      workerLastUsed.delete(key)
-    }
-  }
-}
 
 /**
- * 创建/获取 tesseract.js worker（复用缓存，LRU 淘汰 + 空闲超时清理）
+ * 创建/获取 tesseract.js worker（复用缓存，首次创建后常驻）
  * v5 API: createWorker(lang, oem, options)
  * - lang: 语言代码，如 'chi_sim+eng'
  * - oem: OCR 引擎模式，1 = LSTM only
@@ -50,12 +15,7 @@ function cleanupIdleWorkers() {
 async function getWorker(lang = 'chi_sim+eng', event = null) {
   const { createWorker } = require('tesseract.js')
   const key = lang || 'chi_sim+eng'
-  if (workerCache.has(key)) {
-    workerLastUsed.set(key, Date.now())
-    return workerCache.get(key)
-  }
-  // 创建新 worker 前先清理过期的
-  cleanupIdleWorkers()
+  if (workerCache.has(key)) return workerCache.get(key)
   const worker = await createWorker(key, 1, {
     logger: m => {
       if (event && event.sender && !event.sender.isDestroyed()) {
@@ -64,7 +24,6 @@ async function getWorker(lang = 'chi_sim+eng', event = null) {
     }
   })
   workerCache.set(key, worker)
-  workerLastUsed.set(key, Date.now())
   return worker
 }
 
@@ -272,47 +231,11 @@ async function tryAIVision(base64Data, event) {
 // 识别图片文件（通过文件路径）
 ipcMain.handle('ocr-image', async (event, imagePath) => {
   try {
-    // 路径安全校验
-    if (typeof imagePath !== 'string' || !imagePath.trim()) {
-      return { success: false, error: '图片路径无效' }
-    }
-    if (imagePath.includes('\0') || /[\x00-\x1f\x7f]/.test(imagePath)) {
-      return { success: false, error: '路径包含非法字符' }
-    }
-    const normalized = path.normalize(imagePath)
-    // 限制读取范围：userData + temp + 桌面 + 文档 + 下载
-    const allowedRoots = [
-      path.normalize(app.getPath('userData')),
-      path.normalize(app.getPath('temp')),
-      path.normalize(require('os').tmpdir()),
-      path.normalize(app.getPath('desktop')),
-      path.normalize(app.getPath('documents')),
-      path.normalize(app.getPath('downloads'))
-    ]
-    const resolved = path.resolve(normalized)
-    let allowed = false
-    for (const root of allowedRoots) {
-      if (resolved === root || resolved.startsWith(root + path.sep)) {
-        allowed = true
-        break
-      }
-    }
-    if (!allowed) {
-      return { success: false, error: '图片路径不在允许范围内（请将图片放到桌面/文档/下载目录后再试）' }
-    }
-    if (!fs.existsSync(resolved)) {
-      return { success: false, error: `文件不存在: ${resolved}` }
-    }
-    const stat = fs.statSync(resolved)
-    if (!stat.isFile()) {
-      return { success: false, error: '路径不是文件' }
-    }
-    // 限制文件大小（最大 20MB）
-    if (stat.size > 20 * 1024 * 1024) {
-      return { success: false, error: '图片过大（超过 20MB）' }
+    if (!fs.existsSync(imagePath)) {
+      return { success: false, error: `文件不存在: ${imagePath}` }
     }
     const worker = await getWorker('chi_sim+eng', event)
-    const { data: { text } } = await enqueueOCR(() => worker.recognize(resolved))
+    const { data: { text } } = await enqueueOCR(() => worker.recognize(imagePath))
     return { success: true, text }
   } catch (error) {
     return { success: false, error: error.message }

@@ -818,7 +818,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .text-toolbar {
   position: absolute;
-  z-index: 1000;
+  z-index: 9999;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -941,7 +941,7 @@ onBeforeUnmount(() => {
   border-radius: 10px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   width: 140px;
-  z-index: 1001;
+  z-index: 10000;
 }
 
 .color-swatch {
@@ -994,7 +994,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   padding: 4px;
   min-width: 80px;
-  z-index: 1001;
+  z-index: 10000;
 }
 
 .size-item {

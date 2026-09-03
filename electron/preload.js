@@ -20,8 +20,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 在默认浏览器中打开 URL
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
-  // 软重启界面（保存并刷新）
-  reloadUI: () => ipcRenderer.invoke('app:reload-ui'),
+  // 打开/切换 Electron 开发者工具（临时排查 UI/报错用）
+  openDevTools: () => ipcRenderer.invoke('devtools:open'),
+
+  // 保存完成后一键重启整个程序
+  restartApp: () => ipcRenderer.invoke('app:restart'),
 
   // 文件管理（旧接口，保留兼容）
   saveFile: (filename, data, opts) => ipcRenderer.invoke('save-file', { filename, data, overwrite: !!(opts && opts.overwrite) }),
@@ -50,34 +53,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 获取当前位置（IP 定位，配合联网搜索使用）
   getLocation: () => ipcRenderer.invoke('get-location'),
 
-  // Shell 命令执行（路径 A：AI 写代码 / 跑脚本 / 安装依赖 / 部署环境）
-  // 全部走主进程白名单 + 路径校验，避免任意命令执行
-  shell: {
-    exec: (opts) => ipcRenderer.invoke('shell:exec', opts || {}),
-    spawn: (opts) => ipcRenderer.invoke('shell:spawn', opts || {}),
-    kill: (handle) => ipcRenderer.invoke('shell:kill', handle),
-    listJobs: () => ipcRenderer.invoke('shell:listJobs'),
-    getEnv: (key) => ipcRenderer.invoke('shell:getEnv', key),
-    // review S-2：run_node / run_python 用，先校验 script_path 是否在白名单内
-    assertScriptPathAllowed: (scriptPath) => ipcRenderer.invoke('shell:assertScriptPathAllowed', scriptPath),
-    // 长任务事件流（spawn 后台进程时订阅）
-    onStdout: (cb) => {
-      const h = (_e, p) => { try { if (typeof cb === 'function') cb(p) } catch (_) {} }
-      ipcRenderer.on('shell:stdout', h)
-      return () => { try { ipcRenderer.removeListener('shell:stdout', h) } catch (_) {} }
-    },
-    onStderr: (cb) => {
-      const h = (_e, p) => { try { if (typeof cb === 'function') cb(p) } catch (_) {} }
-      ipcRenderer.on('shell:stderr', h)
-      return () => { try { ipcRenderer.removeListener('shell:stderr', h) } catch (_) {} }
-    },
-    onExit: (cb) => {
-      const h = (_e, p) => { try { if (typeof cb === 'function') cb(p) } catch (_) {} }
-      ipcRenderer.on('shell:exit', h)
-      return () => { try { ipcRenderer.removeListener('shell:exit', h) } catch (_) {} }
-    }
-  },
-
   // AI 配置管理
   getAIConfig: () => ipcRenderer.invoke('get-ai-config'),
   // 统一深克隆：调用方可能传入 Vue 响应式 Proxy，IPC 结构化克隆会抛
@@ -90,10 +65,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 实测探测多模态模型可用性（发真实小图验证）
   testVisionModel: (baseURL, apiKey, model, autoComplete, profileId) => ipcRenderer.invoke('ai:testVisionModel', { baseURL, apiKey, model, autoComplete, profileId }),
   getVisionConfig: () => ipcRenderer.invoke('ai:getVisionConfig'),
-  // Embedding 向量化模型
-  listEmbeddingModels: (baseURL, apiKey, profileId, autoComplete) => ipcRenderer.invoke('ai:listEmbeddingModels', { baseURL, apiKey, profileId, autoComplete }),
-  testEmbedding: (baseURL, apiKey, model, autoComplete, profileId) => ipcRenderer.invoke('ai:testEmbedding', { baseURL, apiKey, model, autoComplete, profileId }),
-  aiEmbed: (texts, type) => ipcRenderer.invoke('ai:embed', { texts, type }),
+  getEmbeddingConfig: () => ipcRenderer.invoke('ai:getEmbeddingConfig'),
+  embedding: (payload) => ipcRenderer.invoke('ai:embedding', payload || {}),
 
   // AI 对话请求（通过主进程代理，避免 CORS；apiKey 由主进程按 profileId 注入，渲染进程不持有明文）
   aiChat: (url, headers, body, profileId) => ipcRenderer.invoke('ai:chat', { url, headers, body, profileId }),
@@ -136,7 +109,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 默认保存目录
   getDefaultSaveDir: () => ipcRenderer.invoke('get-default-save-dir'),
-  setSaveDir: (dirPath) => ipcRenderer.invoke('set-save-dir', dirPath),
 
   // 版本快照（覆盖保存自动备份，可列出/恢复）
   listFileVersions: (filePath) => ipcRenderer.invoke('list-file-versions', filePath),
@@ -176,6 +148,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
+  deskCalendar: {
+    onStatus: (callback) => {
+      const handler = (_event, payload) => callback(payload)
+      ipcRenderer.on('desk-calendar:status', handler)
+      return () => ipcRenderer.removeListener('desk-calendar:status', handler)
+    }
+  },
+
   // MCP 服务端桥接（外部 AI 客户端通过 /mcp 端点调用本程序工具）
   mcpServer: {
     onRequest: (callback) => {
@@ -209,38 +189,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // MCP 多服务管理
-  fsGuard: {
-    // 渲染层在"打开 .smm 文件/用户选文件"时调用，把所属目录加入主进程白名单（review C.1）
-    setActiveFileDir: (dir) => ipcRenderer.invoke('fsGuard:setActiveFileDir', dir),
-    addAllowed: (dirs) => ipcRenderer.invoke('fsGuard:addAllowed', dirs),
-    reset: () => ipcRenderer.invoke('fsGuard:reset')
-  },
-
-  network: {
-    // 当前状态（主进程缓存）
-    getState: () => ipcRenderer.invoke('network:getState'),
-    // 主动探测一次（用于 UI 上的"重试"按钮）
-    checkNow: () => ipcRenderer.invoke('network:checkNow'),
-    // 订阅主进程推送（online/offline 变化 + 心跳）；返回 unsubscribe 函数
-    onStatusChange: (cb) => {
-      const handler = (_event, payload) => { try { if (typeof cb === 'function') cb(payload) } catch (e) {} }
-      ipcRenderer.on('network:status', handler)
-      return () => { try { ipcRenderer.removeListener('network:status', handler) } catch (e) {} }
-    }
-  },
   mcp: {
     list: () => ipcRenderer.invoke('mcp:list'),
     create: (server) => ipcRenderer.invoke('mcp:create', server),
     update: (id, patch) => ipcRenderer.invoke('mcp:update', id, patch),
     remove: (id) => ipcRenderer.invoke('mcp:delete', id),
-    listTools: (id, overrideTimeoutMs) => ipcRenderer.invoke('mcp:listTools', id, overrideTimeoutMs),
-    callTool: (id, toolName, args) => ipcRenderer.invoke('mcp:callTool', id, toolName, args),
-    // 主进程主动推送 MCP 服务状态变化（进程退出/启动失败）。订阅返回取消订阅函数。
-    onStatusChange: (cb) => {
-      const handler = (_event, payload) => { try { if (typeof cb === 'function') cb(payload) } catch (e) {} }
-      ipcRenderer.on('mcp:status', handler)
-      return () => { try { ipcRenderer.removeListener('mcp:status', handler) } catch (e) {} }
-    }
+    listTools: (id) => ipcRenderer.invoke('mcp:listTools', id),
+    callTool: (id, toolName, args) => ipcRenderer.invoke('mcp:callTool', id, toolName, args)
   },
 
   // Skills 多技能管理
@@ -253,9 +208,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     import: (files) => ipcRenderer.invoke('skills:import', {
       files: (files || []).map((f) => ({ name: f.name, relativePath: f.relativePath, base64: f.base64 }))
     }),
-    openDir: () => ipcRenderer.invoke('skills:openDir'),
-    // 获取内置「AI 能力扩展引导」Skill 的 SKILL.md 原文（用于「下载 Skill 创建指南」按钮）
-    getBuiltinGuideContent: () => ipcRenderer.invoke('skills:getBuiltinGuideContent')
+    openDir: () => ipcRenderer.invoke('skills:openDir')
   },
 
   // 自定义工具（userData/custom-tools + 项目 custom-tools）
@@ -266,30 +219,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openDir: () => ipcRenderer.invoke('customTools:openDir'),
     getSpec: () => ipcRenderer.invoke('customTools:getSpec'),
     saveSpec: () => ipcRenderer.invoke('customTools:saveSpec'),
-    importFolder: (folderName, files) => ipcRenderer.invoke('customTools:importFolder', { folderName, files }),
-    // 主进程在工具内部调用 context.mindmap.* 时，会把请求通过此通道推给渲染层，
-    // 渲染层处理完后通过 replyMindmapRequest 把结果回传
-    onMindmapRequest: (handler) => {
-      const listener = (_e, msg) => {
-        try { handler(msg) } catch (err) { /* ignore */ }
-      }
-      ipcRenderer.on('customTools:mindmapRequest', listener)
-      return () => { try { ipcRenderer.removeListener('customTools:mindmapRequest', listener) } catch (e) {} }
-    },
-    replyMindmapRequest: (reqId, result, error) => {
-      try {
-        ipcRenderer.send('customTools:mindmapResponse', {
-          reqId,
-          result: error ? null : result,
-          error: error ? String(error) : null
-        })
-      } catch (e) { /* ignore */ }
-    },
-    onStatusChange: (cb) => {
-      const handler = (_event, payload) => { try { if (typeof cb === 'function') cb(payload) } catch (e) {} }
-      ipcRenderer.on('customTools:status', handler)
-      return () => { try { ipcRenderer.removeListener('customTools:status', handler) } catch (e) {} }
-    }
+    importFolder: (folderName, files) => ipcRenderer.invoke('customTools:importFolder', { folderName, files })
   },
 
   // OCR 识别
@@ -463,19 +393,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('db:indexFile', { filePath, fileName, treeData, mtime }),
     indexDocument: (opts) => ipcRenderer.invoke('db:indexDocument', opts),
     removeFile: (filePath) => ipcRenderer.invoke('db:removeFile', { filePath }),
-    removeDir: (dirPath) => ipcRenderer.invoke('db:removeDir', { dirPath }),
     getStats: () => ipcRenderer.invoke('db:getStats'),
-    listFiles: () => ipcRenderer.invoke('db:listFiles'),
-    getFileEntries: (filePath) => ipcRenderer.invoke('db:getFileEntries', { filePath })
+    listFiles: () => ipcRenderer.invoke('db:listFiles')
   },
 
   // 文档向量库（本地语义检索，模型在渲染进程推理）
   vector: {
     indexDocument: (opts) => ipcRenderer.invoke('vector:indexDocument', opts),
-    indexMindMap: (opts) => ipcRenderer.invoke('vector:indexMindMap', opts),
+    appendDocument: (opts) => ipcRenderer.invoke('vector:appendDocument', opts),
     remove: (filePath) => ipcRenderer.invoke('vector:remove', { filePath }),
-    clearAll: () => ipcRenderer.invoke('vector:clearAll'),
-    listFiles: () => ipcRenderer.invoke('vector:listFiles'),
     search: (queryVector, topK) => ipcRenderer.invoke('vector:search', { queryVector, topK }),
     getStats: () => ipcRenderer.invoke('vector:getStats')
   },
@@ -506,4 +432,3 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   }
 })
-

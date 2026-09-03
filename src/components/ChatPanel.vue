@@ -1,27 +1,4 @@
 <template>
-  <div class="chat-panel-root">
-  <div v-if="thinkingSeconds >= 25 && (aiStatus === 'thinking' || aiStatus === 'calling')" class="thinking-progress-banner" data-testid="thinking-progress">
-    <span class="thinking-progress-icon">⏳</span>
-    <span class="thinking-progress-text">
-      AI 正在思考…… 已 {{ thinkingSeconds }} 秒
-      <template v-if="thinkingSeconds >= 60">· 可点右上角停止</template>
-    </span>
-  </div>
-  <div v-if="showNetworkBanner && !networkOnline" class="network-offline-banner" data-testid="network-offline-banner">
-    <span class="network-offline-icon">📡</span>
-    <span class="network-offline-text">网络不可用，联网搜索/网页读取/远程 AI 暂时不可用。</span>
-    <button class="network-offline-recheck" @click="forceRecheckNetwork" title="重新检测网络">重新检测</button>
-    <button class="network-offline-close" @click="dismissNetworkBanner" title="关闭提示">×</button>
-  </div>
-  <div v-if="mcpStatusList.length" class="mcp-status-banner-wrap" data-testid="mcp-status-banner">
-    <div v-for="issue in mcpStatusList" :key="issue.id" class="mcp-status-banner">
-      <span class="mcp-status-icon">⚠️</span>
-      <span class="mcp-status-text">
-        MCP「{{ issue.serverName }}」{{ issue.status === 'exit' ? '已停止' : '异常' }}{{ issue.reason ? '：' + issue.reason : '' }}
-      </span>
-      <button class="mcp-status-close" @click="dismissMcpIssue(issue.id)" title="关闭提示">×</button>
-    </div>
-  </div>
   <div class="chat-panel">
     <!-- 头部 -->
     <header class="chat-header">
@@ -33,6 +10,7 @@
         </div>
       </div>
       <div v-if="!compact" class="header-right">
+        <span class="ai-bind-target-name" :title="aiBindTargetDisplay">{{ aiBindTargetDisplay }}</span>
         <el-dropdown v-if="mindMapWindows.length" trigger="click" @command="onAiBindCommand">
           <button
             class="header-icon-btn ai-bind-btn"
@@ -92,12 +70,12 @@
       <div
         v-for="msg in messages"
         :key="msg.id"
-        :class="['message', msg.role, msg.isAiAction ? 'ai-action' : '']"
+        :class="['message', msg.role]"
       >
         <!-- 用户消息 -->
-        <div v-if="msg.role === 'user'" class="message-content user-content" :class="{ 'is-ai-action': msg.isAiAction }">
-          <span v-if="msg.isAiAction" class="ai-action-icon" aria-hidden="true">⚡</span>
-          <span class="ai-action-text">{{ msg.content }}</span>
+        <div v-if="msg.role === 'user'" class="message-content user-content">
+          <span v-if="msg.aiAction" class="ai-action-chip">{{ msg.aiAction }}</span>
+          <span v-else>{{ msg.content }}</span>
           <!-- 已发送的图片：点击放大预览，双击用系统默认程序打开 -->
           <div v-if="msg.images && msg.images.length" class="msg-images">
             <img
@@ -187,13 +165,30 @@
 
         <!-- AI 消息 -->
         <div v-else class="message-content assistant-content">
-          <!-- Markdown 渲染内容（review #13.4：超长自动折叠） -->
+          <!-- 深度思考折叠块 -->
+          <div
+            v-if="msg.reasoning"
+            class="reasoning-block"
+            :class="{ expanded: msg.reasoningExpanded }"
+          >
+            <button
+              class="reasoning-toggle"
+              @click="msg.reasoningExpanded = !msg.reasoningExpanded"
+            >
+              <svg class="reasoning-chevron" viewBox="0 0 16 16" fill="none">
+                <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span class="reasoning-label">深度思考</span>
+              <span class="reasoning-status">{{ msg.reasoningThinking ? '思考中…' : '已完成' }}</span>
+            </button>
+            <Transition name="reasoning-pop">
+              <div v-show="msg.reasoningExpanded" class="reasoning-content">
+                <pre>{{ msg.reasoning }}</pre>
+              </div>
+            </Transition>
+          </div>
+          <!-- Markdown 渲染内容 -->
           <div v-if="msg.content" class="md-content" :class="{ 'show-raw': msg.showRaw }">
-            <template v-if="isAiMessageLong(msg) && !msg.expanded && !msg.showRaw">
-              <div class="md-collapsed">{{ previewAiContent(msg) }}</div>
-              <button class="md-collapse-toggle" @click="toggleAiExpanded(msg)">展开 ▾ （共 {{ stripThinkBlocks(msg.content).split(String.fromCharCode(10)).length }} 行）</button>
-            </template>
-            <template v-else>
             <div v-if="msg.showRaw" class="md-raw-text">{{ stripThinkBlocks(msg.content) }}</div>
             <div
               v-else
@@ -201,7 +196,6 @@
               @click="handleLinkClick"
               @contextmenu="handleMdContextMenu"
             ></div>
-            </template>
             <!-- 显示原文/渲染切换按钮 -->
             <button
               v-if="msg.content && msg.content.includes('\n')"
@@ -328,96 +322,7 @@
             </svg>
             撤销本次 AI 全部操作
           </button>
-          <!-- Skill 沉淀卡片（review bug：在消息列表中渲染，可编辑、可保存、可一键试用） -->
-          <div v-if="msg.skillCard" class="skill-card" :class="['skill-card-' + msg.skillCard.status]">
-            <div class="skill-card-header">
-              <span class="skill-card-icon">⚡</span>
-              <span class="skill-card-title">Skill 沉淀</span>
-              <span class="skill-card-status">
-                <template v-if="msg.skillCard.status === 'analyzing'">分析中...</template>
-                <template v-else-if="msg.skillCard.status === 'ready'">可保存</template>
-                <template v-else-if="msg.skillCard.status === 'saving'">保存中...</template>
-                <template v-else-if="msg.skillCard.status === 'saved'">已保存</template>
-                <template v-else-if="msg.skillCard.status === 'not_feasible'">不可行</template>
-                <template v-else-if="msg.skillCard.status === 'failed'">失败</template>
-                <template v-else-if="msg.skillCard.status === 'discarded'">已放弃</template>
-              </span>
-            </div>
-            <!-- 可行性原因 -->
-            <div v-if="msg.skillCard.status === 'not_feasible' || msg.skillCard.reason" class="skill-card-reason">
-              <strong>AI 评估：</strong>{{ msg.skillCard.reason || (msg.skillCard.parsed && msg.skillCard.parsed.reason) || '（无）' }}
-            </div>
-            <!-- 用户额外要求 -->
-            <div v-if="msg.skillCard.requirements" class="skill-card-reason">
-              <strong>用户额外要求：</strong>{{ msg.skillCard.requirements }}
-            </div>
-            <!-- 可编辑字段：name / description / instructions -->
-            <template v-if="msg.skillCard.status === 'ready' || msg.skillCard.status === 'saving' || msg.skillCard.status === 'saved' || msg.skillCard.status === 'failed'">
-              <div class="skill-card-field">
-                <label>名称</label>
-                <input
-                  v-model="msg.skillCardName"
-                  type="text"
-                  class="skill-card-input"
-                  :disabled="msg.skillCard.status === 'saving' || msg.skillCard.status === 'saved'"
-                  maxlength="40"
-                  placeholder="Skill 名称（≤40 字）"
-                />
-              </div>
-              <div class="skill-card-field">
-                <label>说明</label>
-                <input
-                  v-model="msg.skillCardDesc"
-                  type="text"
-                  class="skill-card-input"
-                  :disabled="msg.skillCard.status === 'saving' || msg.skillCard.status === 'saved'"
-                  maxlength="200"
-                  placeholder="Skill 用途简述（≤200 字）"
-                />
-              </div>
-              <div class="skill-card-field">
-                <label>指令（Instructions）</label>
-                <textarea
-                  v-model="msg.skillCardInstructions"
-                  class="skill-card-textarea"
-                  :disabled="msg.skillCard.status === 'saving' || msg.skillCard.status === 'saved'"
-                  maxlength="10000"
-                  rows="8"
-                  placeholder="给未来 AI 执行的逐步指令"
-                ></textarea>
-              </div>
-            </template>
-            <!-- 错误信息 -->
-            <div v-if="msg.skillCard.status === 'failed' && msg.skillCard.error" class="skill-card-error">
-              {{ msg.skillCard.error }}
-            </div>
-            <!-- 已保存后展示 Skill id 与跳转入口 -->
-            <div v-if="msg.skillCard.status === 'saved' && msg.skillCard.savedSkill" class="skill-card-saved">
-              <span class="skill-card-saved-tag">ID: {{ msg.skillCard.savedSkill.id }}</span>
-              <span class="skill-card-saved-tag">来源: AI 沉淀</span>
-            </div>
-            <!-- 操作按钮 -->
-            <div v-if="msg.skillCard.status === 'ready'" class="skill-card-actions">
-              <button class="skill-card-btn primary" @click="saveSkillCard(msg)">💾 保存</button>
-              <button class="skill-card-btn" @click="trySkillCard(msg)" title="把 instructions 当作新指令发给 AI 演练">▶ 一键试用</button>
-              <button class="skill-card-btn danger" @click="discardSkillCard(msg)">✕ 取消</button>
-            </div>
-          </div>
         </div>
-        <!-- 重新生成按钮（review #13.3） -->
-        <button
-          v-if="msg.role === 'assistant'"
-          class="msg-regen-btn"
-          @click.stop="regenerateAiMessage(msg)"
-          :title="'复制上一条用户消息并自动发送'"
-          data-testid="regenerate-btn"
-        >
-          <svg viewBox="0 0 16 16" fill="none" width="14" height="14">
-            <path d="M2 8a6 6 0 1 1 1.76 4.24M2 13v-3h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-
-
         <!-- 复制按钮 -->
         <button
           class="msg-copy-btn"
@@ -473,7 +378,7 @@
     </div>
 
     <!-- 工具栏：记忆设置 / 历史记录 / 新建对话 -->
-    <div class="chat-toolbar" :class="{ 'compact-toolbar': compact }">
+    <div class="chat-toolbar">
       <button v-if="!compact" class="toolbar-btn" @click="showMemoryDialog = true" title="设置永久记忆，AI将严格遵守">
         <svg viewBox="0 0 20 20" fill="none" width="14" height="14">
           <path d="M10 2L3 5v5c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V5l-7-3z" stroke="currentColor" stroke-width="1.5" fill="none"/>
@@ -488,49 +393,13 @@
         </svg>
         <span>历史记录</span>
       </button>
-      <!-- 快速入口：创建 Skill / 工具 / MCP（点击后 AI 自动加载引导 Skill 并开启交互） -->
-      <button class="toolbar-btn create-ability-btn" @click="invokeBuiltinGuide" title="让 AI 引导你创建 Skill、自定义工具或 MCP 服务">
-        <svg viewBox="0 0 20 20" fill="none" width="14" height="14">
-          <!-- 加号 + 小方块（表示新增能力条目） -->
-          <rect x="3" y="3" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.4" fill="none"/>
-          <path d="M10 7v6M7 10h6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-        </svg>
-        <span>创建能力</span>
-      </button>
       <button class="toolbar-btn primary" @click="newConversation" title="开始新的对话">
         <svg viewBox="0 0 20 20" fill="none" width="14" height="14">
           <path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
         <span>新建对话</span>
       </button>
-                  <!-- 深度思考：侧边栏模式移至输入框右下角（上拉式），悬浮窗模式移至底部 Skill 按钮旁 -->
-      <div v-if="false" class="deep-thinking-switcher" :class="{ active: deepThinkingEnabled }">
-        <button
-          class="toolbar-btn deep-thinking-btn deep-thinking-btn-compact"
-          :class="{ on: deepThinkingEnabled }"
-          @click.stop="toggleDeepThinkingMenu"
-          :title="deepThinkingEnabled ? `深度思考 ${deepThinkingEffort}` : `深度思考（点击开启）`"
-        >
-          <span class="deep-thinking-icon-text">{{ deepThinkingEnabled ? (deepThinkingEffort === 'low' ? 'L' : deepThinkingEffort === 'medium' ? 'M' : 'H') : '' }}</span>
-        </button>
-        <Transition name="model-dropdown">
-          <div v-if="deepThinkingMenuVisible" class="deep-thinking-menu" @click.stop>
-            <div class="deep-thinking-option" :class="{ active: deepThinkingEffort === 'low' }" @click="setDeepThinkingEffort('low')">
-              <span>Low</span>
-              <span v-if="deepThinkingEffort === 'low'" class="deep-thinking-check">&#10003;</span>
-            </div>
-            <div class="deep-thinking-option" :class="{ active: deepThinkingEffort === 'medium' }" @click="setDeepThinkingEffort('medium')">
-              <span>Medium</span>
-              <span v-if="deepThinkingEffort === 'medium'" class="deep-thinking-check">&#10003;</span>
-            </div>
-            <div class="deep-thinking-option" :class="{ active: deepThinkingEffort === 'high' }" @click="setDeepThinkingEffort('high')">
-              <span>High</span>
-              <span v-if="deepThinkingEffort === 'high'" class="deep-thinking-check">&#10003;</span>
-            </div>
-          </div>
-        </Transition>
-      </div>
-      <!-- 悬浮窗模式：模型切换放到"新建对话"右边，方便看清当前模型（侧边窗模式仍在底部） -->
+      <!-- 悬浮窗模式：模型切换放到"新建对话"右边，方便看清当前模型（侧边窗模式仍在底部） -->
       <div v-if="compact" class="model-switcher toolbar-model-switcher">
         <button class="model-switch-btn" @click="toggleModelDropdown" :disabled="fetchingModels" title="点击切换模型">
           <svg viewBox="0 0 16 16" fill="none" width="13" height="13">
@@ -849,64 +718,18 @@
           <button class="ref-chip-close" title="移除工具" @click="removeAttachedTool(i)">×</button>
         </span>
       </div>
-      <!-- 输入框 + 右下角深度思考上拉按钮（侧边栏模式） -->
-      <div class="chat-input-wrap">
-        <textarea
-          ref="textareaRef"
-          v-model="inputText"
-          class="chat-input"
-          rows="3"
-          placeholder="输入问题或指令...（可直接拖入文件）"
-          @keydown.enter.exact.prevent="sendMessage"
-          @keydown.enter.shift.exact="onShiftEnter"
-          @keydown.delete="onInputKeydownDelete"
-          @paste="onPaste"
-          @input="onInputDetect"
-        ></textarea>
-        <!-- 侧边栏模式：输入框右下角深度思考上拉选择器 -->
-        <div v-if="!compact" class="input-deep-thinking-pullup" :class="{ active: deepThinkingEnabled }">
-          <button
-            class="pullup-btn"
-            :class="{ on: deepThinkingEnabled }"
-            @click.stop="toggleDeepThinkingPullup"
-            :title="deepThinkingEnabled ? `深度思考：${effortLabel(deepThinkingEffort)}（点击切换档位）` : '点击开启深度思考'"
-          >
-            <svg v-if="!deepThinkingEnabled" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M8 2a5 5 0 0 1 5 5c0 2-1 3.5-2 4.5V13H5v-1.5C4 10.5 3 9 3 7a5 5 0 0 1 5-5z"/>
-              <path d="M6 13h4"/>
-            </svg>
-            <span v-else class="pullup-level">{{ deepThinkingEffort === 'low' ? 'L' : deepThinkingEffort === 'medium' ? 'M' : 'H' }}</span>
-          </button>
-          <Transition name="pullup-menu">
-            <div v-if="deepThinkingPullupVisible" class="pullup-menu" @click.stop>
-              <div class="pullup-menu-title">深度思考</div>
-              <!-- review bug：原模板在关闭状态下打开菜单没有任何可点击项（"开启"按钮缺失），现在补上 -->
-              <div v-if="!deepThinkingEnabled" class="pullup-option pullup-enable" @click="enableDeepThinkingPullup">
-                <span>开启深度思考</span>
-                <span class="pullup-check">⚡</span>
-              </div>
-              <template v-else>
-                <div class="pullup-option" :class="{ active: deepThinkingEffort === 'low' }" @click="setDeepThinkingPullupEffort('low')">
-                  <span>轻量 · Low</span>
-                  <span v-if="deepThinkingEffort === 'low'" class="pullup-check">&#10003;</span>
-                </div>
-                <div class="pullup-option" :class="{ active: deepThinkingEffort === 'medium' }" @click="setDeepThinkingPullupEffort('medium')">
-                  <span>中等 · Medium</span>
-                  <span v-if="deepThinkingEffort === 'medium'" class="pullup-check">&#10003;</span>
-                </div>
-                <div class="pullup-option" :class="{ active: deepThinkingEffort === 'high' }" @click="setDeepThinkingPullupEffort('high')">
-                  <span>深度 · High</span>
-                  <span v-if="deepThinkingEffort === 'high'" class="pullup-check">&#10003;</span>
-                </div>
-                <div class="pullup-divider"></div>
-                <div class="pullup-option pullup-disable" @click="disableDeepThinkingPullup">
-                  <span>关闭深度思考</span>
-                </div>
-              </template>
-            </div>
-          </Transition>
-        </div>
-      </div>
+      <textarea
+        ref="textareaRef"
+        v-model="inputText"
+        class="chat-input"
+        rows="3"
+        placeholder="输入问题或指令...（可直接拖入文件）"
+        @keydown.enter.exact.prevent="sendMessage"
+        @keydown.enter.shift.exact="onShiftEnter"
+        @keydown.delete="onInputKeydownDelete"
+        @paste="onPaste"
+        @input="onInputDetect"
+      ></textarea>
 
       <!-- 已附加的 MCP 服务标签 -->
       <div v-if="attachedMcps.length > 0" class="attached-skills">
@@ -997,54 +820,25 @@
           class="kb-mode-btn"
           :class="{ active: distillingSkill }"
           :disabled="distillingSkill"
-          title="分析当前对话，尝试沉淀为可复用 Skill"
+          title="工具沉淀：分析当前对话，沉淀为 Skill / MCP / 自定义工具"
           @click="generateSkillFromConversation"
         >
           <svg viewBox="0 0 20 20" fill="none" width="15" height="15">
             <path d="M5 3h8l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.4"/>
             <path d="M8 10h5M8 13h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
           </svg>
-          <span class="kb-mode-text">Skill</span>
+          <span class="kb-mode-text">工具沉淀</span>
         </button>
 
-        <!-- 悬浮窗模式：深度思考按钮放在 Skill 按钮右边 -->
-        <div v-if="compact" class="deep-thinking-switcher bottom-bar-deep-thinking" :class="{ active: deepThinkingEnabled }">
-          <button
-            class="toolbar-btn deep-thinking-btn deep-thinking-btn-compact"
-            :class="{ on: deepThinkingEnabled }"
-            @click.stop="toggleDeepThinkingMenu"
-            :title="deepThinkingEnabled ? `深度思考 ${deepThinkingEffort}` : `深度思考（点击开启）`"
-          >
-            <span class="deep-thinking-icon-text">{{ deepThinkingEnabled ? (deepThinkingEffort === 'low' ? 'L' : deepThinkingEffort === 'medium' ? 'M' : 'H') : '' }}</span>
-          </button>
-          <Transition name="model-dropdown">
-            <div v-if="deepThinkingMenuVisible" class="deep-thinking-menu" @click.stop>
-              <!-- review bug：关闭状态下打开菜单也需要"开启"入口（之前完全没有可点的项） -->
-              <div v-if="!deepThinkingEnabled" class="deep-thinking-option" @click="enableDeepThinkingPullup">
-                <span>开启深度思考</span>
-                <span class="deep-thinking-check">⚡</span>
-              </div>
-              <template v-else>
-                <div class="deep-thinking-option" :class="{ active: deepThinkingEffort === 'low' }" @click="setDeepThinkingEffort('low')">
-                  <span>Low</span>
-                  <span v-if="deepThinkingEffort === 'low'" class="deep-thinking-check">&#10003;</span>
-                </div>
-                <div class="deep-thinking-option" :class="{ active: deepThinkingEffort === 'medium' }" @click="setDeepThinkingEffort('medium')">
-                  <span>Medium</span>
-                  <span v-if="deepThinkingEffort === 'medium'" class="deep-thinking-check">&#10003;</span>
-                </div>
-                <div class="deep-thinking-option" :class="{ active: deepThinkingEffort === 'high' }" @click="setDeepThinkingEffort('high')">
-                  <span>High</span>
-                  <span v-if="deepThinkingEffort === 'high'" class="deep-thinking-check">&#10003;</span>
-                </div>
-                <div class="deep-thinking-divider"></div>
-                <div class="deep-thinking-option" @click="disableDeepThinking">
-                  <span>关闭深度思考</span>
-                </div>
-              </template>
-            </div>
-          </Transition>
-        </div>
+        <!-- 深度思考级别切换：输入框右下角快速切换，无需进设置 -->
+        <button
+          class="kb-mode-btn thinking-toggle"
+          :class="{ active: thinkingEnabled }"
+          :title="thinkingTitle"
+          @click="cycleThinkingMode"
+        >
+          <span class="thinking-level-glyph">{{ thinkingButtonLabel }}</span>
+        </button>
 
         <!-- 图片+发送按钮 -->
         <div class="input-actions">
@@ -1133,7 +927,60 @@
         </div>
       </Transition>
     </Teleport>
-  </div>
+
+    <!-- 工具沉淀：三选一分步向导 -->
+    <el-dialog
+      v-model="extensionWizardVisible"
+      title="工具沉淀向导"
+      width="640px"
+      append-to-body
+      destroy-on-close
+    >
+      <div v-if="extensionWizardStep === 0" class="ext-wizard-types">
+        <button class="ext-wizard-type" @click="selectExtensionType('skill')">
+          <b>Skill</b>
+          <span>沉淀一个可复用的 AI 方法/流程</span>
+        </button>
+        <button class="ext-wizard-type" @click="selectExtensionType('mcp')">
+          <b>MCP</b>
+          <span>接入外部 MCP 服务</span>
+        </button>
+        <button class="ext-wizard-type" @click="selectExtensionType('tool')">
+          <b>自定义工具</b>
+          <span>创建本地 tool.json + tool.js</span>
+        </button>
+      </div>
+
+      <el-form v-else label-position="top" class="ext-wizard-form">
+        <template v-if="extensionWizardType === 'skill'">
+          <el-form-item label="名称"><el-input v-model="extensionForm.name" placeholder="skill-name" /></el-form-item>
+          <el-form-item label="描述"><el-input v-model="extensionForm.description" placeholder="解决什么问题，何时使用" /></el-form-item>
+          <el-form-item label="指令"><el-input v-model="extensionForm.instructions" type="textarea" :rows="6" placeholder="逐步执行指令" /></el-form-item>
+        </template>
+        <template v-else-if="extensionWizardType === 'mcp'">
+          <el-form-item label="名称"><el-input v-model="extensionForm.name" /></el-form-item>
+          <el-form-item label="Transport">
+            <el-select v-model="extensionForm.transport">
+              <el-option label="HTTP/SSE" value="http" />
+              <el-option label="stdio" value="stdio" />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="extensionForm.transport === 'http'" label="URL"><el-input v-model="extensionForm.url" /></el-form-item>
+          <el-form-item v-else label="Command"><el-input v-model="extensionForm.command" /></el-form-item>
+          <el-form-item label="Args JSON"><el-input v-model="extensionForm.argsText" placeholder='["-y","package"]' /></el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item label="工具 ID"><el-input v-model="extensionForm.id" placeholder="my_tool" /></el-form-item>
+          <el-form-item label="名称"><el-input v-model="extensionForm.name" /></el-form-item>
+          <el-form-item label="描述"><el-input v-model="extensionForm.description" /></el-form-item>
+          <el-form-item label="tool.js"><el-input v-model="extensionForm.toolJs" type="textarea" :rows="8" /></el-form-item>
+        </template>
+        <div class="ext-wizard-actions">
+          <el-button @click="extensionWizardStep = 0">返回类型选择</el-button>
+          <el-button type="primary" :loading="extensionWizardSaving" @click="submitExtensionWizard">创建</el-button>
+        </div>
+      </el-form>
+    </el-dialog>
   </div>
 </template>
 
@@ -1148,7 +995,6 @@ import { aiService, buildBaseURL, resetWebSearchTask, createAIService } from '..
 import { uploadFileForProvider } from '../services/fileUploadService'
 import { handleToolCall, aiTools, getCoreTools, DANGEROUS_TOOLS, TOOL_METADATA, buildToolCatalogText } from '../services/toolHandler'
 import { useMindMapStore } from '../stores/mindMapStore'
-import { useDeepThinkingStore } from '../stores/deepThinkingStore'
 import { stripDynamicContext } from '../composables/useChatSend'
 import { isTrustMode, setTrustMode } from '../utils/trustMode'
 import { formatMemoryText } from '../utils/aiMemory'
@@ -1158,6 +1004,7 @@ import { stripThinkBlocks } from '../utils/thinkFilter'
 import { initCloze, applyClozeStyles, toggleAllCloze, isClozeHiddenAll } from '../utils/cloze'
 import { getDragFilePath, clearDragFilePath } from '../utils/dragState'
 import { smartClozeNodes, smartClozeFullMap } from '../utils/aiCloze'
+import { classifyMindMap, mindMapTypePrompt } from '../utils/mindMapType'
 import { parseDocument } from '../services/docParseService'
 import { ConcurrencyLimiter } from '../utils/concurrencyLimiter'
 import {
@@ -1225,6 +1072,11 @@ const emit = defineEmits(['tool-call-status', 'toggle-log-panel', 'log-updated',
 const aiBindTargetName = computed(() => {
   const w = (props.mindMapWindows || []).find(x => x.fileId === props.aiBindFileId)
   return w ? w.fileName : ''
+})
+
+const aiBindTargetDisplay = computed(() => {
+  if (props.aiBindLocked && aiBindTargetName.value) return aiBindTargetName.value
+  return props.currentFileName || '当前窗口'
 })
 
 // 切换 AI 绑定目标：__auto__ = 跟随当前窗口，其余为锁定到指定窗口
@@ -1308,52 +1160,22 @@ const copiedMsgId = ref(null)
 
 // 模型切换
 const currentModelName = ref('')
+const thinkingEnabled = ref(false)
+const thinkingLevel = ref('medium')
+const thinkingButtonLabel = computed(() => {
+  if (!thinkingEnabled.value) return '关'
+  if (thinkingLevel.value === 'low') return 'L'
+  if (thinkingLevel.value === 'medium') return 'M'
+  return 'H'
+})
+const thinkingTitle = computed(() => {
+  if (!thinkingEnabled.value) return '深度思考已关闭，点击开启 low'
+  if (thinkingLevel.value === 'low') return '深度思考：low，点击切换到 medium'
+  if (thinkingLevel.value === 'medium') return '深度思考：medium，点击切换到 high'
+  return '深度思考：high，点击关闭'
+})
 const availableModels = ref([])
 const modelDropdownVisible = ref(false)
-
-// 深度思考开关：使用全局 store 持久化，UI 仅控制菜单显隐与档位
-const deepThinkingStore = useDeepThinkingStore()
-const deepThinkingEnabled = computed(() => deepThinkingStore.enabled)
-const deepThinkingEffort = computed(() => deepThinkingStore.effort)
-const deepThinkingEfforts = deepThinkingStore.VALID_EFFORTS
-const deepThinkingMenuVisible = ref(false)
-const toggleDeepThinkingMenu = () => {
-  // review bug：原逻辑是"已关闭则强制开启"，违反用户预期——明明关了深度思考，点一下又被自动开了。
-  // 新逻辑：点击只是切换菜单显隐，不改 enabled 状态；档位变更在 setDeepThinkingEffort 里单独处理。
-  deepThinkingMenuVisible.value = !deepThinkingMenuVisible.value
-}
-const setDeepThinkingEffort = (v) => {
-  // 选择档位 = 用户主动开启（如果当前是关闭的）
-  deepThinkingStore.setEffort(v)
-  if (!deepThinkingStore.enabled) deepThinkingStore.setEnabled(true)
-  deepThinkingMenuVisible.value = false
-}
-const disableDeepThinking = () => {
-  deepThinkingStore.setEnabled(false)
-  deepThinkingMenuVisible.value = false
-}
-
-// 输入框右下角上拉式深度思考选择器（侧边栏模式）
-const deepThinkingPullupVisible = ref(false)
-const toggleDeepThinkingPullup = () => {
-  // review bug：同上，关闭状态点按钮不应被自动开启
-  deepThinkingPullupVisible.value = !deepThinkingPullupVisible.value
-}
-const setDeepThinkingPullupEffort = (v) => {
-  deepThinkingStore.setEffort(v)
-  if (!deepThinkingStore.enabled) deepThinkingStore.setEnabled(true)
-  deepThinkingPullupVisible.value = false
-}
-const disableDeepThinkingPullup = () => {
-  deepThinkingStore.setEnabled(false)
-  deepThinkingPullupVisible.value = false
-}
-// review bug：补充"开启深度思考"入口（关闭状态下打开菜单时显示）
-const enableDeepThinkingPullup = () => {
-  deepThinkingStore.setEnabled(true)
-  deepThinkingPullupVisible.value = false
-}
-const effortLabel = (v) => ({ low: '轻量 (low)', medium: '中等 (medium)', high: '深度 (high)' }[v] || v)
 const fetchingModels = ref(false)
 const knowledgeMode = ref(false)
 const knowledgeLoading = ref(false)
@@ -1621,7 +1443,8 @@ const undoAiTransaction = async (msg) => {
   try {
     if (mindMap.renderer && typeof mindMap.renderer.setData === 'function' && typeof mindMap.reRender === 'function') {
       mindMap.renderer.setData(snapshot)
-      mindMap.reRender()
+      // 撤销后调度完全重绘（短延迟防抖），避免快速连续撤销时渲染叠加
+      scheduleReRender('reRender', 100)
       if (mindMap.command && typeof mindMap.command.addHistory === 'function') {
         mindMap.command.addHistory()
       }
@@ -1692,111 +1515,40 @@ const toolCallProgress = (msg) => {
 }
 
 /* ============================================================
- * 快捷点选：解析 AI 回复末尾的问题选项，渲染为可点击按钮
- * 支持：是/否判断、A/1 单选、- [ ] 多选；均带"其他"补充输入框
+ * 快捷点选：解析 AI 回复中的 <ask> 询问标记，渲染为可点击按钮
+ * 协议：AI 需询问用户时输出 <ask>{"type":"single|multi","options":[...]}</ask>
  * ============================================================ */
 
-// 选项行匹配：A. xxx / A、xxx / (A) xxx / 1. xxx / - [ ] xxx（多选）/ - xxx
-const QP_OPTION_RES = [
-  { re: /^[（(]?([A-Ha-h])[)）.、:：点]\s*(.+)$/, type: 'letter' },
-  { re: /^[（(]?([1-9])[)）.、:：]\s*(.+)$/, type: 'number' },
-  { re: /^[-*•]\s*\[[ xX]?\]\s*(.+)$/, type: 'checkbox' },
-  { re: /^[-*•]\s+(.+)$/, type: 'bullet' }
-]
-// 问题信号：正文需含选择类词汇才把列表行识别为选项（避免普通罗列误判）
-const QP_CHOICE_SIGNAL = /(选择|选哪|哪一|哪个|哪些|请选|选一个|选几个|单选|多选|可多选|选项|请确认|确认一下|choose|option)/i
-// 是/否问题信号
-const QP_YESNO_SIGNAL = /(是否|要不要|需不需要|要不要|需不需|能不能|能不能|可不可以|可否|是不是|可以吗|需要吗|应该吗|建议吗|好吗|行吗|继续吗|对吗|正确吗)/
-const stripMd = (s) => String(s || '')
-  .replace(/\*\*(.+?)\*\*/g, '$1')
-  .replace(/[*_`]+/g, '')
-  .trim()
-
-// “你是想 A，还是想 B？” 这类自然语言选择：把最后一个含“还是/或者”的问题拆成选项
-const parseEitherOrQuickPicks = (text) => {
-  const matches = text.match(/([^。！？\n]*(?:还是|或者)[^。！？\n]*[?？]?)/g)
-  if (!matches || matches.length === 0) return null
-  const sentence = matches[matches.length - 1].trim()
-  if (!sentence) return null
-  const parts = sentence.split(/\s*(?:还是|或者)\s*/).map(s => s.trim()).filter(Boolean)
-  if (parts.length < 2) return null
-  const clean = parts.map(s => s
-    .replace(/^(你是想要|你是想|你想要|你想|你要|你是|想要|想|要|选择|选|是)/, '')
-    .trim()
-    .replace(/[?？。！\s]+$/g, '')
-  ).filter(Boolean).slice(0, 6)
-  if (clean.length < 2) return null
-  return { mode: 'single', options: clean }
-}
+// ========== AI 询问协议 ==========
+// AI 需要向用户提问时，必须输出明确的 <ask>...</ask> 标记块（内含 JSON）。
+// 前端只识别这个明确标记来渲染快捷回复按钮，不再用正则猜测 AI 是否在询问，
+// 从根上避免把 AI 的思考过程/正常输出误判成选项。
+// 协议格式：<ask>{"type":"single|multi","options":["选项1","选项2"],"question":"问题"}</ask>
+const ASK_BLOCK_RE = /<ask>\s*(\{[\s\S]*?\})\s*<\/ask>/g
 
 // 解析 AI 回复 → { mode: 'single'|'multi', options: string[] } | null
 const parseQuickPicks = (content) => {
   const text = stripThinkBlocks(content || '').trim()
-  if (!text || text.length > 6000) return null
-  const lines = text.split('\n').map(l => l.replace(/<[^>]+>/g, '').trimEnd())
-  // 从末尾向前收集选项行。允许选项块后面有少量非选项尾语（模型有时会多写一句“请告诉我”），
-  // 但不会因为一行尾语就漏掉 A/B/C/D 选项。
-  const opts = []
-  let multi = false
-  let bullets = false
-  let ignoredTailLines = 0
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim()
-    if (!line) {
-      if (opts.length > 0) {
-        ignoredTailLines++
-        if (ignoredTailLines > 2) break
-      }
-      continue // 末尾空行跳过
-    }
-    let hit = null
-    for (const p of QP_OPTION_RES) {
-      const m = line.match(p.re)
-      if (m) { hit = { p, m }; break }
-    }
-    if (!hit) {
-      if (opts.length > 0 && ignoredTailLines < 3) {
-        ignoredTailLines++
-        continue
-      }
-      break
-    }
-    ignoredTailLines = 0
-    let label
-    if (hit.p.type === 'letter') label = `${hit.m[1].toUpperCase()}. ${stripMd(hit.m[2])}`
-    else if (hit.p.type === 'number') label = `${hit.m[1]}. ${stripMd(hit.m[2])}`
-    else {
-      label = stripMd(hit.m[1])
-      if (hit.p.type === 'checkbox') multi = true
-      if (hit.p.type === 'bullet') bullets = true
-    }
-    if (!label || label.length > 80) break
-    opts.unshift(label)
-    if (opts.length >= 8) break
+  if (!text) return null
+  // 收集所有 <ask> 块，取最后一个（多轮补充询问时以最新为准）
+  let lastJson = null
+  let m
+  ASK_BLOCK_RE.lastIndex = 0
+  while ((m = ASK_BLOCK_RE.exec(text)) !== null) {
+    lastJson = m[1]
   }
-  const questionPart = lines.slice(0, Math.max(lines.length - opts.length, 0)).join('\n')
-  if (opts.length >= 2) {
-    // 误判防护：无复选框时，需选项前文字（末200字符）含选择类词汇或以问号结尾，
-    // 否则普通的操作步骤列表/要点罗列不会被当成选项
-    const qPart = questionPart.trim()
-    const hasSignal = QP_CHOICE_SIGNAL.test(qPart.slice(-200))
-    const endsWithQuestion = /[?？]\s*$/.test(qPart)
-    if (bullets && !multi && !hasSignal && !endsWithQuestion) return null
-    if (multi || hasSignal || endsWithQuestion) {
-      if (/(多选|选多个|哪些|哪几)/.test(text)) multi = true
-      return { mode: multi ? 'multi' : 'single', options: opts }
-    }
+  if (!lastJson) return null
+  try {
+    const obj = JSON.parse(lastJson)
+    const options = (Array.isArray(obj.options) ? obj.options : [])
+      .map(o => String(o).trim())
+      .filter(Boolean)
+    if (options.length < 2) return null
+    const mode = obj.type === 'multi' ? 'multi' : 'single'
+    return { mode, options: options.slice(0, 8) }
+  } catch (e) {
+    return null
   }
-  // 无显式选项：是/否判断题 → 自动生成 是/否（或 对/错）按钮
-  // 中文一般疑问句几乎都以"吗？"结尾，作为兜底信号；再加显式信号词（是否/要不要/能不能…）
-  const eitherOr = parseEitherOrQuickPicks(text)
-  if (eitherOr) return eitherOr
-  const tail = text.slice(-300)
-  const endsWithMa = /吗\s*[?？]\s*$/.test(text)
-  if ((QP_YESNO_SIGNAL.test(tail) && /[?？。]\s*$/.test(tail)) || endsWithMa) {
-    return { mode: 'single', options: /(对吗|正确吗|是否正确)/.test(tail) ? ['对', '错'] : ['是', '否'] }
-  }
-  return null
 }
 
 // 取消息的快捷点选（仅最后一条 AI 消息、AI 空闲时显示；内容变化时重新解析）
@@ -2175,13 +1927,6 @@ watch(
 // 当对话切换时通知父组件，用于日志面板按对话筛选
 // 切换文件时自动切换对话（多窗口/多标签体验）
 watch(() => props.currentFilePath, (newPath, oldPath) => {
-  // review C.1：把活跃文件所在目录通知主进程作为路径白名单
-  try {
-    if (window.electronAPI && window.electronAPI.fsGuard && typeof window.electronAPI.fsGuard.setActiveFileDir === 'function' && newPath) {
-      const __dir = String(newPath).replace(/[\\/]+/g, '/').replace(/\/[^\\/]+$/, '')
-      window.electronAPI.fsGuard.setActiveFileDir(__dir).catch(() => {})
-    }
-  } catch (e) { /* ignore */ }
   if (!newPath || newPath === oldPath) return
   const fid = String(newPath).replace(/[\\/]+/g, '/').replace(/\/+$/g, '')
   if (!fid) return
@@ -2234,28 +1979,53 @@ watch(currentConversation, (conv) => {
 
 /**
  * 加载当前 AI 配置中的模型名称
- * 双保险：除了顶层 model，再用 activeProfileId 找一遍对应 profile 的 model，
- * 防止主进程返回的 model 字段与 activeProfileId 不一致时仍显示旧档模型
  */
 const loadCurrentModel = async () => {
   try {
     if (window.electronAPI && window.electronAPI.getAIConfig) {
       const config = await window.electronAPI.getAIConfig()
-      let model = config.model || ''
-      const pid = config.activeProfileId
-      if (pid && Array.isArray(config.profiles)) {
-        const p = config.profiles.find(x => x.id === pid)
-        if (p && p.model) model = p.model
-      }
-      currentModelName.value = model
-      // 配置已切换：清空已缓存的模型列表，下次打开下拉框重新检测新配置档的模型
+      currentModelName.value = config.model || ''
+      // 配置档可能已切换，旧配置档的模型列表不能再复用。
+      // 下次打开模型下拉框时会按新配置档重新检测。
       availableModels.value = []
-      // 确保 aiService 下次发消息时重新从主进程加载新配置档（baseURL/profileId/model）
-      aiService.resetConfig()
+      thinkingEnabled.value = !!(config.thinking && config.thinking.enabled)
+      thinkingLevel.value = ['low', 'medium', 'high'].includes(config.thinking?.level)
+        ? config.thinking.level
+        : 'medium'
+      aiService.thinking = { enabled: thinkingEnabled.value, level: thinkingLevel.value }
     }
   } catch {
     // 忽略
   }
+}
+
+const saveThinkingMode = async () => {
+  aiService.thinking = { enabled: thinkingEnabled.value, level: thinkingLevel.value }
+  try {
+    if (window.electronAPI?.getAIConfig && window.electronAPI?.setAIConfig) {
+      const config = await window.electronAPI.getAIConfig()
+      config.thinking = { enabled: thinkingEnabled.value, level: thinkingLevel.value }
+      await window.electronAPI.setAIConfig(config)
+    }
+  } catch {
+    // 忽略保存错误
+  }
+  aiService.resetConfig()
+}
+
+const cycleThinkingMode = async () => {
+  if (!thinkingEnabled.value) {
+    thinkingEnabled.value = true
+    thinkingLevel.value = 'low'
+  } else if (thinkingLevel.value === 'low') {
+    thinkingLevel.value = 'medium'
+  } else if (thinkingLevel.value === 'medium') {
+    thinkingLevel.value = 'high'
+  } else {
+    thinkingEnabled.value = false
+    thinkingLevel.value = 'medium'
+  }
+  await saveThinkingMode()
 }
 
 /**
@@ -2423,18 +2193,6 @@ const onGlobalClick = (e) => {
       modelDropdownVisible.value = false
     }
   }
-  if (deepThinkingMenuVisible.value) {
-    const target = e.target
-    if (target && !target.closest('.deep-thinking-switcher')) {
-      deepThinkingMenuVisible.value = false
-    }
-  }
-  if (deepThinkingPullupVisible.value) {
-    const target = e.target
-    if (target && !target.closest('.input-deep-thinking-pullup')) {
-      deepThinkingPullupVisible.value = false
-    }
-  }
 }
 
 /* ============================================================
@@ -2538,33 +2296,6 @@ const handleBeforeUnload = () => {
 }
 
 // 新建对话
-// ============ 内置「AI 能力扩展引导」Skill ============
-// 用户点击工具栏「创建能力」按钮时调用：通过调用 invoke_skill 工具（直接发送工具调用给 AI）让 AI 加载引导 Skill 并开启对话
-const BUILTIN_GUIDE_SKILL_ID = '__builtin_skill_creation_guide__'
-const invokeBuiltinGuide = async () => {
-  // 直接以用户身份发一条消息，让 AI 自动走 invoke_skill 路径（与用户自然说"帮我写个 Skill"行为一致）
-  const userMsg = '请帮我创建一个新的 AI 能力（Skill / 自定义工具 / MCP 三选一）。请先调用 invoke_skill 加载「AI 能力扩展引导」Skill（id: __builtin_skill_creation_guide__），然后按该 Skill 的引导流程与我交互。'
-  if (!textareaRef.value) return
-  // 强制设置输入框文本并提交（走标准的 sendMessage 逻辑）
-  const ta = textareaRef.value
-  ta.value = userMsg
-  // 触发 input 事件让 Vue 同步 v-model
-  ta.dispatchEvent(new Event('input', { bubbles: true }))
-  await nextTick()
-  sendMessage()
-}
-
-// 简单的意图识别：用户在主对话中请求"编写/新增 Skill/工具/MCP"时，自动通过工具调用加载引导 Skill
-const detectBuiltinGuideIntent = (text) => {
-  const q = String(text || '').trim()
-  if (!q) return false
-  // 排除明显是用户问 AI 关于如何使用 Skill 的问题
-  if (/怎么用|如何使用|怎么调用/.test(q) && !/(编写|创建|新增|加个|做一个|做个|写个|接入)/.test(q)) return false
-  return /(编写|创建|新增|加个|做一个|做个|写个|接入|添加).*(Skill|技能|自定义工具|工具|MCP|mcp)/i.test(q)
-        || /(Skill|技能|自定义工具|MCP|mcp).*(编写|创建|新增|加个|做一个|做个|写个|接入|添加)/i.test(q)
-        || /帮我(写|做|加|创)(一个|个).*(Skill|工具|MCP|mcp|技能)/i.test(q)
-}
-
 const newConversation = () => {
   // 进行中的生成先中止并丢弃回调，避免消息/日志落进新会话
   abortActiveGeneration()
@@ -2707,8 +2438,93 @@ const saveMemorySettings = () => {
 const distillingSkill = ref(false)
 let pendingSkillDistill = false
 
-// review bug：原版只在最后 ElMessage 弹个窗，用户根本看不到 AI 给出的内容，也没法改/试用。
-// 新版：AI 评估完后，在消息列表插入一张可编辑的 Skill 卡片，4 个按钮：「保存」「一键试用」「取消」
+const extensionWizardVisible = ref(false)
+const extensionWizardStep = ref(0)
+const extensionWizardType = ref('skill')
+const extensionWizardSaving = ref(false)
+const extensionForm = reactive({
+  name: '',
+  description: '',
+  instructions: '',
+  transport: 'http',
+  url: '',
+  command: '',
+  argsText: '[]',
+  id: '',
+  toolJs: ''
+})
+
+const resetExtensionForm = () => {
+  Object.assign(extensionForm, {
+    name: '',
+    description: '',
+    instructions: '',
+    transport: 'http',
+    url: '',
+    command: '',
+    argsText: '[]',
+    id: '',
+    toolJs: ''
+  })
+}
+
+const selectExtensionType = (type) => {
+  resetExtensionForm()
+  extensionWizardType.value = type
+  extensionWizardStep.value = 1
+}
+
+const submitExtensionWizard = async () => {
+  extensionWizardSaving.value = true
+  try {
+    if (extensionWizardType.value === 'skill') {
+      if (!extensionForm.name || !extensionForm.instructions) throw new Error('请填写名称和指令')
+      await window.electronAPI?.skills?.create?.({
+        name: extensionForm.name,
+        description: extensionForm.description,
+        instructions: extensionForm.instructions,
+        autoInvoke: true,
+        source: 'ai'
+      })
+    } else if (extensionWizardType.value === 'mcp') {
+      if (!extensionForm.name) throw new Error('请填写 MCP 名称')
+      let args = []
+      try { args = JSON.parse(extensionForm.argsText || '[]') } catch { throw new Error('Args JSON 格式错误') }
+      await window.electronAPI?.mcp?.create?.({
+        name: extensionForm.name,
+        transport: extensionForm.transport,
+        url: extensionForm.url,
+        command: extensionForm.command,
+        args,
+        headers: {},
+        env: {},
+        enabled: true
+      })
+    } else {
+      if (!extensionForm.id || !extensionForm.name || !extensionForm.toolJs) throw new Error('请填写工具 ID、名称和 tool.js')
+      const toolJson = {
+        id: extensionForm.id,
+        name: extensionForm.name,
+        description: extensionForm.description,
+        parameters: { type: 'object', properties: {}, required: [] },
+        enabled: true,
+        autoInvoke: true
+      }
+      const b64 = (s) => btoa(unescape(encodeURIComponent(String(s || ''))))
+      await window.electronAPI?.customTools?.importFolder?.(extensionForm.id, [
+        { relativePath: 'tool.json', base64: b64(JSON.stringify(toolJson, null, 2)) },
+        { relativePath: 'tool.js', base64: b64(extensionForm.toolJs) }
+      ])
+    }
+    extensionWizardVisible.value = false
+    ElMessage.success('扩展创建成功')
+  } catch (e) {
+    ElMessage.error(e.message || '创建失败')
+  } finally {
+    extensionWizardSaving.value = false
+  }
+}
+
 const runSkillDistill = async (requirements = '') => {
   if (messages.value.length === 0) {
     ElMessage.warning('当前对话还没有内容')
@@ -2719,150 +2535,53 @@ const runSkillDistill = async (requirements = '') => {
     return
   }
   distillingSkill.value = true
-  // 先插入一条"分析中"的卡片占位（消息列表反馈，不悬浮弹窗）
-  const distillMsg = {
-    id: genMsgId(),
-    role: 'assistant',
-    content: '正在分析当前对话并生成 Skill 草案...',
-    toolCalls: [],
-    skillCard: {
-      status: 'analyzing', // analyzing | ready | saving | saved | failed | discarded | not_feasible
-      reason: '',
-      parsed: null,
-      requirements: String(requirements || '').trim(),
-      error: ''
-    },
-    // review bug fix：v-model 依赖响应式字段；必须先初始化为空串，否则首次渲染时 Vue 会报
-    // "Cannot assign to read only property of undefined"；同时持久化对话时这些字段也会被存储
-    skillCardName: '',
-    skillCardDesc: '',
-    skillCardInstructions: ''
-  }
-  messages.value.push(distillMsg)
-  scrollToBottom()
   try {
-    const transcript = messages.value
-      .filter(m => m && m.id !== distillMsg.id) // 排除自己
-      .map(m => {
-        const role = m.role === 'user' ? '用户' : 'AI'
-        const text = stripDynamicContext(m.content || '')
-        const tools = (m.toolCalls || []).map(tc => `[工具 ${tc.displayName || tc.name} → ${tc.status}]`).join(' ')
-        return `${role}：${text}${tools ? `\n${tools}` : ''}`
-      }).join('\n\n')
+    const transcript = messages.value.map(m => {
+      const role = m.role === 'user' ? '用户' : 'AI'
+      const text = stripDynamicContext(m.content || '')
+      const tools = (m.toolCalls || []).map(tc => `[工具 ${tc.displayName || tc.name} → ${tc.status}]`).join(' ')
+      return `${role}：${text}${tools ? `\n${tools}` : ''}`
+    }).join('\n\n')
     const requirementText = String(requirements || '').trim()
       ? `\n用户对本次沉淀的额外要求：\n${String(requirements).trim()}\n`
       : ''
     const prompt = `请分析以下对话，判断能否沉淀为一个可复用的 Skill。\n\n要求：\n1. feasible=true 表示当前系统能力可以支持该 Skill；如果必须依赖外部未配置服务、或需要系统不存在的底层能力，则 feasible=false。\n2. 只沉淀已经验证成功的流程，失败过程不要固化为 Skill。\n3. name 短小明确，instructions 是给未来 AI 执行的逐步指令。${requirementText}\n只输出 JSON：\n{"feasible":true,"reason":"为什么可行/不可行","name":"技能名","description":"解决什么问题","instructions":"步骤1；步骤2"} \n\n当前可用工具摘要：\n${buildToolCatalogText(55)}\n\n对话内容：\n${transcript.slice(0, 18000)}`
-    const choice = await aiService.chat(prompt, '你是一个技能沉淀器，只输出严格 JSON。', null, { responseFormat: 'json' })
-    const content = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
+    let choice = await aiService.chat(prompt, '你是一个技能沉淀器，只输出严格 JSON。', null, { responseFormat: 'json', max_tokens: 800 })
+    let content = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
+    // 空内容重试：去掉 response_format 约束后再试一次
+    if (!content.trim()) {
+      choice = await aiService.chat(prompt, '你是一个技能沉淀器，只输出严格 JSON。', null, { max_tokens: 800 })
+      content = String(choice?.message?.content || '').replace(/```json|```/g, '').trim()
+    }
     const start = content.indexOf('{')
     const end = content.lastIndexOf('}')
     if (start === -1 || end === -1) throw new Error('AI 未返回有效 JSON')
     const parsed = JSON.parse(content.slice(start, end + 1))
-    distillMsg.skillCard.parsed = parsed
     if (!parsed.feasible) {
-      distillMsg.content = `本次暂未沉淀 Skill：${parsed.reason || '当前能力不支持'}`
-      distillMsg.skillCard.status = 'not_feasible'
-      distillMsg.skillCard.reason = parsed.reason || '当前能力不支持'
-      scrollToBottom()
+      ElMessage.info(`暂不沉淀：${parsed.reason || '当前能力不支持'}`)
       return
     }
     if (!parsed.name || !parsed.instructions) throw new Error('Skill 缺少名称或指令')
-    // AI 评估可行 → 渲染为可编辑卡片
-    distillMsg.content = '' // 卡片自带 UI，不再用 content 展示
-    distillMsg.skillCard.status = 'ready'
-    // 初始化可编辑字段默认值（用户在卡片里可改）
-    distillMsg.skillCardName = parsed.name
-    distillMsg.skillCardDesc = parsed.description || ''
-    distillMsg.skillCardInstructions = parsed.instructions
-    scrollToBottom()
+    const skill = await window.electronAPI.skills.create({
+      name: parsed.name,
+      description: parsed.description || '',
+      instructions: parsed.instructions,
+      autoInvoke: true,
+      source: 'ai'
+    })
+    ElMessage.success(`已沉淀 Skill「${skill.name}」`)
   } catch (e) {
     console.error('沉淀 Skill 失败:', e)
-    distillMsg.content = `沉淀失败：${e.message || e}`
-    distillMsg.skillCard.status = 'failed'
-    distillMsg.skillCard.error = e.message || String(e)
+    ElMessage.error(`沉淀 Skill 失败：${e.message || e}`)
   } finally {
     distillingSkill.value = false
   }
 }
 
-// 在消息列表里"保存"卡片（review bug：可编辑保存）
-const saveSkillCard = async (msg) => {
-  const card = msg?.skillCard
-  if (!card || card.status !== 'ready') return
-  const name = String(msg.skillCardName || card.parsed?.name || '').trim().slice(0, 40)
-  const description = String(msg.skillCardDesc || card.parsed?.description || '').trim().slice(0, 200)
-  const instructions = String(msg.skillCardInstructions || card.parsed?.instructions || '').trim().slice(0, 10000)
-  if (!name || !instructions) {
-    ElMessage.warning('名称与指令不能为空')
-    return
-  }
-  card.status = 'saving'
-  card.error = ''
-  try {
-    const skill = await window.electronAPI.skills.create({
-      name, description, instructions, autoInvoke: true, source: 'ai'
-    })
-    card.status = 'saved'
-    card.savedSkill = skill
-    msg.content = `已沉淀 Skill「${skill.name}」（id=${skill.id}）。可在 设置 → Skill 管理 查看与编辑。`
-  } catch (e) {
-    card.status = 'failed'
-    card.error = e.message || String(e)
-    msg.content = `保存失败：${card.error}`
-  }
-  scrollToBottom()
-}
-
-// review bug：一键试用——把当前 instructions 当成"用户新指令"发送给 AI 验证可行性
-const trySkillCard = (msg) => {
-  const card = msg?.skillCard
-  if (!card || !card.parsed) return
-  const instructions = String(msg.skillCardInstructions || card.parsed.instructions || '').trim()
-  if (!instructions) return
-  inputText.value = `请按以下 Skill 指令演练一次：\n\n${instructions}\n\n请按这个 Skill 的步骤依次执行，遇到问题立刻报告，最后总结这次试用是否能跑通。`
-  if (textareaRef.value) {
-    textareaRef.value.style.height = 'auto'
-    textareaRef.value.focus()
-  }
-  ElMessage.success('已把 Skill 指令填入输入框，按回车即可发送试用')
-}
-
-// review bug：丢弃卡片
-const discardSkillCard = (msg) => {
-  if (!msg?.skillCard) return
-  msg.skillCard.status = 'discarded'
-  msg.content = '已放弃本次沉淀。'
-}
-
 const generateSkillFromConversation = async () => {
-  if (messages.value.length === 0) {
-    ElMessage.warning('当前对话还没有内容')
-    return
-  }
-  if (!window.electronAPI?.skills?.create) {
-    ElMessage.warning('当前环境不支持 Skill 创建')
-    return
-  }
-  try {
-    await ElMessageBox.confirm('是否对即将沉淀的 Skill 有额外要求？', '沉淀 Skill', {
-      confirmButtonText: '有要求',
-      cancelButtonText: '没有要求',
-      type: 'info'
-    })
-    // 选择“有要求”：进入输入框，发送内容作为本次沉淀的额外要求。
-    pendingSkillDistill = true
-    inputText.value = ''
-    if (textareaRef.value) {
-      textareaRef.value.focus()
-      textareaRef.value.style.height = 'auto'
-    }
-    ElMessage.info('请直接输入沉淀要求，然后回车发送；没有要求可点“没有要求”直接沉淀')
-  } catch (action) {
-    if (action === 'cancel') {
-      await runSkillDistill('')
-    }
-  }
+  resetExtensionForm()
+  extensionWizardStep.value = 0
+  extensionWizardVisible.value = true
 }
 
 /* ============================================================
@@ -2891,15 +2610,17 @@ const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/revi
 - find_local_file returns absolute paths; open found files directly. merge_mindmap_files reads source in background. rename_mindmap_file in place. list_directory for folder listing.
 - MCP: list_mcp_servers → list_mcp_tools → mcp_call_tool. Skills: list_skills / invoke_skill / create_skill (only after success).
 - Include returned filePath in reply when a tool creates/renames/exports a file. Verify results; retry ≤2 on failure.
-- Include returned filePath in reply when a tool creates/renames/exports a file. Verify results; retry ≤2 on failure.
 
-## REMINDER INTENT（review #2）：当用户说「提醒我 X」「明天/3 小时后做 Y」「每天/每周 X」时，立刻调用 scheduled_task(action="create", datetime="YYYY-MM-DD HH:mm", name=..., prompt=..., cycle=...)。周期值：once / daily / weekly / monthly。datetime 必须是 24 小时制（YYYY-MM-DD HH:mm），不要传相对时间词。
+## ASK USER (choices / confirmation / yes-no questions)
+- When you MUST ask the user to choose, confirm, or answer a yes-no question, output ONE explicit <ask> block with JSON in your FINAL reply: <ask>{"type":"single","options":["A","B"],"question":"short question"}</ask>.
+- type is "single" (pick one) or "multi" (pick several). options: 2-8 short labels. question: optional short description.
+- The UI ONLY renders clickable buttons from this <ask> block — plain-text questions will NOT get buttons. So ALWAYS use <ask> for any choice you need the user to make.
+- Never put <ask> inside intermediate/tool-call text or <plan>/<step-done> blocks; put it only in the final answer to the user.
 
-## QUERY (use query_nodes, not repeated search_nodes+query_node_styles)
-- query_nodes supports filters: textContains, textNotContains, textRegex, hasCloze, clozeContains, hasStyle, isLeaf, minDepth/maxDepth. Returns uid, plainText, path, clozeWords, depth.
-- For "find nodes matching X and do Y": query_nodes(filters: {...}) → batch_node_actions(steps:[{targets:{uids}, condition:{...}, ...}]).
-- batch_node_actions steps support condition: {textContains, textRegex, hasCloze, hasStyle} — filters nodes BEFORE applying ops.
-- clear_cloze supports before/after: clear_cloze(targets:{mode:"all"}, before:"：") clears cloze only before the delimiter.
+## QUERY / BATCH
+- Prefer query_nodes over repeated search_nodes + query_node_styles.
+- For multi-node edits, use batch_node_actions; read each tool's own description for exact filters and params.
+- clear_cloze supports before/after ranges; check its tool description for details.
 
 ## CONTEXT
 - 【拖入文件｜路径：xxx】→ retrieve_local_file (questions) or read_local_file (full text).
@@ -2907,11 +2628,10 @@ const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/revi
 - Pasted content → generate_mindmap.
 - memory(action=save) only for stable long-term preferences ("remember…", "always…").
 
-## DOC READING (summarize a section/chapter → mindmap)
-- One retrieve_local_file call is usually enough: it returns top relevant chunks covering the topic. Do NOT call retrieve repeatedly on the SAME file with slightly changed keywords — reuse the first result.
-- File path wrong ("not found")? The tool auto-searches by filename; if it still fails, call find_local_file(keyword=basename) once, then use the exact returned path.
-- Scanned/no-text PDF: retrieve returns a "no text layer" hint → use read_local_file (OCR fallback) instead.
-- No table of contents? Use retrieve_local_file with the section title as query; do not assume a TOC exists.`
+## DOC READING
+- Reuse the first retrieve_local_file result for the same topic; do not repeatedly call with slightly changed keywords.
+- If a path is wrong, find_local_file(keyword=basename) once, then use the exact returned path.
+- Scanned/no-text PDF → read_local_file (OCR fallback). No TOC? retrieve_local_file with section title as query.`
 
 const buildSystemPromptWithSkills = async (basePrompt) => {
   try {
@@ -2961,18 +2681,12 @@ const toolCallLine = (tc) => {
 
 // 已实施的失败工具结果不应污染后续上下文：真正执行成功过/有实质回复的消息保留；
 // 仅是一句“目标解析失败/JSON 异常/请重试”且无任何成功工具的临时失败消息，从发送给模型的上下文中剔除。
-// review B1：原规则 `content.length > 300` 会把 AI 短回复（结构化表格往往 < 300字）误判为"无效短回复"丢弃，
-// 导致用户说"用 markdown 表格输出"时，AI 上一轮的表格被丢了 → 不结合上文。
-// 新规则：只在 (a) 没有任何内容 + (b) 没有任何成功工具调用 + (c) 错误信息命中时才过滤。
 const shouldKeepContextMessage = (m) => {
   if (!m || m.role !== 'assistant') return true
   const tcs = m.toolCalls || []
-  // 有任何成功的工具调用 → 必须保留（记录 AI 做了什么）
   if (tcs.some(tc => tc.status === 'done')) return true
   const content = String(m.content || '').trim()
-  // 有文本内容（无论长短）→ 保留（用户的"结构化表格 / 短答案"都依赖上下文中的 AI 输出）
-  if (content) return true
-  // 都没内容也没成功工具调用 → 真的可以过滤
+  if (!content || content.length > 300) return true
   return !/(目标节点解析失败|未找到对应 uid|格式异常|无法解析|没有可.*目标|没有目标节点|请重试|AI 出题失败|整理导图失败|工具.*失败)/.test(content)
 }
 
@@ -3013,7 +2727,8 @@ const splitSegments = (msgs, limit) => {
 
 // 单段 AI 总结（独立无历史调用：只含本段文本，不带对话上下文）
 const summarizeSegment = async (segText) => {
-  const userMsg = `Summarize the following conversation segment precisely in Chinese. You MUST preserve:
+  const userMsg = `Summarize the following conversation segment precisely in Chinese within 200 characters. Keep only tool records, file paths, key parameters, outcomes, and unfinished tasks; drop ordinary chat and pleasantries.
+You MUST preserve:
 1. User's explicit intent, decisions, and stated preferences (e.g. "use PNG not SMM", "save to desktop").
 2. EVERY tool call: tool name, key arguments (file paths, UIDs, format, destination, style values), outcome (success/failure), and error details if failed. This is critical for continuity.
 3. Important facts, file paths, node UIDs, generated content summaries, and any data returned by tools.
@@ -3026,7 +2741,7 @@ ${segText}`
     userMsg,
     'You are a precise conversation compressor for an AI mind-map assistant. Preserve tool calls, file paths, key parameters, and user intent verbatim where critical. Output only the summary body in Chinese.',
     null,
-    { temperature: 0.1 }
+    { temperature: 0.1, thinking: false }
   )
   const text = (choice?.message?.content || '').trim()
   if (!text) throw new Error('摘要为空')
@@ -3132,18 +2847,7 @@ const compressHistory = async (compressMsgs, existingSummary) => {
 }
 
 // 按"保留最近 N 轮"分割历史：返回 { keep（保留原文）, compress（要压进摘要的）}
-// review B2：识别"高信息密度"的结构化内容（markdown 表格 / 围栏代码块 / 标题）。
-// 这些内容被压成摘要后会严重失真（用户问"用表格再输出"时 AI 拿不到原表格），
-// 因此纳入"绝不压缩"白名单：splitHistoryForCompress 会把这些消息从压缩区抠出来。
-const hasStructuredContent = (m) => {
-  if (!m || m.role !== 'assistant') return false
-  const c = String(m.content || '')
-  if (!c) return false
-  // markdown 表格（|...|）、围栏代码块（```）、多级标题（## / ###）、长列表（连续 5+ 行以 - 或 1. 开头）
-  return /\|.+\|.+\|/.test(c) || /```[\s\S]+```/.test(c) || /\n#{1,4}\s+/.test(c) || (c.match(/^\s*(?:[-*]|\d+\.)\s+/gm) || []).length >= 5
-}
-
-// keepRounds 参数：自动压缩用 KEEP_RECENT_ROUNDS(12)，手动压缩用更激进的3轮
+// keepRounds 参数：自动压缩用 KEEP_RECENT_ROUNDS(8)，手动压缩用更激进的3轮
 const splitHistoryForCompress = (history, keepRounds = KEEP_RECENT_ROUNDS) => {
   const userIndices = []
   history.forEach((m, i) => { if (m.role === 'user') userIndices.push(i) })
@@ -3155,24 +2859,8 @@ const splitHistoryForCompress = (history, keepRounds = KEEP_RECENT_ROUNDS) => {
     }
     return { keep: history, compress: [] }
   }
-  // review B2：基础分界 = 最近 keepRounds 轮原文。但还要把"结构化内容"（被压缩区里的表格/代码块）抠出来保留。
   const cut = userIndices[userIndices.length - keepRounds]
-  const baseKeep = history.slice(cut)
-  const baseCompress = history.slice(0, cut)
-  // 在压缩区里找结构化 assistant 消息，把它们搬到 keep区尾部（保证 AI 下轮能看到）
-  const structuredFromCompress = []
-  const remainingCompress = []
-  for (const m of baseCompress) {
-    if (hasStructuredContent(m)) {
-      structuredFromCompress.push(m)
-    } else {
-      remainingCompress.push(m)
-    }
-  }
-  return {
-    keep: [...baseKeep, ...structuredFromCompress],
-    compress: remainingCompress
-  }
+  return { keep: history.slice(cut), compress: history.slice(0, cut) }
 }
 
 // 发送给 API 的消息只保留 role/content。工具调用的结果摘要合并进 assistant 文本，
@@ -3208,7 +2896,7 @@ const rewriteUserQuestion = async (question) => {
   if (q.length <= 16) return q
   const sys = '你是用户意图识别与问题规范化专家。把用户原话改写为一条意图清晰、完整、可直接执行的指令，供后续 AI 使用。'
   const usr = '请改写下面这条用户提问。要求：\n1. 准确识别用户真正想干什么（提问 / 修改导图 / 生成内容 / 导出 / 检索 / 其它），不要臆测。\n2. 补全省略的主语、对象、目标文件或节点、期望结果，但不得编造原文没有的信息。\n3. 去掉口语化与歧义，规范化、全面化表达；如含多个诉求，拆成明确的几条。\n4. 保持原意不变，只输出改写后的内容，不要解释、不要前缀。\n\n用户原话：\n' + q
-  const choice = await aiService.chat(usr, sys, null, { temperature: 0.1, max_tokens: 150 })
+  const choice = await aiService.chat(usr, sys, null, { temperature: 0.1, max_tokens: 150, thinking: false })
   const rewritten = String(choice?.message?.content || '').trim()
   return rewritten || q
 }
@@ -3295,6 +2983,43 @@ const manualCompress = async () => {
     aiStatus.value = 'idle'
     emit('tool-call-status', 'idle')
   }
+}
+
+// ========== 防抖重渲染：统一管理写操作后的补充渲染 ==========
+// 问题根因：连续多次写操作（如多次 add_child_nodes）时，每次操作后都立即 reRender，
+// 前一次渲染还没完成后一次又开始，导致渲染状态叠加冲突、节点重叠。
+// 解决方案：所有写操作统一走 scheduleReRender，短时间内多次调用只做一次最终重绘。
+let reRenderTimer = null
+let pendingReRenderType = 'render' // 'render' 增量渲染 / 'reRender' 完全重绘
+/**
+ * 调度补充重渲染（防抖）
+ * @param {'render'|'reRender'} type 渲染类型
+ * @param {number} delay 延迟时间（ms），默认 500ms
+ */
+const scheduleReRender = (type = 'render', delay = 500) => {
+  if (!props.mindMap) return
+  // 如果已有更高优先级的 reRender 请求，保持 reRender
+  if (type === 'reRender') {
+    pendingReRenderType = 'reRender'
+  }
+  if (reRenderTimer) {
+    clearTimeout(reRenderTimer)
+  }
+  reRenderTimer = setTimeout(() => {
+    reRenderTimer = null
+    const useType = pendingReRenderType
+    pendingReRenderType = 'render' // 重置为默认
+    try {
+      if (!props.mindMap) return
+      if (useType === 'reRender' && typeof props.mindMap.reRender === 'function') {
+        props.mindMap.reRender()
+      } else if (typeof props.mindMap.render === 'function') {
+        props.mindMap.render()
+      }
+    } catch (e) {
+      console.error('补充重渲染失败:', e)
+    }
+  }, delay)
 }
 
 const sendMessage = async (overrideText = null) => {
@@ -3400,7 +3125,19 @@ const sendMessage = async (overrideText = null) => {
   if (toolsContext || skillsContext || mcpsContext) {
     contextParts.push('【执行优先级】用户已通过 /（工具）、@（技能）、#（MCP）显式引用了上述内容，请首要使用它们完成需求，不要忽略引用另选方案。')
   }
-  const fullContent = contextParts.length ? `${contextParts.join('\n')}\n${text}` : text
+  // 引用节点/文件仍放前面便于 AI 先定位；工具/Skill/MCP 的长提示词统一追加到用户文本末尾，
+  // 避免打断用户原话，引用位置只保留原子名称。
+  const leadParts = [filesContext, refsContext].filter(Boolean)
+  const tailParts = [skillsContext, mcpsContext, toolsContext]
+    .filter(Boolean)
+    .concat(toolsContext || skillsContext || mcpsContext
+      ? ['【执行优先级】用户已通过 /（工具）、@（技能）、#（MCP）显式引用了上述内容，请首要使用它们完成需求，不要忽略引用另选方案。']
+      : [])
+  const fullContent = [
+    ...leadParts,
+    text,
+    ...tailParts
+  ].filter(Boolean).join('\n')
   // 引用/文件均以原子胶囊展示（消息列表），content 仅保留用户文字；完整上下文仍通过 fullContent 发送给 AI
   const displayContent = text
 
@@ -3784,23 +3521,22 @@ const sendMessage = async (overrideText = null) => {
             emit('tool-call-status', 'thinking')
           }
           fullResponse += chunk
-          // review A3：节流流式输出，避免每 token 都触发 Vue 整列表 patch。
-          // chunk 不断累加到本地变量 fullResponse，但 aiMsg.content 只在每 ~60ms 触发一次响应式更新，
-          // 同时每字符都更新滚动（避免滚动跟不上），保存对话仍然每 chunk 节流保存。
-          if (!__streamFlushPending) {
-            __streamFlushPending = true
-            const raf = (typeof window !== 'undefined' && window.requestAnimationFrame)
-              ? window.requestAnimationFrame.bind(window)
-              : (cb) => setTimeout(cb, 16)
-            raf(() => {
-              __streamFlushPending = false
-              if (!isCurrentRun(runToken)) return
-              aiMsg.content = fullResponse
-              scrollToBottom()
-            })
-          }
+          aiMsg.content = fullResponse
+          scrollToBottom()
           // 流式输出过程中定时保存，防止中途关闭丢失
           saveConversationThrottled()
+        },
+        // 深度思考流式回调：实时累积思考内容
+        onReasoning: (chunk, isEnd) => {
+          if (!isCurrentRun(runToken)) return
+          if (chunk) {
+            aiMsg.reasoning = (aiMsg.reasoning || '') + chunk
+            aiMsg.reasoningThinking = true
+          }
+          if (isEnd) {
+            aiMsg.reasoningThinking = false
+          }
+          scrollToBottom()
         },
         // 自动工具发现兜底：清空已流式输出的首答，模型带新激活的工具重答
         onBeforeRetry: (hits) => {
@@ -3925,11 +3661,18 @@ const sendMessage = async (overrideText = null) => {
               durationMs
             }, currentConversation.value?.id)
             emit('log-updated')
-            // 写操作工具执行后统一完全重绘，避免节点位置错乱/重叠（只读工具跳过）
+            // 写操作工具执行后调度补充重渲染（防抖），避免节点位置错乱/重叠
+            // 注意：不立即 reRender，因为 INSERT_MULTI_CHILD_NODE 等命令内部已触发增量渲染，
+            // 连续多次写操作时立即 reRender 会导致渲染状态叠加冲突。
+            // 统一走 scheduleReRender 防抖，短时间内多次操作只做一次最终重绘。
             const READ_ONLY_RE = /^(search_|get_|list_|read_|query_|focus_|activate_|semantic_|zoom_|context_|audit_)/
             const isWriteOp = !READ_ONLY_RE.test(toolName) && !['select_node', 'find_related', 'list_references', 'get_location', 'memory'].includes(toolName)
-            if (isWriteOp && props.mindMap && typeof props.mindMap.reRender === 'function') {
-              try { props.mindMap.reRender() } catch (e) {}
+            if (isWriteOp && props.mindMap) {
+              // 批量节点操作、删除节点等改动较大的操作用 reRender 完全重绘
+              // 普通新增/修改用 render 增量渲染即可
+              const heavyOps = ['batch_node_actions', 'delete_node', 'merge_nodes', 'refactor_mindmap', 'reorganize_mindmap', 'sort_children', 'duplicate_nodes', 'move_node', 'batch_move_nodes']
+              const needsFullReRender = heavyOps.includes(toolName)
+              scheduleReRender(needsFullReRender ? 'reRender' : 'render', 500)
             }
             // AI 创建了新文件时通知 App.vue 更新文件路径和目录树。
             // externalFile（AI出题/导出等）：只生成独立文件、画布内容未切换，
@@ -3956,17 +3699,8 @@ const sendMessage = async (overrideText = null) => {
               toolName: toolCall.function.name,
               error: e.message
             }, currentConversation.value?.id)
-            // review bug fix：工具调用失败时，立即把错误推到 aiMsg.content（消息列表可见）。
-            // 之前只在 tcEntry.status / addLog 记录错误，AI 继续对话时用户只能在日志面板看到，
-            // 而且若 AI 继续成功完成本轮，错误信息永远不会出现在消息气泡里。
-            if (!aiMsg.content) {
-              aiMsg.content = `⚠️ 工具 ${toolNameMap[toolName] || toolName} 调用失败：${e.message || '未知错误'}`
-            } else if (!aiMsg.content.includes(`工具 ${toolNameMap[toolName] || toolName} 调用失败`)) {
-              // 不重复追加同一工具的失败信息（同一轮 AI 可能反复重试同一工具）
-              aiMsg.content = aiMsg.content + `\n\n⚠️ 工具 ${toolNameMap[toolName] || toolName} 调用失败：${e.message || '未知错误'}`
-            }
-            scrollToBottom()
             emit('log-updated')
+            scrollToBottom()
             return { success: false, message: `工具调用失败: ${e.message}` }
           }
         },
@@ -4171,13 +3905,7 @@ const sendMessage = async (overrideText = null) => {
             return
           }
           console.error('AI 服务错误:', error)
-          // review bug fix：错误消息末尾追加"工具失败摘要"——之前如果 aiMsg.content 已被前面工具失败的 catch 设了值，
-          // 这里会被覆盖；现在改成"fullResponse 优先，错误信息附加，工具失败摘要追加"
-          const failedTools = (aiMsg.toolCalls || []).filter(tc => tc.status === 'error' && tc.errorBrief)
-          const failedSummary = failedTools.length
-            ? '\n\n—— 工具调用失败明细 ——\n' + failedTools.map(tc => `• ${tc.displayName || tc.name}: ${tc.errorBrief}`).join('\n')
-            : ''
-          aiMsg.content = (fullResponse || `错误: ${error.message || 'AI 服务异常'}`) + failedSummary
+          aiMsg.content = fullResponse || `错误: ${error.message || 'AI 服务异常'}`
           aiStatus.value = 'error'
           emit('tool-call-status', 'error')
           aiService.resetAbort()
@@ -4300,7 +4028,11 @@ const getSiblings = (node, allSelectedNodes) => {
 const buildNodeContext = (nodes) => {
   if (!nodes || nodes.length === 0) return { texts: [], contextInfo: '' }
 
-  const nodeTexts = nodes.map(n => extractNodeText(n))
+  const clip = (text, max = 160) => {
+    const s = String(text || '').trim()
+    return s.length > max ? s.slice(0, max) + '…' : s
+  }
+  const nodeTexts = nodes.map(n => clip(extractNodeText(n), 220))
   let contextInfo = ''
 
   // 文件来源信息
@@ -4322,30 +4054,43 @@ const buildNodeContext = (nodes) => {
     if (parent) {
       const parentText = extractNodeText(parent)
       if (parentText) {
-        contextInfo += `【上级节点】${parentText}\n`
+        contextInfo += `【上级节点】${clip(parentText, 160)}\n`
       }
     }
 
     // 兄弟节点（同级）
     const siblings = getSiblings(node, nodes)
     if (siblings.length > 0) {
-      const siblingTexts = siblings.map(s => extractNodeText(s)).filter(Boolean)
+      const siblingTexts = siblings.slice(0, 12).map(s => clip(extractNodeText(s), 80)).filter(Boolean)
       if (siblingTexts.length > 0) {
-        contextInfo += `【同级节点】${siblingTexts.join('、')}\n`
+        contextInfo += `【同级节点】${siblingTexts.join('、').slice(0, 420)}\n`
       }
     }
 
     // 子节点
-    const childrenText = extractChildrenText(node)
+    const childrenText = clip(extractChildrenText(node), 320)
     if (childrenText) {
       contextInfo += `【子节点】${childrenText}\n`
     }
   }
 
   // 告知 AI 哪些是用户选中的节点
-  contextInfo += `\n【用户选中的节点】${nodeTexts.map((t, i) => `${i + 1}. ${t}`).join('； ')}\n`
+  contextInfo += `\n【用户选中的节点】${nodeTexts.map((t, i) => `${i + 1}. ${clip(t, 220)}`).join('； ')}\n`
 
   return { texts: nodeTexts, contextInfo }
+}
+
+// 根据根节点和一级分支内容做轻量内容分类，避免右键 AI 千篇一律套用同一模板。
+const detectMindMapType = () => {
+  try {
+    const root = props.mindMap?.renderer?.root
+    if (root) return classifyMindMap(root)
+    // 没有 renderer root 时，回退到整棵树纯数据分类
+    if (props.mindMap?.getData) return classifyMindMap(props.mindMap.getData())
+    return classifyMindMap('')
+  } catch {
+    return classifyMindMap('')
+  }
 }
 
 /**
@@ -4358,7 +4103,13 @@ const toRichTextHtml = (text) => {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-  return `<p><span>${escaped}</span></p>`
+  const rendered = escaped
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+    .replace(/~~([^~]+)~~/g, '<del>$1</del>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/(^|[^*])\*([^*\s][^*]*?)\*(?!\*)/g, '$1<em>$2</em>')
+  return `<p><span>${rendered}</span></p>`
 }
 
 /**
@@ -4391,6 +4142,40 @@ const toGeneralizationHtml = (text) => {
   const first = escape(lines[0])
   const rest = lines.slice(1).map(escape).join('<br/>')
   return `<p><span style="color:#34c759;font-weight:bold">${first}</span><br/>${rest}</p>`
+}
+
+/**
+ * 背诵改写概要专用 HTML（三行格式）：
+ * 第一行：-【记忆口诀】→ 蓝色加粗（单独一行）
+ * 第二行：内容 → 黑色
+ * 第三行：-【背诵改写】→ 青绿色加粗（单独一行）
+ * 第四行：内容 → 黑色
+ * 第五行：-【简要说明】→ 紫色加粗（单独一行）
+ * 第六行：内容 → 黑色
+ */
+const toReciteGeneralizationHtml = (memoryKey, reciteText, explanation) => {
+  const escape = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const key = escape(memoryKey || '')
+  const recite = escape(reciteText || '')
+  const expl = escape(explanation || '')
+
+  const parts = []
+  // 记忆口诀
+  if (key) {
+    parts.push(`<div style="color:#007aff;font-weight:bold">-【记忆口诀】</div>`)
+    parts.push(`<div style="color:#333">${key}</div>`)
+  }
+  // 背诵改写
+  if (recite) {
+    parts.push(`<div style="color:#00c7be;font-weight:bold">-【背诵改写】</div>`)
+    parts.push(`<div style="color:#333">${recite}</div>`)
+  }
+  // 简要说明
+  if (expl) {
+    parts.push(`<div style="color:#8a6de9;font-weight:bold">-【简要说明】</div>`)
+    parts.push(`<div style="color:#333">${expl}</div>`)
+  }
+  return `<div style="line-height:1.6">${parts.join('')}</div>`
 }
 
 /**
@@ -4458,7 +4243,11 @@ const convertChildList = (list, depth = 1) => {
     .filter(item => pickNodeText(item).trim())
     .slice(0, 12)
     .map(item => ({
-      data: { text: toRichTextHtml(pickNodeText(item).trim().slice(0, 200)) },
+      data: {
+        text: toRichTextHtml(pickNodeText(item).trim().slice(0, 200)),
+        uid: createUid(),
+        richText: true
+      },
       children: convertChildList(item.children, depth + 1)
     }))
 }
@@ -4482,6 +4271,18 @@ const highlightNodes = (nodes) => {
   }
 }
 
+// 生成右键 AI 功能的节点原子胶囊（与「AI 出题」一致的展示方式）
+const buildNodeRefs = (nodes, kindLabel) => {
+  const arr = Array.isArray(nodes) ? nodes : [nodes]
+  return arr.filter(Boolean).map((n, i) => ({
+    id: `${kindLabel}-${Date.now()}-${i}`,
+    uid: (typeof n.getData === 'function' ? n.getData('uid') : n.uid) || n?.data?.uid,
+    fileName: props.currentFileName || '当前导图',
+    label: extractNodeText(n) || '未命名节点',
+    kindLabel
+  }))
+}
+
 // 点击消息中的引用胶囊：按 uid 定位并高亮该节点
 const jumpToRef = (ref) => {
   const renderer = props.mindMap?.renderer
@@ -4495,8 +4296,8 @@ const jumpToRef = (ref) => {
     if (typeof renderer.moveNodeToCenter === 'function') renderer.moveNodeToCenter(node)
     if (typeof renderer.clearActiveNode === 'function') renderer.clearActiveNode()
     if (typeof renderer.addNodeToActiveList === 'function') renderer.addNodeToActiveList(node)
-    // review A1：定位节点后防抖 render
-    scheduleMindMapRender()
+    // 定位节点后调度渲染（短延迟防抖），避免快速连续点击时渲染叠加
+    if (props.mindMap) scheduleReRender('render', 100)
   } catch (e) {
     console.error('定位节点失败:', e)
   }
@@ -4525,6 +4326,7 @@ const askContinueQuestions = (nodes, texts, contextInfo, mode = 'continue') => {
     const nodeSummary = texts.filter(Boolean).map((t, i) => `${i + 1}. ${t.length > 30 ? t.slice(0, 30) + '…' : t}`).join('\n')
     const verb = mode === 'add-child' ? '新增子节点' : '续写'
 
+    const depthHint = '\n- 层级数量**不包含当前节点本身**，例如：2层就是「子节点 + 孙节点」共2层'
     messages.value.push({
       id: genMsgId(),
       role: 'assistant',
@@ -4537,7 +4339,8 @@ ${nodeSummary}
 
 **【问题 1/3】有没有相关的参考资料？**
 - 如果有，请直接填在下方输入框内发送
-- 如果没有，可点击输入框上方的「无参考资料」快捷回复`
+- 如果没有，可点击输入框上方的「无参考资料」快捷回复
+> 有参考资料时，AI 将严格依据资料内容生成子节点，不会自由发散`
     })
     // 等待用户回答期间释放"思考中"状态，让发送按钮可用
     aiStatus.value = 'idle'
@@ -4566,10 +4369,14 @@ const submitContinueAnswer = (text) => {
   if (p.waiting === 'ref') {
     p.refAnswer = text
     p.waiting = 'depth'
+    const depthDesc = `**【问题 2/3】需要${p.mode === 'add-child' ? '新增' : '续写'}几个层级的子节点？**（层级数量不包含当前节点本身）
+- 例如：输入「2层」表示新增「子节点 + 孙节点」共2层
+- 可直接填数字，如「3层」「不超过4层」「最多2层」等
+- 如果没有明确要求，可点击「无层级要求」，AI 将按内容需要生成（最多不超过 6 层）`
     messages.value.push({
       id: genMsgId(),
       role: 'assistant',
-      content: `已收到参考资料：${text.length > 100 ? text.slice(0, 100) + '…' : text}\n\n**【问题 2/3】层级深度有没有上限要求？**（如"不超过 3 层"）\n- 如果有，请直接填在下方输入框内发送\n- 如果没有，可点击输入框上方的「无层级要求」快捷回复（将按内容需要生成，层级最多不超过 6 层）\n- 层级数量由 AI 按内容需要决定，上限仅用于约束最深不超过几层`
+      content: `已收到参考资料：${text.length > 100 ? text.slice(0, 100) + '…' : text}\n\n${depthDesc}`
     })
     scrollToBottom(true)
     nextTick(() => {
@@ -4582,10 +4389,13 @@ const submitContinueAnswer = (text) => {
     p.waiting = 'requirement'
     const verb3 = p.mode === 'add-child' ? '新增子节点' : '续写'
     const otherLabel = p.mode === 'add-child' ? '其他要求' : '续写要求'
+    const reqDesc = p.mode === 'add-child'
+      ? `**【问题 3/3】有没有新增子节点的其他要求？**（如节点数量、语言风格、侧重点等）\n- 如果有，请直接填在下方输入框内发送\n- 如果没有，可点击输入框上方的「无其他要求」快捷回复`
+      : `**【问题 3/3】有没有${verb3}的其他要求？**（如节点数量、语言风格、侧重点等）\n- 如果有，请直接填在下方输入框内发送\n- 如果没有，可点击输入框上方的「无${otherLabel}」快捷回复`
     messages.value.push({
       id: genMsgId(),
       role: 'assistant',
-      content: `已收到层级要求：${text.length > 100 ? text.slice(0, 100) + '…' : text}\n\n**【问题 3/3】有没有${verb3}的其他要求？**（如节点数量、语言风格、侧重点等）\n- 如果有，请直接填在下方输入框内发送\n- 如果没有，可点击输入框上方的「无${otherLabel}」快捷回复`
+      content: `已收到层级要求：${text.length > 100 ? text.slice(0, 100) + '…' : text}\n\n${reqDesc}`
     })
     scrollToBottom(true)
     nextTick(() => {
@@ -4669,8 +4479,9 @@ const aiContinue = async (nodesOrNode, opts = {}) => {
   messages.value.push({
     id: genMsgId(),
     role: 'user',
-    content: actionLabel,
-    isAiAction: true
+    content: `${actionLabel} ${nodeCountLabel}`,
+    aiAction: actionLabel,
+    refs: buildNodeRefs(nodes, mode === 'add-child' ? '新增目标' : '续写目标')
   })
   const aiMsg = {
     id: genMsgId(),
@@ -4694,6 +4505,8 @@ const aiContinue = async (nodesOrNode, opts = {}) => {
   let refAnswer = ''
   let reqAnswer = ''
   let depthAnswer = ''
+  // 所有 AI 续写/新增子节点都始终询问用户：参考资料、层级数量、其他要求
+  // 不再因"简单叶子节点"而跳过询问，确保用户有机会提供参考资料和明确要求
   const answers = await askContinueQuestions(nodes, texts, contextInfo, mode)
   if (!answers) {
     aiContinueFailStreak++
@@ -4724,6 +4537,7 @@ const aiContinue = async (nodesOrNode, opts = {}) => {
   const isAddChild = mode === 'add-child'
   const roleLabel = isAddChild ? '思维导图新增子节点助手' : '思维导图续写助手'
   const reqLabel = isAddChild ? '新增子节点要求' : '续写要求'
+  const mapType = detectMindMapType()
 
   // 从用户的层级回答中解析上限数字（"不超过4层"/"最多3层"/"4层"等）；
   // 解析不到上限时按无要求处理，由 AI 按内容需要生成（上限 6 层兜底）
@@ -4741,6 +4555,8 @@ const aiContinue = async (nodesOrNode, opts = {}) => {
   const prompt = `你是一个${roleLabel}。请为下面标记为 ► 的 ${nodes.length} 个节点分别生成子节点。
 ${contextInfo}
 
+${mindMapTypePrompt(mapType, 'continue')}
+
 【用户提供的参考资料】
 ${hasRef ? refAnswer : '（无）'}
 
@@ -4751,16 +4567,17 @@ ${hasReq ? reqAnswer : '（无）'}
 ${hasDepth ? depthAnswer : depthDefault}
 
 生成规则（严格遵守）：
-1. 只返回严格 JSON，不要 markdown 代码块，不要任何解释文字，不要输出思考过程
+1. 输出合法 JSON，可以包裹在 \`\`\`json 代码块中；禁止尾随逗号、注释或 NaN；不要输出解释文字或思考过程
 2. 返回格式：${jsonFormat}
 3. 层级深度：${depthRule}
 4. 每个节点文本简短精炼（30 字内）
 5. ${isAddChild ? '每个目标节点的第一层级只生成 1 个子节点，从第二层级开始按内容需要延伸' : '每个节点按内容需要生成 2~6 个直接子节点'}
-6. 紧扣原节点语义扩展，不要偏离主题
+6. 紧扣原节点语义和「当前导图类型」的适配要求扩展，不要偏离主题，也不要套用与导图类型不符的模板
 7. ${hasRef
     ? '用户提供了参考资料：必须严格依据资料内容生成，不要过度总结、不要自由发散、不得编造资料中没有的内容'
     : '用户未提供参考资料：紧扣该节点的核心知识点（考点/重点）扩展，不要泛泛而谈、不要补充无关内容'}
-8. 宁缺毋滥：如果某节点没有值得展开的重点，返回空 children，不要硬凑内容`
+8. 宁缺毋滥：如果某节点没有值得展开的重点，返回空 children，不要硬凑内容
+9. 若输入内容为空、无效或仅为占位符，请直接返回空 children，不要编造内容。`
 
   // 问答等待期间（aiStatus 曾回落为 idle），前一轮对话/后台任务可能调用过 abort()
   // 留下中断标记，导致这里 chat() 被误判为"已停止"而直接报错。
@@ -4769,8 +4586,17 @@ ${hasDepth ? depthAnswer : depthDefault}
 
   try {
     addLog('send', `${actionLabel}请求:\n${prompt}`, { model: currentModelName.value }, currentConversation.value?.id)
-    const choice = await aiService.chat(prompt, `你是${roleLabel}，只输出严格符合要求的 JSON，不输出任何解释或代码块标记。`)
-    const content = choice?.message?.content || ''
+    // 不手动限制 max_tokens：用模型默认上限，通过提示词控制输出长度，避免手动设小导致截断
+    let choice = await aiService.chat(prompt, `你是${roleLabel}（当前导图类型：${mapType.label}），只输出严格符合要求的 JSON，不输出任何解释或代码块标记。`, null, { responseFormat: 'json', thinking: false })
+    let content = choice?.message?.content || ''
+
+    // 空内容重试：去掉 response_format 约束后再试一次
+    if (!content.trim() && !aiService.isAborted()) {
+      addLog('info', `${actionLabel}返回空内容，降级重试（去掉 response_format 约束）`, {}, currentConversation.value?.id)
+      choice = await aiService.chat(prompt, `你是${roleLabel}（当前导图类型：${mapType.label}），只输出严格符合要求的 JSON，不输出任何解释或代码块标记。`, null, { thinking: false })
+      content = choice?.message?.content || ''
+    }
+
     addLog('receive', `${actionLabel}返回:\n${content}`, { model: currentModelName.value }, currentConversation.value?.id)
 
     if (aiService.isAborted()) {
@@ -4798,9 +4624,11 @@ ${hasDepth ? depthAnswer : depthDefault}
     }
 
     if (addedCount > 0) {
-      // 多次渲染确保 UI 更新
-      // review A1：罕见路径（异步节点插入完成后兜底 render），保留 setTimeout 等待 DOM 落位
-      setTimeout(() => { try { props.mindMap.render() } catch (e) {} }, 100)
+      // 插入多层子节点后，调度一次补充重渲染（防抖），确保富文本节点尺寸正确测量
+      // 注意：INSERT_MULTI_CHILD_NODE 内部已触发增量渲染，这里不立即重绘，
+      // 统一走 scheduleReRender 防抖机制，避免连续多次操作时渲染状态叠加冲突
+      const needsFullReRender = addedCount >= 8
+      scheduleReRender(needsFullReRender ? 'reRender' : 'render', 600)
     }
 
     aiMsg.toolCalls[0].status = addedNodes > 0 ? 'done' : 'error'
@@ -4888,45 +4716,46 @@ const aiRewrite = async (nodesOrNode, opts = {}) => {
     return
   }
 
-  // 改写计划（需求7新逻辑）：
-  // - 单节点：直接改写该节点本身，字数 <5 字不允许改写
-  // - 多节点：必须是同一父节点的直接子节点，否则中止；改写选中节点并给共同父节点添加概要
+  // 改写计划：
+  // - 单节点（终末或非终末）：三行背诵概要放在「当前节点」的概要里
+  // - 多节点：关联理解后整合成「一份」三行，放在「共同父节点」的概要里
   const uidOf = (n) => n.uid || n?.data?.uid
   // 记住本次改写来源节点（工具内「再改一下」可直接复用，无需重新选中）
   lastRewriteSourceUids.value = nodes.map(uidOf).filter(Boolean)
 
-  // 单节点改写：字数限制
-  if (nodes.length === 1) {
-    const singleText = texts[0] || ''
-    if (singleText.length < 5) {
-      ElMessage.warning('该节点内容少于 5 个字，不允许背诵改写')
-      return
-    }
-  }
-
-  // 多节点：相关性限制——必须为同一上一级节点的直接子节点
-  let commonParent = null
-  if (nodes.length > 1) {
-    commonParent = detectCommonParent(nodes)
-    if (!commonParent) {
-      ElMessage.warning('多个节点背诵改写请选择更为相近的节点。')
-      return
-    }
+  // 字数限制：7字以内或过短内容不做背诵改写
+  const hasTooShortTarget = nodes.some((node, i) => {
+    const text = texts[i] || ''
+    return text.length <= 7 && !(node?.children || []).length
+  })
+  if (hasTooShortTarget) {
+    ElMessage.warning('当前节点内容过少，不建议背诵改写')
+    return
   }
 
   const rewriteTargets = nodes
-  const generalizationNodes = commonParent ? [commonParent] : []
   if (rewriteTargets.length === 0) {
     ElMessage.warning('没有可改写的节点内容')
     return
+  }
+
+  // 多节点：必须同一父节点，否则无法关联理解
+  let commonParent = null
+  if (rewriteTargets.length > 1) {
+    commonParent = detectCommonParent(rewriteTargets)
+    if (!commonParent) {
+      ElMessage.warning('多节点请选择同父一级节点进行背诵改写，以便AI进行理解')
+      return
+    }
   }
 
   const nodeCountLabel = nodes.length > 1 ? `${nodes.length} 个节点` : `「${(texts[0] || '').slice(0, 20)}」`
   messages.value.push({
     id: genMsgId(),
     role: 'user',
-    content: 'AI 背诵改写',
-    isAiAction: true
+    content: `AI 背诵改写 ${nodeCountLabel}`,
+    aiAction: 'AI 背诵改写',
+    refs: buildNodeRefs(nodes, '改写目标')
   })
   const aiMsg = {
     id: genMsgId(),
@@ -4945,7 +4774,7 @@ const aiRewrite = async (nodesOrNode, opts = {}) => {
     aiService.resetAbort()
   }
 
-  const generalizationCount = generalizationNodes.length
+  const context = buildReciteContext(rewriteTargets)
   // instruction：用户对本次改写的具体要求（或对上次改写结果的修改意见），最高优先级
   // 节点当前文本已是上次改写结果（已写回），天然携带"上次做了什么"；instruction 携带"这次要怎么调整"
   const instructionBlock = (typeof opts.instruction === 'string' && opts.instruction.trim())
@@ -4953,59 +4782,76 @@ const aiRewrite = async (nodesOrNode, opts = {}) => {
 ${opts.instruction.trim().slice(0, 2000)}
 `
     : ''
+  const mapType = detectMindMapType()
+  const isMulti = rewriteTargets.length > 1
+  // 单节点时判断是否为非终末节点（下面还有子节点）
+  const singleHasChildren = !isMulti && (rewriteTargets[0]?.children || []).length > 0
+  const commonRule = '必须基于上级节点和同级节点的上下文理解内容，改写不得遗漏关键知识点，且必须严格遵循「当前导图类型」的适配要求；不要写一般性的空话、套话。'
+  let ruleContent
+  if (isMulti) {
+    ruleContent = `1. 把下面所有 ► 节点作为一个整体「关联理解」，整合生成「一份」三部分内容（不要每个节点各生成一份）：
+   - 记忆口诀（memoryKey）：2~5 个字，必须从内容中提炼核心关键词，和内容紧密相关（比如"三来源""五步法"这种直接概括内容的）；禁止泛泛而谈或和内容无关。优先用"数字+核心字"的形式（如"三XX""两XX""五XX"），好懂好记。
+   - 背诵改写（reciteText）：把这几个节点的核心知识点整合为便于背诵的精炼表述，保留全部关键知识点，100 字以内。
+   - 简要解释（explanation）：用一句话概括这几个节点之间的逻辑关系与记忆要点，40 字以内。
+2. ${commonRule}`
+  } else if (singleHasChildren) {
+    ruleContent = `1. 该 ► 节点是非终末节点（下面有子节点），背诵改写的重点是它的「直接子节点（下一层）」：
+   - 记忆口诀（memoryKey）：2~5 个字，必须从子节点内容中提炼核心关键词，和内容紧密相关（比如子节点讲三个特点就叫"三特点"，讲四个阶段就叫"四阶段"）；禁止泛泛而谈。优先用"数字+核心字"的形式，好懂好记。
+   - 背诵改写（reciteText）：把该节点「下一层子节点」的核心知识点整合为便于背诵的精炼表述，保留关键知识点，100 字以内。
+   - 简要解释（explanation）：用一句话概括下一层子节点之间的逻辑关系与记忆要点，40 字以内。
+   更深层的子节点内容仅作为理解上下文，不需要逐一展开。
+2. ${commonRule}`
+  } else {
+    ruleContent = `1. 生成三部分内容：
+   - 记忆口诀（memoryKey）：2~5 个字，必须从原文中提炼核心关键词，和内容紧密相关（比如原文讲"客观实在性"就叫"客观实在"，讲"对立统一"就叫"对立统一"）；禁止泛泛而谈。优先提炼原文中最核心的概念词。
+   - 背诵改写（reciteText）：将原节点内容改写为便于背诵的精炼表述，保留全部关键知识点，60 字以内。如果原节点文字 ≤ 12 个字，直接保留原文字。
+   - 简要解释（explanation）：用一句话概括该节点的核心含义或记忆要点，30 字以内。
+2. ${commonRule}`
+  }
+  const returnDesc = isMulti
+    ? 'rewrites 只包含 1 条整合结果（index 可省略）'
+    : `rewrites 的 index 对应 ► 序号（从 1 开始），数量必须等于 ${rewriteTargets.length}`
 
-  const SYS_PROMPT = '你是背诵辅助专家，只输出严格符合要求的 JSON，不输出任何解释或代码块标记。'
-  // 多节点（同一父节点的多个子节点）→ 合并成一个背诵概要挂父节点，不改写节点本身；单节点 → 改写节点本身
-  const mergeMode = rewriteTargets.length > 1 && generalizationCount > 0
+  const prompt = `你是一个背诵辅助专家。请对下面思维导图中标记为 ►（带序号）的 ${rewriteTargets.length} 个节点进行背诵改写。
+${instructionBlock}
+${context}
+
+${mindMapTypePrompt(mapType, 'rewrite')}
+
+改写规则（严格遵守）：
+${ruleContent}
+3. memoryTip：针对本次改写涉及的最高层主题输出一个整体记忆技巧，简短（30字内）、自然、好记；如果编不出自然好记的谐音，就直接给语义归纳或首字串联，不要强行谐音。
+
+返回格式（合法 JSON，可以包裹在 \`\`\`json 代码块中；禁止尾随逗号、注释或 NaN）：
+{"rewrites": [{"memoryKey": "口诀", "reciteText": "背诵改写内容", "explanation": "简要解释"}], "memoryTip": "整体记忆技巧"}
+
+其中 ${returnDesc}。
+若输入内容为空、无效或仅为占位符，请返回空 rewrites，不要编造内容。`
+
+  addLog('send', `AI 背诵改写请求:\n${prompt}`, { model: currentModelName.value }, currentConversation.value?.id)
 
   try {
-    if (mergeMode) {
-      // ===== 多节点：合并背诵概要（不改写节点） =====
-      const context = buildReciteContext(rewriteTargets, generalizationNodes)
-      const prompt = buildMergeSummaryPrompt({ count: rewriteTargets.length, context, instructionBlock })
-      addLog('send', `AI 背诵改写请求（合并概要）:\n${prompt}`, { model: currentModelName.value }, currentConversation.value?.id)
-      const choice = await aiService.chat(prompt, SYS_PROMPT)
-      const content = choice?.message?.content || ''
-      addLog('receive', `AI 背诵改写返回:\n${content}`, { model: currentModelName.value }, currentConversation.value?.id)
+    // 不手动限制 max_tokens：现代模型上下文足够长，用默认上限即可。
+    // 通过提示词（字数要求 + 禁止思考）控制输出长度，避免手动设小导致截断。
+    let choice = await aiService.chat(prompt, `你是背诵辅助专家（当前导图类型：${mapType.label}），只输出严格符合要求的 JSON，不输出任何解释或代码块标记。`, null, { responseFormat: 'json', thinking: false })
+    let content = choice?.message?.content || ''
 
-      if (aiService.isAborted()) {
-        aiMsg.toolCalls[0].status = 'stopped'
-        aiMsg.content = '已停止背诵改写'
-        aiStatus.value = 'done'
-        emit('tool-call-status', 'done')
-        return
-      }
-
-      const summary = parseMergeSummary(content)
-      if (!summary) {
-        aiMsg.toolCalls[0].status = 'error'
-        aiMsg.content = '改写失败：AI 返回格式无法解析'
-        aiStatus.value = 'error'
-        emit('tool-call-status', 'error')
-        ElMessage.error('改写失败')
-        return
-      }
-
-      const parentNode = generalizationNodes[0]
-      const ok = setNodeGeneralization(parentNode, toGeneralizationHtml(summary))
-      // review A1：setNodeGeneralization 内部已 scheduleMindMapRender，这里不需要再 render
-      aiMsg.toolCalls[0].status = ok ? 'done' : 'error'
-      aiMsg.content = ok
-        ? `已为「${extractNodeText(parentNode)}」生成背诵概要：\n${summary.replace(/\n/g, ' / ')}\n\n可通过 Ctrl+Z 撤销。`
-        : '改写失败：写入概要失败'
-      aiStatus.value = ok ? 'done' : 'error'
-      emit('tool-call-status', ok ? 'done' : 'error')
-      if (ok) ElMessage.success('已生成背诵概要')
-      else ElMessage.error('改写失败')
-      return aiMsg.content
+    // 判断内容是否疑似被截断（以 { 或 [ 开头但括号不闭合）
+    const looksTruncated = (t) => {
+      const s = String(t || '').trim()
+      if (!/^[\[{]/.test(s)) return false
+      const opens = (s.match(/[\[{]/g) || []).length
+      const closes = (s.match(/[\]}]/g) || []).length
+      return opens !== closes
     }
 
-    // ===== 单节点：改写节点本身 =====
-    const context = buildReciteContext(rewriteTargets, [])
-    const prompt = buildRecitePrompt({ count: rewriteTargets.length, context, instructionBlock })
-    addLog('send', `AI 背诵改写请求:\n${prompt}`, { model: currentModelName.value }, currentConversation.value?.id)
-    const choice = await aiService.chat(prompt, SYS_PROMPT)
-    const content = choice?.message?.content || ''
+    // 空内容或截断时重试：去掉 response_format 约束（max_tokens 保持默认，靠提示词控制）
+    if ((!content.trim() || looksTruncated(content)) && !aiService.isAborted()) {
+      addLog('info', 'AI 背诵改写返回空/截断内容，降级重试（去掉 response_format 约束）', {}, currentConversation.value?.id)
+      choice = await aiService.chat(prompt, `你是背诵辅助专家（当前导图类型：${mapType.label}），只输出严格符合要求的 JSON，不输出任何解释或代码块标记。`, null, { thinking: false })
+      content = choice?.message?.content || ''
+    }
+
     addLog('receive', `AI 背诵改写返回:\n${content}`, { model: currentModelName.value }, currentConversation.value?.id)
 
     if (aiService.isAborted()) {
@@ -5018,47 +4864,40 @@ ${opts.instruction.trim().slice(0, 2000)}
 
     const parsed = parseRewriteJSON(content, rewriteTargets.length)
 
-    let replaced = 0
-    for (let i = 0; i < rewriteTargets.length; i++) {
-      const item = parsed.rewrites.find(r => Number(r.index) === i + 1) || parsed.rewrites[i]
-      const newText = item && item.text ? String(item.text).trim() : ''
-      if (!newText) continue
-      const node = rewriteTargets[i]
+    // 把改写结果写入概要（generalization），不替换原节点内容
+    // 单节点：概要放在当前节点；多节点：整合成一份放在共同父节点
+    let added = 0
+    const summaryLines = []
+
+    const item = parsed.rewrites[0]
+    if (item && (item.memoryKey || item.reciteText || item.explanation)) {
+      const targetNode = commonParent || rewriteTargets[0]
       try {
-        // 改写前先把原始内容记为备注（已存在备注则保留最早一版，避免多次改写相互覆盖）
-        const originalText = extractNodeText(node)
-        if (originalText) {
-          let hasNote = false
-          try { hasNote = !!(typeof node.getData === 'function' && node.getData('note')) } catch (e) {}
-          if (!hasNote && typeof node.setNote === 'function') {
-            node.setNote(originalText)
-          }
+        const html = toReciteGeneralizationHtml(item.memoryKey, item.reciteText, item.explanation)
+        if (setNodeGeneralization(targetNode, html)) {
+          added = 1
+          const targetText = extractNodeText(targetNode) || '节点'
+          summaryLines.push(`${targetText.length > 25 ? targetText.slice(0, 25) + '…' : targetText} → 【${item.memoryKey || '-'}】`)
         }
-        if (typeof node.setText === 'function') {
-          node.setText(toReciteRewriteHtml(newText), true)
-        } else if (typeof node.setData === 'function') {
-          node.setData({ text: toReciteRewriteHtml(newText), richText: true })
-        }
-        replaced++
       } catch (e) {
-        console.error('替换节点文本失败:', e)
+        console.error('设置背诵改写概要失败:', e)
       }
     }
 
-    // review A1：forEach 改完所有节点后的"一次性" render → 改为防抖 render，
-    // 如果上面 setNodeGeneralization 已经在跑，会合并到同一帧
-    scheduleMindMapRender()
+    // 背诵改写后调度补充重渲染（防抖），统一管理渲染时机避免叠加冲突
+    if (added > 0 && props.mindMap) {
+      scheduleReRender('render', 500)
+    }
 
-    aiMsg.toolCalls[0].status = replaced > 0 ? 'done' : 'error'
-    const summaryLines = parsed.rewrites
-      .filter(r => r.text)
-      .map((r, i) => `${i + 1}. ${r.text}`)
-    aiMsg.content = replaced > 0
-      ? `已完成 ${replaced} 个节点的背诵改写（【记忆简写】+重点概括）：\n${summaryLines.join('\n')}\n\n可通过 Ctrl+Z 撤销本次改写。`
+    aiMsg.toolCalls[0].status = added > 0 ? 'done' : 'error'
+    aiMsg.content = added > 0
+      ? (isMulti
+        ? `已将 ${rewriteTargets.length} 个节点关联理解，整合为一份背诵概要（记忆口诀+背诵改写+简要解释），放在父节点「${extractNodeText(commonParent) || ''}」下：\n${summaryLines.join('\n')}${parsed.memoryTip ? `\n\n【记忆技巧】${parsed.memoryTip}` : ''}\n\n原节点内容保持不变，可通过 Ctrl+Z 撤销。`
+        : `已为该节点添加背诵概要（记忆口诀+背诵改写+简要解释）：\n${summaryLines.join('\n')}${parsed.memoryTip ? `\n\n【记忆技巧】${parsed.memoryTip}` : ''}\n\n原节点内容保持不变，可通过 Ctrl+Z 撤销。`)
       : '改写失败：AI 返回格式无法解析，节点未被修改'
     aiStatus.value = 'done'
     emit('tool-call-status', 'done')
-    ElMessage.success(replaced > 0 ? `已改写 ${replaced} 个节点` : '改写失败')
+    ElMessage.success(added > 0 ? (isMulti ? `已将 ${rewriteTargets.length} 个节点整合为一份背诵概要` : '已添加背诵概要') : '改写失败')
     return aiMsg.content
   } catch (error) {
     console.error('AI 背诵改写失败:', error)
@@ -5085,326 +4924,6 @@ ${opts.instruction.trim().slice(0, 2000)}
   }
 }
 
-// ============================================================
-// 全局背诵改写（需求8）：主控 + 子 Agent 动态批量处理整张导图
-// ============================================================
-const aiRewriteFullMap = async () => {
-  if (pendingContinue.value) {
-    ElMessage.warning('请先回答上方的续写提问，或点击「取消续写」')
-    return '请先回答续写提问'
-  }
-  if (aiStatus.value === 'thinking' || aiStatus.value === 'calling') {
-    ElMessage.warning('AI 正在处理中，请稍候...')
-    return 'AI 正在处理中'
-  }
-  const root = props.mindMap?.renderer?.root
-  if (!root) {
-    ElMessage.warning('思维导图为空，无法全局背诵改写')
-    return
-  }
-
-  // 阶段一：树扫描，收集所有节点（层级路径 + 文本）
-  const collect = []
-  const walk = (n, level, pathArr) => {
-    if (!n || n.isGeneralization) return
-    const t = extractNodeText(n)
-    const p = pathArr.concat(t ? [t] : [])
-    if (t) collect.push({ node: n, level, text: t, path: p })
-    ;(n.children || []).forEach(c => walk(c, level + 1, p))
-  }
-  walk(root, 0, [])
-  const total = collect.length
-  if (total === 0) {
-    ElMessage.warning('思维导图没有可改写的内容')
-    return
-  }
-
-  // 分块：≤50 整体一块；>50 按一级分支拆分
-  let blocks = []
-  if (total <= 50) {
-    blocks = [{ name: '全文', nodes: collect }]
-  } else {
-    ;(root.children || []).forEach(rc => {
-      if (!rc || rc.isGeneralization) return
-      const nodesInBlock = []
-      const walkBlock = (n, level, pathArr) => {
-        if (!n || n.isGeneralization) return
-        const t = extractNodeText(n)
-        const p = pathArr.concat(t ? [t] : [])
-        if (t) nodesInBlock.push({ node: n, level, text: t, path: p })
-        ;(n.children || []).forEach(c => walkBlock(c, level + 1, p))
-      }
-      walkBlock(rc, 1, [extractNodeText(root)])
-      if (nodesInBlock.length) blocks.push({ name: extractNodeText(rc) || '未命名分支', nodes: nodesInBlock })
-    })
-    if (blocks.length === 0) blocks = [{ name: '全文', nodes: collect }]
-  }
-
-  // 超大导图（>500 节点）：每个块限制 80 节点，超出部分拆成新块
-  if (total > 500) {
-    const capped = []
-    blocks.forEach(b => {
-      const parts = []
-      for (let i = 0; i < b.nodes.length; i += 80) {
-        parts.push(b.nodes.slice(i, i + 80))
-      }
-      parts.forEach((p, i) => capped.push({ name: `${b.name}（${i + 1}）`, nodes: p }))
-    })
-    blocks = capped
-  }
-
-  // 阶段一.2：关联预分析——仅骨架（前2层）发一次，产出全局逻辑关联图谱
-  const rootText = extractNodeText(root)
-  const rootChildrenText = (root.children || [])
-    .filter(c => !c.isGeneralization)
-    .map(c => extractNodeText(c))
-    .filter(Boolean)
-    .join('、')
-
-  messages.value.push({
-    id: genMsgId(),
-    role: 'user',
-    content: '全局背诵改写',
-    isAiAction: true
-  })
-  const aiMsg = {
-    id: genMsgId(),
-    role: 'assistant',
-    content: `正在分析全局关联... 共 ${blocks.length} 个分支块待处理`,
-    toolCalls: [{
-      name: 'ai_rewrite_full_map',
-      displayName: '全局背诵改写',
-      status: 'calling'
-    }]
-  }
-  messages.value.push(aiMsg)
-  aiStatus.value = 'thinking'
-  emit('tool-call-status', 'thinking')
-  scrollToBottom()
-  stopRequested.value = false
-  aiService.resetAbort()
-
-  try {
-    // 骨架关联分析
-    let relationGraph = ''
-    try {
-      const skeletonPrompt = `你是思维导图结构分析专家。下面是思维导图的骨架（根节点 + 一级分支），请分析这些分支之间的逻辑关系（因果、并列、递进、对比等），输出全局逻辑关联图谱，简洁说明哪些分支讲同一主题、哪些存在概念交叉。只输出分析结论，200 字内。
-
-根节点：${rootText || '（无）'}
-一级分支：${rootChildrenText || '（无）'}`
-      const rel = await aiService.chat(skeletonPrompt, '你是结构分析专家，只输出简洁的逻辑关联分析。')
-      relationGraph = rel?.message?.content || ''
-    } catch (e) {
-      relationGraph = ''
-    }
-
-    // 阶段二：并行深度提取（受并发降级管控）
-    const limiter = new ConcurrencyLimiter({
-      maxConcurrency: 10,
-      maxRetries: 2,
-      log: (msg) => addLog('info', `[全局背诵改写] ${msg}`, {}, currentConversation.value?.id)
-    })
-    let doneBlocks = 0
-    const branchResults = []
-    await limiter.runAll(blocks, async (block) => {
-      const lines = block.nodes.map(n => `${'  '.repeat(Math.max(0, n.level - 1))}- ${n.text}`).join('\n')
-      const prompt = `你是思维导图深度分析专家。以下是导图「${props.currentFileName || ''}」中一个分支「${block.name}」的完整内容（缩进表示层级）。请深入理解该分支及关联上下文，提取：核心论点、关键词、逻辑主线，忽略冗余修饰词，保留完整语义。
-
-${lines}
-
-请返回严格 JSON：{"branchName": "${block.name}", "corePoints": ["核心论点1", "核心论点2"], "keywords": ["关键词1", "关键词2"]}`
-      const choice = await aiService.chat(prompt, '你是深度分析专家，只输出严格 JSON，不输出解释。')
-      const content = choice?.message?.content || ''
-      const m = content.match(/\{[\s\S]*\}/)
-      if (m) {
-        try {
-          const obj = JSON.parse(m[0])
-          branchResults.push(obj)
-          return obj
-        } catch (e) {}
-      }
-      return { branchName: block.name, corePoints: [], keywords: [] }
-    }, {
-      isAborted: () => aiService.isAborted(),
-      onProgress: (p) => {
-        doneBlocks = p.done
-        aiMsg.content = `正在分析全局关联... ${doneBlocks}/${blocks.length} 分支处理中...`
-      }
-    })
-
-    if (aiService.isAborted()) {
-      aiMsg.toolCalls[0].status = 'stopped'
-      aiMsg.content = '已停止全局背诵改写'
-      aiStatus.value = 'done'
-      emit('tool-call-status', 'done')
-      return aiMsg.content
-    }
-
-    // 阶段三：主控融会贯通，生成最终输出
-    const branchSummary = branchResults.map(b => `【${b.branchName || '分支'}】\n核心观点：${(b.corePoints || []).join('；')}\n关键词：${(b.keywords || []).join('、')}`).join('\n\n')
-    const finalPrompt = `你是思维导图背诵方法专家。下面是整张导图的全局逻辑关联图谱和各分支的深度提取结果。请据此生成三部分内容：
-
-【关联图谱】
-${relationGraph || '（无）'}
-
-【各分支深度提取】
-${branchSummary || '（无）'}
-
-请输出 Markdown 大纲（层级不超过 4 级，根节点为一级标题），结构如下：
-
-# 📘 全文背诵框架
-## 全文逻辑框架图
-（以缩进列表展示全文层级逻辑结构和章节大意）
-## 易混淆/关联点辨析表
-（列出易混淆概念及其区别）
-## 全文背诵口诀与记忆策略
-（至少 3 条串联全文核心脉络的顺口溜或逻辑链条记忆法）
-
-直接输出 Markdown，不要代码块围栏。`
-    aiMsg.content = '正在融会贯通生成全文背诵框架...'
-    const finalChoice = await aiService.chat(finalPrompt, '你是背诵方法专家，输出规范 Markdown 大纲，层级不超过 4 级。')
-    const finalMarkdown = finalChoice?.message?.content || ''
-
-    if (aiService.isAborted()) {
-      aiMsg.toolCalls[0].status = 'stopped'
-      aiMsg.content = '已停止全局背诵改写'
-      aiStatus.value = 'done'
-      emit('tool-call-status', 'done')
-      return aiMsg.content
-    }
-
-    // 解析并插入到根节点下
-    let tree = null
-    try {
-      tree = parseMarkdownToTree(finalMarkdown.replace(/^#\s*/m, ''))
-    } catch (e) {
-      tree = null
-    }
-    let inserted = false
-    if (tree && tree.data && tree.data.text && tree.children && tree.children.length > 0) {
-      try {
-        // 根标题作为框架节点标题，子节点为三个部分。
-        // parseMarkdownToTree 返回的节点 text 已是富文本 HTML（<p><span>...</span></p>），直接复用，不再二次转义。
-        const pickHtml = (n) => (n?.data?.text && String(n.data.text).trim()) ? String(n.data.text) : '<p><span></span></p>'
-        const frameworkNode = {
-          data: {
-            text: toRichTextHtml('📘 全文背诵框架'),
-            uid: createUid(),
-            richText: true,
-            borderColor: '#007aff',
-            borderWidth: 2, expand: true   // review 修复：默认展开，避免新插入节点左右位置未测量导致重叠
-          },
-          children: tree.children.slice(0, 3).map(c => ({
-            data: {
-              text: pickHtml(c),
-              uid: createUid(),
-              richText: true,
-              expand: true,
-            },
-            children: (c.children || []).slice(0, 30).map(cc => ({
-              data: {
-                text: pickHtml(cc),
-                uid: createUid(),
-                richText: true,
-                expand: true,
-              },
-              children: []
-            }))
-          }))
-        }
-        props.mindMap.execCommand('INSERT_MULTI_CHILD_NODE', [root], [frameworkNode])
-        inserted = true
-        // 全文背诵框架含大量富文本节点，INSERT_MULTI_CHILD_NODE 仅做部分渲染，
-        // 富文本节点首帧尺寸可能未测量到位；改用 reRender 完全重绘（清空节点缓存）
-        // 强制重新测量与布局，避免思维导图模式下节点重叠覆盖。
-        // 多阶段强制重绘（review 修复：避免「全文背诵改写」节点重叠/覆盖）
-        // 同步 / rAF / setTimeout 三次强制重排，规避富文本节点首帧未测量造成的节点重叠
-        const __forceRelayout = (mode) => {
-          try {
-            // review A1：reRender 是同步大操作（拆掉旧视图 + 重建），不防抖；
-            // 这里保留同步调用，仅 render() 路径走 scheduleMindMapRender
-            if (typeof props.mindMap.reRender === 'function') {
-              // mode='SWITCH_VIEW' 提示 simple-mind-map 走视图切换路径（更彻底的清理 + 重测）
-              props.mindMap.reRender(() => {}, mode || 'SWITCH_VIEW')
-            } else if (typeof props.mindMap.render === 'function') {
-              scheduleMindMapRender()
-            }
-          } catch (e) {}
-        }
-        __forceRelayout('SWITCH_VIEW')
-        try {
-          if (typeof requestAnimationFrame !== 'undefined') {
-            requestAnimationFrame(() => {
-              __forceRelayout('SWITCH_VIEW')
-              setTimeout(() => __forceRelayout('SWITCH_VIEW'), 50)
-            })
-          } else {
-            setTimeout(() => __forceRelayout('SWITCH_VIEW'), 80)
-          }
-        } catch (e) { /* ignore */ }
-      } catch (e) {
-        console.error('插入全文背诵框架节点失败:', e)
-      }
-    }
-
-    aiMsg.toolCalls[0].status = inserted ? 'done' : 'error'
-    aiMsg.content = inserted
-      ? `已完成全局背诵改写（共 ${total} 个节点，${blocks.length} 个分支块），已在根节点下新建「📘 全文背诵框架」节点（蓝色边框），包含：全文逻辑框架图、易混淆辨析表、背诵口诀与记忆策略。可通过 Ctrl+Z 撤销。`
-      : '全局背诵改写完成，但生成框架节点失败：AI 返回内容无法解析为 Markdown 大纲。'
-    aiStatus.value = inserted ? 'done' : 'error'
-    emit('tool-call-status', inserted ? 'done' : 'error')
-    addLog('receive', aiMsg.content, { model: currentModelName.value }, currentConversation.value?.id)
-    emit('log-updated')
-    return aiMsg.content
-  } catch (error) {
-    console.error('[全局背诵改写] 失败:', error)
-    const stopped = error.aborted || aiService.isAborted()
-    aiMsg.toolCalls[0].status = stopped ? 'stopped' : 'error'
-    aiMsg.content = stopped ? '已停止全局背诵改写' : `全局背诵改写失败：${error.message || '未知错误'}`
-    aiStatus.value = stopped ? 'done' : 'error'
-    emit('tool-call-status', stopped ? 'done' : 'error')
-    if (!stopped) {
-      addLog('error', `全局背诵改写失败: ${error.message}`, {}, currentConversation.value?.id)
-      emit('log-updated')
-    }
-    return aiMsg.content
-  } finally {
-    setTimeout(() => { aiStatus.value = 'idle' }, 500)
-    aiService.resetAbort()
-    persistConversation()
-  }
-}
-
-// review A1：AI 工作期间频繁整树 render 是"卡 + 转圈"主因之一。
-// 这里用一个微任务防抖器：节点数据照常更新，但 mindMap.render() 合并到下一个 requestAnimationFrame
-// 调用一次。批量场景下从 N 次 render 降到 1 次，预期 5~10 倍提速。
-let __renderRafId = null
-// review A3：流式输出节流标志位；onChunk 不断累加 fullResponse，但 aiMsg.content 只在 raf 触发时同步
-let __streamFlushPending = false
-const scheduleMindMapRender = () => {
-  if (!props.mindMap || typeof props.mindMap.render !== 'function') return
-  if (__renderRafId != null) return // 已有待执行的 render，跳过
-  const raf = (typeof window !== 'undefined' && window.requestAnimationFrame)
-    ? window.requestAnimationFrame.bind(window)
-    : (cb) => setTimeout(cb, 16)
-  __renderRafId = raf(() => {
-    __renderRafId = null
-    try { props.mindMap.render() } catch (e) { /* 渲染异常吞掉，避免影响后续 AI 流 */ }
-  })
-}
-// 同时 flush 用于"立刻需要画面同步"的场景（如 AI 调用结束、用户点了停止）
-const flushMindMapRender = () => {
-  if (__renderRafId != null) {
-    const cId = __renderRafId
-    const cancel = (typeof window !== 'undefined' && window.cancelAnimationFrame)
-      ? window.cancelAnimationFrame.bind(window)
-      : clearTimeout
-    cancel(cId)
-    __renderRafId = null
-    try { props.mindMap.render() } catch (e) { /* ignore */ }
-  }
-}
-
 // 设置/更新节点记忆概要（新概要走 ADD_GENERALIZATION 命令以支持 Ctrl+Z；已有概要直接更新）
 const setNodeGeneralization = (node, html) => {
   try {
@@ -5418,8 +4937,17 @@ const setNodeGeneralization = (node, html) => {
       list.push({ text: html, richText: true, resetRichText: false, uid: createUid() })
     }
     node.setData({ generalization: list })
-    // review A1：批量 render 防抖（取代原 props.mindMap.render()）
-    scheduleMindMapRender()
+    // 立即同步渲染层的概要节点，避免数据层与渲染层不一致导致
+    // handleGeneralizationMouseenter 等函数读取 undefined.range 报错
+    try {
+      if (typeof node.renderGeneralization === 'function') {
+        node.renderGeneralization(true)
+      }
+    } catch (e) {
+      console.warn('同步概要渲染失败:', e)
+    }
+    // 设置记忆概要后调度补充渲染（防抖），用于重新计算整体布局
+    scheduleReRender('render', 400)
     return true
   } catch (e) {
     console.error('设置记忆概要失败:', e)
@@ -5427,11 +4955,14 @@ const setNodeGeneralization = (node, html) => {
   }
 }
 
-// 构建背诵改写上下文：列出上级节点 + 全部同级节点（► 标记改写目标）+ 各 ► 节点的子节点（仅用于理解）+ ◆ 概要节点。
-// 注意：子节点内容仅用于帮助 AI 理解每个 ► 节点的含义，最终概要/改写仍围绕 ► 节点本身，不把子节点当独立条目展开。
+// 构建背诵改写上下文：按父节点分组列出同级节点（► 标记改写目标），附完整子树与 ◆ 概要节点
 const buildReciteContext = (targets, generalizationNodes = []) => {
   let ctx = ''
   if (props.currentFileName) ctx += `【文件来源】${props.currentFileName}\n`
+  const clip = (text, max = 140) => {
+    const s = String(text || '').trim()
+    return s.length > max ? s.slice(0, max) + '…' : s
+  }
 
   const uidOf = (n) => n.uid || n?.data?.uid
   const targetIndexByUid = new Map()
@@ -5450,31 +4981,37 @@ const buildReciteContext = (targets, generalizationNodes = []) => {
     groups.find(g => (g.parent ? (uidOf(g.parent) || extractNodeText(g.parent)) : 'ROOT') === key).nodes.push(n)
   })
 
-  // 子节点展开（限深度，仅用于理解）：截断过长文本，避免 token 爆炸
-  const subtreeOf = (node, depth, maxDepth = 2) => {
+  const subtreeOf = (node, depth, state) => {
+    if (depth > 3 || state.count >= state.max) return ''
     const children = node.children || []
-    if (!children.length || depth > maxDepth) return ''
+    if (!children.length) return ''
     let out = ''
     for (const c of children) {
-      let t = extractNodeText(c)
-      if (t) {
-        if (t.length > 50) t = t.slice(0, 50) + '…'
-        out += `${'  '.repeat(depth)}- ${t}\n`
+      if (state.count >= state.max) {
+        out += `${'    '.repeat(depth)}- …（其余子节点省略）\n`
+        return out
       }
-      out += subtreeOf(c, depth + 1, maxDepth)
+      // 直接子节点（下一层，背诵改写重点）120 字；更深层仅作理解上下文，截断到 50 字，避免撑爆上下文
+      const maxLen = depth === 1 ? 120 : 50
+      const t = clip(extractNodeText(c), maxLen)
+      if (t) {
+        out += `${'    '.repeat(depth)}- ${t}\n`
+        state.count++
+      }
+      out += subtreeOf(c, depth + 1, state)
     }
     return out
   }
 
   const listed = new Set()
   groups.forEach(group => {
-    const parentText = group.parent ? extractNodeText(group.parent) : ''
+    const parentText = group.parent ? clip(extractNodeText(group.parent), 160) : ''
     ctx += `\n【上级节点】${parentText || '（无，根节点）'}\n`
     const siblings = group.parent && group.parent.children ? group.parent.children : group.nodes
     if (siblings.length > 0) {
       ctx += `【全部同级节点（带 ► 序号的为本次要改写的节点）】\n`
       siblings.forEach(c => {
-        const t = extractNodeText(c)
+        const t = clip(extractNodeText(c), 120)
         if (!t) return
         const idx = targetIndexByUid.get(uidOf(c))
         if (idx) {
@@ -5485,95 +5022,32 @@ const buildReciteContext = (targets, generalizationNodes = []) => {
         }
       })
     }
-  })
-
-  // 各 ► 节点的子节点内容（仅用于理解节点含义）
-  const withChildren = targets.filter(n => (n.children || []).length > 0)
-  if (withChildren.length > 0) {
-    ctx += `\n【各 ► 节点的子节点内容（仅用于理解各节点含义，输出仍围绕 ► 节点本身）】\n`
-    withChildren.forEach(n => {
-      const idx = targetIndexByUid.get(uidOf(n))
-      const subtree = subtreeOf(n, 1)
-      if (subtree) ctx += `「${extractNodeText(n)}」的子节点：\n${subtree}`
+    group.nodes.forEach(n => {
+      // 每个目标节点独立计数，最多列出 40 个子节点（含深层），防止上下文过大
+      const state = { count: 0, max: 40 }
+      const subtree = subtreeOf(n, 1, state)
+      if (subtree) {
+        ctx += `\n【要改写节点 ${targetIndexByUid.get(uidOf(n))}「${clip(extractNodeText(n), 160)}」的全部子节点】\n${subtree}`
+      }
     })
-  }
+  })
 
   // 兜底：未出现在同级列表中的目标（异常结构）
   const orphans = targets.filter((n, i) => !listed.has(i + 1))
   if (orphans.length > 0) {
     ctx += `\n【要改写的节点】\n`
     orphans.forEach(n => {
-      ctx += `► ${targetIndexByUid.get(uidOf(n))}. ${extractNodeText(n)}\n`
+      ctx += `► ${targetIndexByUid.get(uidOf(n))}. ${clip(extractNodeText(n), 160)}\n`
     })
   }
 
   if (generalizationNodes.length > 0) {
     ctx += `\n【需要生成记忆概要的父节点（◆ 序号对应 generalizations 的 index）】\n`
     generalizationNodes.forEach((n, i) => {
-      ctx += `◆ ${i + 1}. ${extractNodeText(n) || '（无文本）'}\n`
+      ctx += `◆ ${i + 1}. ${clip(extractNodeText(n), 160) || '（无文本）'}\n`
     })
   }
   return ctx
-}
-
-// ============ 背诵改写 prompt 构建（供单次/并发分组复用） ============
-// 基础规则：仅改写 ► 节点（不含概要），并发分组时用，减少 token
-const RECITE_RULES_BASIC = `改写规则（严格遵守）：
-1. 每个 ► 节点的改写结果必须是固定格式：【记忆简写】+重点概括。【记忆简写】优先只取 1 个字；仅当 1 个字无法与同层级其他节点区分时，才扩展到 2~4 个字，绝对不要超过 4 个字。允许使用谐音字，但只允许自然易懂的谐音。重点概括部分：如果原节点文字 ≤ 12 个字，必须直接保留原节点文字，不要扩展、不要改写成更长的句子；如果原节点文字较长，才概括为 40 字内的重点概括。
-2. 必须基于上级节点和同级节点的上下文理解内容，改写不得遗漏关键知识点。重点概括聚焦该节点的核心考点/得分点/易错点，不要写一般性的空话、套话。`
-
-const RECITE_RETURN_FORMAT = `返回格式（严格 JSON，不要返回任何其他内容，不要 markdown 代码块）：
-{"rewrites": [{"index": 1, "text": "【记忆简写】重点概括"}]}`
-
-// 构建单节点改写 prompt
-const buildRecitePrompt = ({ count, context, instructionBlock }) => {
-  return `你是一个背诵辅助专家。请对下面思维导图中标记为 ►（带序号）的 ${count} 个节点进行背诵改写。
-${instructionBlock}
-${context}
-
-${RECITE_RULES_BASIC}
-
-${RECITE_RETURN_FORMAT}
-
-其中 rewrites 的 index 对应 ► 序号（从 1 开始），数量必须等于 ${count}。`
-}
-
-// 多节点合并背诵概要 prompt：不改写节点本身，而是把框选的几个同级节点合并成一个多行概要挂父节点
-// 第一行：记忆简写串联（方便背诵）；第二行起：逐个节点解释。子节点仅用于理解，输出仍围绕 ► 节点本身。
-const buildMergeSummaryPrompt = ({ count, context, instructionBlock }) => {
-  return `你是一个背诵辅助专家。请为下面思维导图中标记为 ►（带序号）的 ${count} 个同级节点，生成一个合并的「背诵概要」（不要改写这些节点本身的文字）。
-
-${instructionBlock}
-${context}
-
-生成要求（严格遵守）：
-1. 概要 text 为多行内容，用 \\n 分隔：
-   - 第一行：记忆简写串联（每个 ► 节点取 1 个字，仅当 1 个字无法与其他节点区分时才扩展到 2~4 字，按顺序串联全部节点，例如「辩历系战底创」）。
-   - 第二行起：每个 ► 节点一行，格式「简写=节点名：一句解释」，解释要简洁（15 字内）、突出该节点的核心考点/得分点。
-2. 各 ► 节点的子节点内容仅用于理解节点含义，概要输出必须围绕 ► 节点本身，不要把子节点当作独立条目展开、不要遗漏任何 ► 节点。
-3. 简写之间不得重复，优先首字串联、语义分组；谐音仅在自然顺口时使用，禁止生硬谐音、为押韵扭曲原意、编造无意义联想。
-
-返回格式（严格 JSON，不要返回任何其他内容，不要 markdown 代码块）：
-{"summary": "第一行\\n第二行\\n第三行"}`
-}
-
-// 解析合并背诵概要返回（容错：剥离思考块/代码围栏，优先取 summary 字段，其次取 generalizations[0].text，最终降级取全文）
-const parseMergeSummary = (content) => {
-  let raw = String(content || '').trim()
-  raw = raw.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').trim()
-  raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
-  const start = raw.indexOf('{')
-  const end = raw.lastIndexOf('}')
-  if (start !== -1 && end > start) {
-    try {
-      const obj = JSON.parse(raw.slice(start, end + 1))
-      if (obj && typeof obj.summary === 'string' && obj.summary.trim()) return obj.summary.trim()
-      if (obj && Array.isArray(obj.generalizations) && obj.generalizations[0] && obj.generalizations[0].text) {
-        return String(obj.generalizations[0].text).trim()
-      }
-    } catch (e) { /* 继续降级 */ }
-  }
-  return raw
 }
 
 // 清洗改写文本：去掉 AI 输出时多余的标点前缀（冒号、空格、破折号、逗号等），
@@ -5586,72 +5060,139 @@ const cleanRewriteText = (t) => {
 }
 
 // 解析背诵改写的严格 JSON 返回（容错：剥离代码块围栏、截取 JSON 主体、正则提取、降级按行解析）
+// 新格式：rewrites 每项包含 {index, memoryKey, reciteText, explanation}
 const parseRewriteJSON = (content, nodeCount) => {
   let raw = String(content || '').trim()
   // 推理模型可能在正文前输出 <think>...</think> 思考块，先剥离（含未闭合的情况）
   raw = raw.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').trim()
   raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
+  // 识别截断/损坏的 JSON：以 { 或 [ 开头但括号不闭合，说明 AI 输出被截断。
+  // 此时不应降级按行解析（会把残缺 JSON 字符串当成 reciteText 写入概要），直接判定为解析失败。
+  if (/^[\[{]/.test(raw)) {
+    const opens = (raw.match(/[\[{]/g) || []).length
+    const closes = (raw.match(/[\]}]/g) || []).length
+    if (opens !== closes) {
+      return { rewrites: [], memoryTip: '' }
+    }
+  }
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
+  const arrStart = raw.indexOf('[')
+  const arrEnd = raw.lastIndexOf(']')
+  const hasArrayRoot = arrStart !== -1 && (start === -1 || arrStart < start) && arrEnd > arrStart
+  // 标准化条目：兼容旧格式 {index, text} 和新格式 {index, memoryKey, reciteText, explanation}
+  const normalizeEntry = (r, i) => {
+    if (!r) return null
+    const index = Number(r?.index) || (i + 1)
+    // 新格式：有 memoryKey 或 reciteText 或 explanation
+    if (r.memoryKey || r.reciteText || r.explanation) {
+      return {
+        index,
+        memoryKey: cleanRewriteText(r.memoryKey),
+        reciteText: cleanRewriteText(r.reciteText),
+        explanation: cleanRewriteText(r.explanation)
+      }
+    }
+    // 旧格式兼容：只有 text，拆成 memoryKey + reciteText
+    const text = typeof r === 'string' ? r : r.text
+    const cleanText = cleanRewriteText(text)
+    if (!cleanText) return null
+    // 尝试从【XX】中提取口诀
+    const m = cleanText.match(/^【(.+?)】(.*)$/)
+    if (m) {
+      return {
+        index,
+        memoryKey: m[1],
+        reciteText: m[2].trim(),
+        explanation: ''
+      }
+    }
+    return { index, memoryKey: '', reciteText: cleanText, explanation: '' }
+  }
+  if (hasArrayRoot) {
+    const body = raw.slice(arrStart, arrEnd + 1)
+    try {
+      const arr = JSON.parse(body)
+      if (Array.isArray(arr)) {
+        const rewrites = arr.map(normalizeEntry).filter(Boolean)
+        if (rewrites.length > 0) {
+          return { rewrites, memoryTip: '' }
+        }
+      }
+    } catch (e) {}
+  }
   if (start !== -1 && end > start) {
     const body = raw.slice(start, end + 1)
     try {
       const obj = JSON.parse(body)
       if (obj && Array.isArray(obj.rewrites)) {
+        const rewrites = obj.rewrites.map(normalizeEntry).filter(Boolean)
         return {
-          rewrites: obj.rewrites.filter(r => r && r.text).map(r => ({ ...r, text: cleanRewriteText(r.text) })),
-          generalizations: Array.isArray(obj.generalizations)
-            ? obj.generalizations.filter(g => g && g.text).map(g => ({ ...g, text: cleanRewriteText(g.text) }))
-            : [],
+          rewrites,
           memoryTip: typeof obj.memoryTip === 'string' ? cleanRewriteText(obj.memoryTip) : ''
         }
       }
     } catch (e) {
-      // JSON 损坏（缺引号/多余字符）→ 继续正则容错提取
+      // JSON 损坏 → 继续正则容错提取
     }
-    // 容错提取：按 "generalizations" 关键字分段，正则抓取 {index,text} 条目
-    const extracted = extractIndexTextEntries(body)
+    // 容错提取：正则抓取 {index, memoryKey, reciteText, explanation} 条目
+    const extracted = extractRewriteEntries(body)
     if (extracted.rewrites.length > 0) {
       return extracted
     }
   }
-  // 降级：按行解析为改写结果（◆ 开头的行视为记忆概要）
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean)
+  // 降级：按行解析
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean).slice(0, nodeCount)
   return {
-    rewrites: lines.filter(l => !l.startsWith('◆')).slice(0, nodeCount).map((t, i) => ({ index: i + 1, text: cleanRewriteText(t) })),
-    generalizations: lines.filter(l => l.startsWith('◆')).map((t, i) => ({ index: i + 1, text: cleanRewriteText(t.replace(/^◆\s*/, '')) })),
+    rewrites: lines.map((t, i) => normalizeEntry({ index: i + 1, text: t })).filter(Boolean),
     memoryTip: ''
   }
 }
 
 /**
- * 容错提取 {index, text} 条目（应对 AI 返回 JSON 缺引号、text 值漏左引号等损坏）
- * 按 "generalizations" 关键字分段，分别提取 rewrites 与 generalizations
+ * 容错提取背诵改写条目（应对 AI 返回 JSON 缺引号等损坏）
+ * 提取 {index, memoryKey, reciteText, explanation}
  */
-const extractIndexTextEntries = (raw) => {
-  const genIdx = raw.indexOf('"generalizations"')
-  const rewritesPart = genIdx !== -1 ? raw.slice(0, genIdx) : raw
-  const genPart = genIdx !== -1 ? raw.slice(genIdx) : ''
-  const extractEntries = (part) => {
-    const entries = []
-    // 匹配 "index":N ... "text": "..."；text 值允许缺引号，内容不含英文引号与半角逗号
-    const re = /"index"\s*:\s*(\d+)[\s\S]*?"text"\s*:\s*"?([^"]*?)"?(?=\s*[,}])/g
-    let m
-    while ((m = re.exec(part)) !== null) {
-      const text = cleanRewriteText(m[2])
-      if (text) entries.push({ index: Number(m[1]), text })
+const extractRewriteEntries = (raw) => {
+  const entries = []
+  // 匹配每个 rewrite 条目：先找 index，再依次提取 memoryKey、reciteText、explanation
+  const re = /"index"\s*:\s*(\d+)[\s\S]*?(?="index"\s*:|$)/g
+  let m
+  while ((m = re.exec(raw)) !== null) {
+    const block = m[0]
+    const index = Number(m[1])
+    const extractField = (name) => {
+      const re2 = new RegExp(`"${name}"\\s*:\\s*"([^"]*)"`)
+      const mm = re2.exec(block)
+      return mm ? cleanRewriteText(mm[1]) : ''
     }
-    return entries
+    const memoryKey = extractField('memoryKey')
+    const reciteText = extractField('reciteText')
+    const explanation = extractField('explanation')
+    // 兼容旧格式 text 字段
+    if (!reciteText) {
+      const textRe = /"text"\s*:\s*"([^"]*)"/
+      const tm = textRe.exec(block)
+      if (tm) {
+        const full = cleanRewriteText(tm[1])
+        const sm = full.match(/^【(.+?)】(.*)$/)
+        if (sm) {
+          entries.push({ index, memoryKey: sm[1], reciteText: sm[2].trim(), explanation: '' })
+          continue
+        }
+        entries.push({ index, memoryKey: '', reciteText: full, explanation: '' })
+        continue
+      }
+    }
+    if (memoryKey || reciteText || explanation) {
+      entries.push({ index, memoryKey, reciteText, explanation })
+    }
   }
   const memoryTip = (() => {
-    const m = /"memoryTip"\s*:\s*"([^"]*)"/.exec(raw)
-    return m ? cleanRewriteText(m[1]) : ''
+    const mm = /"memoryTip"\s*:\s*"([^"]*)"/.exec(raw)
+    return mm ? cleanRewriteText(mm[1]) : ''
   })()
-  return {
-    rewrites: extractEntries(rewritesPart),
-    generalizations: extractEntries(genPart),
-    memoryTip
-  }
+  return { rewrites: entries, memoryTip }
 }
 
 // AI 智能挖空（使用专用挖空模块，支持智能/激进模式 + 自动降级 + 批量处理）
@@ -5709,8 +5250,11 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
   messages.value.push({
     id: genMsgId(),
     role: 'user',
-    content: isFullMap ? '全文挖空' : 'AI 智能挖空',
-    isAiAction: true
+    content: isFullMap ? `AI 全文挖空「${props.currentFileName || '当前导图'}」` : `AI 智能挖空 ${nodeCount}`,
+    aiAction: isFullMap ? 'AI 全文挖空' : 'AI 智能挖空',
+    refs: isFullMap
+      ? buildNodeRefs([props.mindMap?.renderer?.root].filter(Boolean), '全文')
+      : buildNodeRefs(nodes, '挖空目标')
   })
 
   // 添加 AI 消息占位（显示进度）；全文大图时展示“主任务 + N 路并行子 Agent”。
@@ -5764,6 +5308,7 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
       emit('log-updated')
     }
     let clozeFallbackUsed = false
+    let isTwoPhaseMode = false
     const progressCb = (progress) => {
       let progressText = ''
       if (progress && progress.fallback) {
@@ -5772,13 +5317,26 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
         scrollToBottom()
         return
       }
-      if (progress && typeof progress === 'object' && progress.percent !== undefined) {
+      if (progress && typeof progress === 'object' && progress.phase === 'fallback_done') {
+        // 两阶段模式：第一阶段完成
+        isTwoPhaseMode = true
+        progressText = progress.message || '快速挖空完成，AI精修中…'
+        if (clozeToolCalls[0]) {
+          clozeToolCalls[0].summary = '快速挖空完成 · AI精修中'
+        }
+      } else if (progress && typeof progress === 'object' && progress.phase === 'review') {
+        // 两阶段模式：AI审查阶段
+        progressText = `AI 精修进度 ${progress.done}/${progress.total} 批（${progress.percent}%）`
+        if (clozeToolCalls[0]) {
+          clozeToolCalls[0].summary = `AI精修中 · ${progress.percent}%`
+        }
+      } else if (progress && typeof progress === 'object' && progress.percent !== undefined) {
         progressText = `已完成 ${progress.done}/${progress.total} 批（${progress.percent}%）`
         if (clozeToolCalls[0]) {
           clozeToolCalls[0].summary = `并行 ${workerCount} 路 · ${progress.percent}%`
         }
         if (isFullMap && workerCount > 1) {
-          const doneWorkers = Math.min(workerCount, Math.floor((progress.percent / 100) * workerCount))
+          const doneWorkers = Math.min(workerCount, progress.done || 0)
           for (let i = 1; i < clozeToolCalls.length; i++) {
             clozeToolCalls[i].status = (i - 1) < doneWorkers ? 'done' : 'calling'
           }
@@ -5789,9 +5347,15 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
       aiMsg.content = `正在分析${isFullMap ? '整张导图' : '节点内容'}并选择关键词进行挖空... ${progressText}`
       scrollToBottom()
     }
-    const count = isFullMap
+    const clozeRes = isFullMap
       ? await smartClozeFullMap('smart', progressCb)
       : await smartClozeNodes(nodes, 'smart', progressCb)
+    const count = (clozeRes && typeof clozeRes === 'object') ? clozeRes.count : clozeRes
+    const aiCount = (clozeRes && typeof clozeRes === 'object') ? (clozeRes.aiCount || 0) : 0
+    const fallbackCount = (clozeRes && typeof clozeRes === 'object') ? (clozeRes.fallbackCount || 0) : 0
+    const reviewAdded = (clozeRes && typeof clozeRes === 'object') ? (clozeRes.reviewAdded || 0) : 0
+    const reviewRemoved = (clozeRes && typeof clozeRes === 'object') ? (clozeRes.reviewRemoved || 0) : 0
+    const isTwoPhase = !!(clozeRes && typeof clozeRes === 'object' && clozeRes.isTwoPhase)
 
     if (!count) {
       finishClozeToolCalls('error')
@@ -5808,7 +5372,16 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
 
     // 挖空成功
     finishClozeToolCalls('done')
-    aiMsg.content = `已完成 ${nodeCount} 的智能挖空，共挖空 ${count} 个关键词。${clozeFallbackUsed ? '\n\n说明：部分节点因 AI 失败，已使用更保守的本地规则兜底挖空。' : ''}\n\n挖空内容已隐藏（半透明紫底+紫下划线），可通过画布右键菜单「显示/隐藏挖空」切换显隐状态。可通过 Ctrl+Z 撤销。`
+
+    let clozeSourceText = ''
+    if (isTwoPhase) {
+      // 两阶段模式的详细统计
+      clozeSourceText = `\n\n⚡ 快速兜底挖空 ${fallbackCount} 个，AI 精修补充 ${reviewAdded} 个，移除 ${reviewRemoved} 个。`
+    } else if (fallbackCount > 0) {
+      clozeSourceText = `\n\nAI 挖空 ${aiCount} 个，本地兜底挖空 ${fallbackCount} 个。`
+    }
+
+    aiMsg.content = `已完成 ${nodeCount} 的智能挖空，共挖空 ${count} 个关键词。${clozeSourceText}\n\n挖空内容已隐藏（半透明紫底+紫下划线），可通过画布右键菜单「显示/隐藏挖空」切换显隐状态。可通过 Ctrl+Z 撤销。`
     aiStatus.value = 'done'
     emit('tool-call-status', 'done')
 
@@ -5818,9 +5391,20 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
 
     addLog('receive', aiMsg.content, { model: currentModelName.value }, currentConversation.value?.id)
     if (!viaTool) {
-      addLog('tool_result', `工具: AI智能挖空 [${isFullMap ? 'ai_cloze_full_map' : 'ai_cloze'}]\n${isFullMap && workerCount > 1 ? `并行子 Agent: ${workerCount} 路\n` : ''}结果: 成功挖空 ${count} 个关键词`, {
+      let logDetail = ''
+      if (isTwoPhase) {
+        logDetail = `两阶段模式（节点数≥100）\n快速兜底: ${fallbackCount} 个\nAI精修补充: ${reviewAdded} 个\nAI移除: ${reviewRemoved} 个`
+      } else {
+        logDetail = `AI ${aiCount} 个，本地兜底 ${fallbackCount} 个`
+      }
+      addLog('tool_result', `工具: AI智能挖空 [${isFullMap ? 'ai_cloze_full_map' : 'ai_cloze'}]\n${isFullMap && workerCount > 1 ? `并行子 Agent: ${workerCount} 路\n` : ''}结果: 成功挖空 ${count} 个关键词\n${logDetail}`, {
         toolName: isFullMap ? 'ai_cloze_full_map' : 'ai_cloze',
-        count
+        count,
+        aiCount,
+        fallbackCount,
+        reviewAdded,
+        reviewRemoved,
+        isTwoPhase
       }, currentConversation.value?.id)
     }
     emit('log-updated')
@@ -5873,13 +5457,11 @@ const aiQuiz = async (nodesOrNode) => {
   highlightNodes(nodes)
   const nodeCount = nodes.length > 1 ? `${nodes.length} 个节点` : '该节点'
 
-  // 出题目标节点：保留为引用胶囊（让用户在消息列表能看到选中了哪些节点），
-  // 但用户消息正文只显示原子操作名"AI 出题"，避免 prompt 泄露。
   messages.value.push({
     id: genMsgId(),
     role: 'user',
-    content: 'AI 出题',
-    isAiAction: true,
+    content: `AI 出题 ${nodeCount}`,
+    aiAction: 'AI 出题',
     refs: nodes.map((n, i) => ({
       id: `quiz-${Date.now()}-${i}`,
       uid: n.getData?.('uid') || n.uid,
@@ -5963,8 +5545,9 @@ const reorganizeMindmap = async () => {
   messages.value.push({
     id: genMsgId(),
     role: 'user',
-    content: '一键整理导图',
-    isAiAction: true
+    content: '一键整理导图（整理为新的导图文件）',
+    aiAction: 'AI 一键整理导图',
+    refs: buildNodeRefs([props.mindMap?.renderer?.root].filter(Boolean), '全文')
   })
   const aiMsg = {
     id: genMsgId(),
@@ -6053,7 +5636,8 @@ Rules:
 - Timeline: bold the time, then → event.
 - Analysis: after each argument, → summary.
 - Table: header cells become first-level topics; each data row becomes a child; cell values become grandchildren prefixed with "列名：" to preserve column meaning. Never flatten a table into a single line.
-- Keep sibling structure consistent.`
+- Keep sibling structure consistent.
+- Output ONLY the Markdown outline. Do NOT output classification names, "分类结果：" prefixes, explanations, or code fences.`
 
 // 长文本分段：尽量在段落边界切，每段不超过 maxChars，避免硬截断在句子中间
 const splitLongText = (text, maxChars) => {
@@ -6102,12 +5686,7 @@ const convertDocToMindmap = async (filePath, fileName) => {
   if (!filePath) return
   const base = String(fileName || filePath.split(/[\\/]/).pop() || '文档').replace(/\.[^.]+$/, '')
 
-  messages.value.push({
-    id: genMsgId(),
-    role: 'user',
-    content: 'AI 转换为思维导图',
-    isAiAction: true
-  })
+  messages.value.push({ id: genMsgId(), role: 'user', content: `AI 转换为思维导图：「${base}」`, aiAction: 'AI 文档转思维导图' })
   const aiMsg = {
     id: genMsgId(),
     role: 'assistant',
@@ -6462,6 +6041,12 @@ const extraHandlers = {
   },
   aiClozeFullMap: async () => {
     return aiCloze([], { viaTool: true, scope: 'root' })
+  },
+  convertDocToMindmap: async (args = {}) => {
+    const filePath = String(args.file_path || args.filePath || '').trim()
+    if (!filePath) return '请提供 file_path（源文档绝对路径）'
+    const fileName = String(args.file_name || args.fileName || '').trim() || filePath.split(/[\\/]/).pop()
+    return convertDocToMindmap(filePath, fileName)
   },
   addToReview: (uid) => {
     try {
@@ -6870,6 +6455,7 @@ const attachedSkills = ref([])
 const skillPickerVisible = ref(false)
 const skillQuery = ref('')
 const allSkills = ref([])
+const mentionRanges = { skill: null, mcp: null, tool: null }
 const filteredSkills = computed(() => {
   const q = skillQuery.value.trim().toLowerCase()
   const enabled = allSkills.value.filter(s => s.enabled)
@@ -6882,13 +6468,17 @@ const loadSkillPicker = async () => {
 
 const detectSkillMention = () => {
   const value = inputText.value || ''
-  const atIdx = value.lastIndexOf('@')
-  if (atIdx >= 0 && !value.slice(atIdx + 1).includes(' ')) {
-    skillQuery.value = value.slice(atIdx + 1)
+  const pos = textareaRef.value?.selectionStart ?? value.length
+  const before = value.slice(0, pos)
+  const atIdx = before.lastIndexOf('@')
+  if (atIdx >= 0 && !before.slice(atIdx + 1).includes(' ') && !before.slice(atIdx + 1).includes('\n')) {
+    skillQuery.value = before.slice(atIdx + 1)
     skillPickerVisible.value = true
+    mentionRanges.skill = { start: atIdx, end: pos }
     loadSkillPicker()
   } else {
     skillPickerVisible.value = false
+    mentionRanges.skill = null
   }
 }
 
@@ -6915,13 +6505,17 @@ const loadMcpPicker = async () => {
 
 const detectMcpMention = () => {
   const value = inputText.value || ''
-  const hashIdx = value.lastIndexOf('#')
-  if (hashIdx >= 0 && !value.slice(hashIdx + 1).includes(' ')) {
-    mcpQuery.value = value.slice(hashIdx + 1)
+  const pos = textareaRef.value?.selectionStart ?? value.length
+  const before = value.slice(0, pos)
+  const hashIdx = before.lastIndexOf('#')
+  if (hashIdx >= 0 && !before.slice(hashIdx + 1).includes(' ') && !before.slice(hashIdx + 1).includes('\n')) {
+    mcpQuery.value = before.slice(hashIdx + 1)
     mcpPickerVisible.value = true
+    mentionRanges.mcp = { start: hashIdx, end: pos }
     loadMcpPicker()
   } else {
     mcpPickerVisible.value = false
+    mentionRanges.mcp = null
   }
 }
 
@@ -6935,9 +6529,15 @@ const selectMcp = (mcp) => {
   if (!attachedMcps.value.some(m => m.id === mcp.id)) {
     attachedMcps.value.push({ id: mcp.id, name: mcp.name, description: mcp.description })
   }
-  const value = inputText.value || ''
-  const hashIdx = value.lastIndexOf('#')
-  if (hashIdx >= 0) inputText.value = value.slice(0, hashIdx).trimEnd()
+  const start = mentionRanges.mcp?.start ?? null
+  inputText.value = removeMentionRange('mcp')
+  if (start != null) {
+    nextTick(() => {
+      if (!textareaRef.value) return
+      textareaRef.value.focus()
+      try { textareaRef.value.setSelectionRange(start, start) } catch (e) {}
+    })
+  }
   mcpPickerVisible.value = false
   mcpQuery.value = ''
 }
@@ -6982,13 +6582,17 @@ const loadToolPicker = async () => {
 
 const detectToolMention = () => {
   const value = inputText.value || ''
-  const slashIdx = value.lastIndexOf('/')
-  if (slashIdx >= 0 && !value.slice(slashIdx + 1).includes(' ')) {
-    toolQuery.value = value.slice(slashIdx + 1)
+  const pos = textareaRef.value?.selectionStart ?? value.length
+  const before = value.slice(0, pos)
+  const slashIdx = before.lastIndexOf('/')
+  if (slashIdx >= 0 && !before.slice(slashIdx + 1).includes(' ') && !before.slice(slashIdx + 1).includes('\n')) {
+    toolQuery.value = before.slice(slashIdx + 1)
     toolPickerVisible.value = true
+    mentionRanges.tool = { start: slashIdx, end: pos }
     loadToolPicker()
   } else {
     toolPickerVisible.value = false
+    mentionRanges.tool = null
   }
 }
 
@@ -6996,9 +6600,15 @@ const selectTool = (tool) => {
   if (!attachedTools.value.some(t => t.id === tool.id)) {
     attachedTools.value.push({ id: tool.id, name: tool.name, description: tool.description, category: tool.category })
   }
-  const value = inputText.value || ''
-  const slashIdx = value.lastIndexOf('/')
-  if (slashIdx >= 0) inputText.value = value.slice(0, slashIdx).trimEnd()
+  const start = mentionRanges.tool?.start ?? null
+  inputText.value = removeMentionRange('tool')
+  if (start != null) {
+    nextTick(() => {
+      if (!textareaRef.value) return
+      textareaRef.value.focus()
+      try { textareaRef.value.setSelectionRange(start, start) } catch (e) {}
+    })
+  }
   toolPickerVisible.value = false
   toolQuery.value = ''
 }
@@ -7007,13 +6617,37 @@ const removeAttachedTool = (index) => {
   attachedTools.value.splice(index, 1)
 }
 
+const removeMentionRange = (type) => {
+  const range = mentionRanges[type]
+  mentionRanges[type] = null
+  const value = inputText.value || ''
+  if (!range) return value
+  return value.slice(0, range.start) + value.slice(range.end)
+}
+
+const placeCaretAfterMention = (type) => {
+  const range = mentionRanges[type]
+  if (!range) return
+  nextTick(() => {
+    if (!textareaRef.value) return
+    textareaRef.value.focus()
+    try { textareaRef.value.setSelectionRange(range.start, range.start) } catch (e) {}
+  })
+}
+
 const selectSkill = (skill) => {
   if (!attachedSkills.value.some(s => s.id === skill.id)) {
     attachedSkills.value.push({ id: skill.id, name: skill.name, description: skill.description, instructions: skill.instructions })
   }
-  const value = inputText.value || ''
-  const atIdx = value.lastIndexOf('@')
-  if (atIdx >= 0) inputText.value = value.slice(0, atIdx).trimEnd()
+  const start = mentionRanges.skill?.start ?? null
+  inputText.value = removeMentionRange('skill')
+  if (start != null) {
+    nextTick(() => {
+      if (!textareaRef.value) return
+      textareaRef.value.focus()
+      try { textareaRef.value.setSelectionRange(start, start) } catch (e) {}
+    })
+  }
   skillPickerVisible.value = false
   skillQuery.value = ''
 }
@@ -7247,193 +6881,7 @@ const addTextToInput = (text, source) => {
 const onGlobalDragOver = (e) => e.preventDefault()
 const onGlobalDrop = (e) => e.preventDefault()
 
-// MCP/自定义工具状态监视：主进程推送进程异常时，顶部 banner 给用户即时提示。
-// 状态项会带 1.5 分钟自动消失（避免陈旧通知），用户也可手动关闭。
-const mcpStatusList = ref([])
-const dismissMcpIssue = (id) => {
-  mcpStatusList.value = mcpStatusList.value.filter(m => m.id !== id)
-}
-const mcpIssueTimeoutMs = 90 * 1000
-let __mcpStatusUnsub = null
-
-// 网络断开状态（review #14/#22）：主进程每 30s 心跳；离线时顶部横幅 + 联网工具短路
-const networkOnline = ref(true)
-const networkLatencyMs = ref(0)
-const networkFailStreak = ref(0)
-// 横幅显示控制：仅短暂提示，不常驻挤压内容
-const showNetworkBanner = ref(false)
-let __networkBannerTimer = null
-const dismissNetworkBanner = () => {
-  showNetworkBanner.value = false
-  if (__networkBannerTimer) { try { clearTimeout(__networkBannerTimer) } catch (e) {} __networkBannerTimer = null }
-}
-const showNetworkBannerBriefly = () => {
-  showNetworkBanner.value = true
-  if (__networkBannerTimer) { try { clearTimeout(__networkBannerTimer) } catch (e) {} }
-  __networkBannerTimer = setTimeout(() => {
-    showNetworkBanner.value = false
-    __networkBannerTimer = null
-  }, 5000)
-}
-const forceRecheckNetwork = async () => {
-  try {
-    if (window.electronAPI && window.electronAPI.network && typeof window.electronAPI.network.checkNow === 'function') {
-      await window.electronAPI.network.checkNow()
-    }
-  } catch (e) {}
-}
-let __networkStatusUnsub = null
-// 进度感（review #13.1）：AI thinking 时显示已用秒数，>25s 显提示，>60s 显可停止
-const thinkingSeconds = ref(0)
-let __thinkingTimer = null
-const startThinkingTimer = () => {
-  stopThinkingTimer()
-  thinkingSeconds.value = 0
-  __thinkingTimer = setInterval(() => {
-    thinkingSeconds.value++
-  }, 1000)
-}
-const stopThinkingTimer = () => {
-  if (__thinkingTimer) { try { clearInterval(__thinkingTimer) } catch (e) {} __thinkingTimer = null }
-  thinkingSeconds.value = 0
-}
-const watchedAiStatus = computed(() => aiStatus.value)
-watch(watchedAiStatus, (s) => {
-  if (s === 'thinking' || s === 'calling') startThinkingTimer()
-  else stopThinkingTimer()
-}, { immediate: true })
-
-// AI 输出折叠（review #13.4）：超长 AI 回复（>COLLAPSE_LINES 行）默认折叠，显示前 COLLAPSE_PREVIEW_LINES
-// 阈值由「行数 + 字符数」共同决定：行数 ≥ 12 或字符 ≥ 3000 时折叠，避免短消息被折、长消息反而显示
-const COLLAPSE_LINES = 12
-const COLLAPSE_PREVIEW_LINES = 8
-const COLLAPSE_CHARS = 3000
-const COLLAPSE_PREVIEW_CHARS = 1600
-const isAiMessageLong = (msg) => {
-  if (!msg || msg.role !== 'assistant' || !msg.content) return false
-  // 去除 <think> 块后计算显示行数
-  const text = stripThinkBlocks ? stripThinkBlocks(msg.content) : msg.content
-  if (!text) return false
-  // 短消息（< 8 行 且 < 1500 字）一律不折叠，避免短问答被强行截断
-  const lineCount = text.split('\n').length
-  const charCount = text.length
-  if (lineCount <= 8 && charCount < 1500) return false
-  return lineCount > COLLAPSE_LINES || charCount > COLLAPSE_CHARS
-}
-const previewAiContent = (msg) => {
-  const text = stripThinkBlocks ? stripThinkBlocks(msg.content) : msg.content
-  const lines = (text || '').split('\n')
-  // 优先按字符截断（接近上限时按字符截），避免只截到一半就被截断。
-  // 文本量较小时按行截；超过字符阈值时按字符截
-  if ((text || '').length > COLLAPSE_PREVIEW_CHARS && lines.length > COLLAPSE_PREVIEW_LINES) {
-    return (text || '').slice(0, COLLAPSE_PREVIEW_CHARS) + '…'
-  }
-  return lines.slice(0, COLLAPSE_PREVIEW_LINES).join('\n')
-}
-const toggleAiExpanded = (msg) => { msg.expanded = !msg.expanded }
-// 重生成（review #13.3）：找到上一条 user 消息，重发
-const __regeneratingSet = ref(new Set())
-const isRegenerating = (msgId) => __regeneratingSet.value.has(msgId)
-const regenerateAiMessage = async (msg) => {
-  if (!msg) return
-  // 找到本 AI 消息之前的最后一条 user 消息
-  const idx = messages.value.findIndex(m => m.id === msg.id)
-  if (idx < 1) { ElMessage.warning('找不到可重新生成的用户消息'); return }
-  const prev = messages.value[idx - 1]
-  if (!prev || prev.role !== 'user') { ElMessage.warning('上一条不是用户消息，无法重新生成'); return }
-  // 删除本 AI 消息（保留 user）
-  messages.value = messages.value.filter(m => m.id !== msg.id)
-  persistConversation()
-  // 复制 user 内容到输入框，等价手动复制
-  inputText.value = prev.content || ''
-  attachedRefs.value = Array.isArray(prev.refs) ? [...(prev.refs || [])] : []
-  attachedFiles.value = Array.isArray(prev.files) ? [...(prev.files || [])] : []
-  attachedSkills.value = Array.isArray(prev.skills) ? [...(prev.skills || [])] : []
-  attachedMcps.value = Array.isArray(prev.mcps) ? [...(prev.mcps || [])] : []
-  attachedTools.value = Array.isArray(prev.tools) ? [...(prev.tools || [])] : []
-  // 自动发送（nextTick 让上方的设置生效）
-  nextTick(() => sendMessage(inputText.value))
-}
-
-
-
 onMounted(() => {
-    // 订阅网络状态（review #14/#22）
-    try {
-      if (window.electronAPI && window.electronAPI.network && typeof window.electronAPI.network.onStatusChange === 'function') {
-        __networkStatusUnsub = window.electronAPI.network.onStatusChange((payload) => {
-          try {
-            if (!payload || typeof payload.online !== 'boolean') return
-            const wasOffline = !networkOnline.value
-            networkOnline.value = payload.online
-            networkLatencyMs.value = Number(payload.latencyMs) || 0
-            networkFailStreak.value = Number(payload.failStreak) || 0
-            if (!payload.online && !wasOffline) {
-              showNetworkBannerBriefly()
-              ElMessage.warning('网络似乎不可用，部分功能（联网搜索/网页读取/AI 请求）将不可用')
-            } else if (payload.online && wasOffline) {
-              dismissNetworkBanner()
-              ElMessage.success('网络已恢复')
-            }
-          } catch (e) {}
-        })
-        Promise.resolve(window.electronAPI.network.getState()).then((initState) => {
-          if (initState && typeof initState.online === 'boolean') {
-            networkOnline.value = initState.online
-            networkLatencyMs.value = Number(initState.latencyMs) || 0
-            networkFailStreak.value = Number(initState.failStreak) || 0
-            // 启动时已离线则短暂提示一次
-            if (!initState.online) showNetworkBannerBriefly()
-          }
-        }).catch(() => {})
-      }
-    } catch (e) { /* ignore */ }
-    // 渲染层兜底：window online/offline 事件（比主进程心跳快）
-    try {
-      if (typeof navigator !== 'undefined') {
-        networkOnline.value = navigator.onLine !== false
-        window.addEventListener('online', () => {
-          networkOnline.value = true
-          dismissNetworkBanner()
-          ElMessage.success('网络已恢复')
-        }, { passive: true })
-        window.addEventListener('offline', () => {
-          networkOnline.value = false
-          showNetworkBannerBriefly()
-          ElMessage.warning('网络似乎不可用')
-        }, { passive: true })
-      }
-    } catch (e) { /* ignore */ }
-    // 订阅主进程 MCP 状态事件
-    try {
-      if (window.electronAPI && window.electronAPI.mcp && typeof window.electronAPI.mcp.onStatusChange === 'function') {
-        __mcpStatusUnsub = window.electronAPI.mcp.onStatusChange((payload) => {
-          try {
-            if (!payload || !payload.id) return
-            const id = String(payload.at || Date.now()) + ':' + payload.id
-            const item = {
-              id,
-              kind: 'mcp',
-              serverId: payload.id,
-              serverName: payload.name || payload.id,
-              status: payload.status,
-              reason: payload.reason,
-              code: payload.code,
-              createdAt: Date.now()
-            }
-            // 去重：同一 serverId 在 timeout 之前只显示一条最新
-            mcpStatusList.value = [
-              item,
-              ...mcpStatusList.value.filter(m => m.serverId !== item.serverId)
-            ].slice(0, 6)
-            // 自动清理
-            setTimeout(() => dismissMcpIssue(id), mcpIssueTimeoutMs)
-            ElMessage.warning('MCP 服务「' + item.serverName + '」' + (item.status === 'exit' ? '已停止' : '异常') + '：' + (item.reason || ('code=' + (item.code ?? ''))))
-          } catch (e) {}
-        })
-      }
-    } catch (e) { /* 主进程未就绪时静默忽略 */ }
-
   initConversation()
   // 注入 AI 请求/返回日志钩子：子 Agent、工序内部 AI 调用都会记录到运行日志
   aiService.setLogCallback((type, text) => {
@@ -7463,8 +6911,6 @@ onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
 })
 
-  if (__mcpStatusUnsub) { try { __mcpStatusUnsub() } catch (e) {} __mcpStatusUnsub = null }
-  if (__networkStatusUnsub) { try { __networkStatusUnsub() } catch (e) {} __networkStatusUnsub = null }
 onBeforeUnmount(() => {
   window.removeEventListener('click', onGlobalClick)
   window.removeEventListener('dragover', onGlobalDragOver)
@@ -7482,7 +6928,6 @@ defineExpose({
   aiRewrite,
   aiCloze,
   aiQuiz,
-  aiRewriteFullMap,
   reorganizeMindmap,
   convertDocToMindmap,
   sendDirectMessage,
@@ -7499,142 +6944,9 @@ defineExpose({
 </script>
 
 <style scoped>
-
-.thinking-progress-banner {
-  padding: 6px 12px;
-  background: rgba(64, 158, 255, 0.08);
-  border-bottom: 1px solid rgba(64, 158, 255, 0.2);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: #409eff;
-}
-.thinking-progress-banner .thinking-progress-icon { font-size: 14px; }
-.thinking-progress-banner .thinking-progress-text { flex: 1; }
-
-.md-collapsed {
-  max-height: 200px;
-  overflow: hidden;
-  position: relative;
-  -webkit-mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
-  mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
-}
-.md-collapse-toggle {
-  display: inline-block;
-  margin-top: 6px;
-  font-size: 12px;
-  color: #409eff;
-  background: transparent;
-  border: 1px solid rgba(64, 158, 255, 0.3);
-  border-radius: 4px;
-  padding: 2px 10px;
-  cursor: pointer;
-}
-.md-collapse-toggle:hover { background: rgba(64, 158, 255, 0.08); }
-
-.msg-regen-btn {
-  position: absolute;
-  right: 38px;
-  top: 8px;
-  background: transparent;
-  border: 1px solid rgba(0,0,0,0.06);
-  border-radius: 4px;
-  padding: 4px 6px;
-  cursor: pointer;
-  color: #909399;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.msg-regen-btn:hover { color: #409eff; background: rgba(64,158,255,0.08); }
-.msg-regen-btn:active { transform: rotate(180deg); transition: transform 0.3s; }
-
-.chat-panel-root {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-}
-
-.network-offline-banner {
-  position: absolute;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 2000;
-  padding: 8px 14px;
-  background: rgba(255, 204, 102, 0.95);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-  color: #8a6d2a;
-  white-space: nowrap;
-  animation: bannerSlideDown 0.3s ease;
-}
-@keyframes bannerSlideDown {
-  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
-  to { opacity: 1; transform: translateX(-50%) translateY(0); }
-}
-.network-offline-banner .network-offline-icon { font-size: 14px; }
-.network-offline-banner .network-offline-text { flex: 1; }
-.network-offline-banner .network-offline-recheck {
-  background: rgba(255, 255, 255, 0.5);
-  border: 1px solid rgba(138, 109, 42, 0.3);
-  border-radius: 4px;
-  color: #8a6d2a;
-  cursor: pointer;
-  padding: 2px 8px;
-  font-size: 11.5px;
-}
-.network-offline-banner .network-offline-recheck:hover { background: rgba(255, 255, 255, 0.8); }
-.network-offline-banner .network-offline-close {
-  background: transparent;
-  border: none;
-  color: #8a6d2a;
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 2px;
-  opacity: 0.7;
-}
-.network-offline-banner .network-offline-close:hover { opacity: 1; }
-
-.mcp-status-banner-wrap {
-  padding: 8px 12px;
-  background: rgba(245, 108, 108, 0.08);
-  border-bottom: 1px solid rgba(245, 108, 108, 0.25);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.mcp-status-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: #c45656;
-}
-.mcp-status-banner .mcp-status-icon { font-size: 15px; }
-.mcp-status-banner .mcp-status-text { flex: 1; }
-.mcp-status-banner .mcp-status-close {
-  background: transparent;
-  border: none;
-  color: #c45656;
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 4px;
-}
-.mcp-status-banner .mcp-status-close:hover { color: #f56c6c; }
 .chat-panel {
   width: 100%;
-  flex: 1;
-  min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background-color: var(--ai-panel-bg);
@@ -7650,11 +6962,15 @@ defineExpose({
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--border-color);
 }
 
 .header-left {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -7665,12 +6981,16 @@ defineExpose({
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .status-indicator {
   display: flex;
   align-items: center;
   gap: 5px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .status-dot {
@@ -7704,6 +7024,9 @@ defineExpose({
 .status-text {
   font-size: 12px;
   color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ========== Messages ========== */
@@ -7783,31 +7106,15 @@ defineExpose({
   white-space: pre-wrap;
 }
 
-/* AI 触发的菜单操作（如一键整理、AI 出题、AI 背诵改写 等）：
- * 只显示原子操作名 + 操作图标，避免大段 prompt 文本污染聊天列表。 */
-.user-content.is-ai-action {
+.ai-action-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  background-color: rgba(139, 92, 246, 0.08);
-  color: #7c3aed;
-  border: 1px dashed rgba(139, 92, 246, 0.35);
-  font-weight: 500;
-  padding: 6px 12px;
-  border-radius: 16px;
-  white-space: nowrap;
-  align-self: flex-end;
-}
-.user-content.is-ai-action .ai-action-icon {
-  font-size: 13px;
-  line-height: 1;
-}
-.user-content.is-ai-action .ai-action-text {
-  font-size: 12.5px;
-}
-.message.ai-action .message-content.is-ai-action {
-  background-color: rgba(139, 92, 246, 0.08);
-  color: #7c3aed;
+  padding: 4px 9px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .assistant-content {
@@ -7816,6 +7123,86 @@ defineExpose({
   color: var(--text-primary);
   border-radius: var(--radius-lg);
   border-bottom-left-radius: var(--radius-xs);
+}
+
+/* ========== 深度思考折叠块 ========== */
+.reasoning-block {
+  margin-bottom: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.reasoning-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  transition: background 0.15s;
+}
+
+.reasoning-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.reasoning-chevron {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.reasoning-block.expanded .reasoning-chevron {
+  transform: rotate(90deg);
+}
+
+.reasoning-label {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.reasoning-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  opacity: 0.7;
+}
+
+.reasoning-content {
+  border-top: 1px solid var(--border-color);
+  padding: 10px 12px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.reasoning-content pre {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+}
+
+.reasoning-pop-enter-active,
+.reasoning-pop-leave-active {
+  transition: max-height 0.3s ease, opacity 0.2s ease;
+  overflow: hidden;
+  max-height: 300px;
+}
+
+.reasoning-pop-enter-from,
+.reasoning-pop-leave-to {
+  max-height: 0;
+  opacity: 0;
 }
 
 .msg-copy-btn {
@@ -8805,6 +8192,19 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.ai-bind-target-name {
+  max-width: 120px;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-right: 2px;
 }
 
 .header-icon-btn {
@@ -8993,26 +8393,18 @@ defineExpose({
   object-fit: cover;
 }
 
-/* review bug：消息容器宽度限制——AI 返回的文件消息如果文件名很长，会突破消息框宽度溢出
-   这里给 .message-content 设最大宽度 + 内部附件容器允许换行，并让 chip 自身有限宽 + ellipsis */
-.message-content {
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
 .msg-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 6px;
-  max-width: 100%;
-  overflow: hidden; /* 兜底：极端情况下整体容器不溢出 */
 }
+
 .msg-file-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  max-width: min(280px, calc(100% - 8px));
+  max-width: 280px;
   padding: 3px 8px;
   font-size: 12px;
   color: #0369a1;
@@ -9022,212 +8414,25 @@ defineExpose({
   cursor: pointer;
   user-select: none;
   transition: background-color 0.15s;
-  overflow: hidden; /* 兜底：芯片自身不溢出 */
 }
+
 .msg-file-chip:hover {
   background: rgba(14, 165, 233, 0.2);
 }
+
 .file-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
   min-width: 0;
-  max-width: 200px;
+  max-width: 220px;
 }
-.file-chip-icon {
-  flex-shrink: 0;
-}
+
 .file-chip-ext {
   flex-shrink: 0;
   font-size: 10px;
   opacity: 0.75;
-}
-
-/* review bug：Skill 沉淀卡片（消息列表内反馈，可编辑 / 可保存 / 可一键试用） */
-.skill-card {
-  margin-top: 12px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(139, 92, 246, 0.35);
-  background: linear-gradient(135deg, rgba(139, 92, 246, 0.06), rgba(59, 130, 246, 0.06));
-  max-width: 100%;
-  box-sizing: border-box;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-}
-.skill-card-analyzing {
-  border-style: dashed;
-  opacity: 0.85;
-}
-.skill-card-ready {
-  border-color: rgba(34, 197, 94, 0.55);
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.06), rgba(59, 130, 246, 0.06));
-}
-.skill-card-saving {
-  opacity: 0.85;
-}
-.skill-card-saved {
-  border-color: rgba(34, 197, 94, 0.7);
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(34, 197, 94, 0.04));
-}
-.skill-card-not_feasible {
-  border-color: rgba(245, 158, 11, 0.55);
-  background: rgba(245, 158, 11, 0.06);
-}
-.skill-card-failed {
-  border-color: rgba(239, 68, 68, 0.55);
-  background: rgba(239, 68, 68, 0.06);
-}
-.skill-card-discarded {
-  opacity: 0.5;
-  border-style: dashed;
-}
-.skill-card-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-  font-weight: 600;
-  font-size: 13px;
-  color: #6d28d9;
-}
-.skill-card-icon {
-  font-size: 16px;
-}
-.skill-card-title {
-  flex: 1;
-}
-.skill-card-status {
-  font-size: 12px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  background: rgba(139, 92, 246, 0.15);
-  color: #6d28d9;
-}
-.skill-card-ready .skill-card-status {
-  background: rgba(34, 197, 94, 0.18);
-  color: #15803d;
-}
-.skill-card-saved .skill-card-status {
-  background: rgba(34, 197, 94, 0.25);
-  color: #15803d;
-}
-.skill-card-not_feasible .skill-card-status {
-  background: rgba(245, 158, 11, 0.2);
-  color: #b45309;
-}
-.skill-card-failed .skill-card-status {
-  background: rgba(239, 68, 68, 0.2);
-  color: #b91c1c;
-}
-.skill-card-reason {
-  margin: 6px 0;
-  padding: 8px 10px;
-  background: rgba(255, 255, 255, 0.6);
-  border-radius: 6px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #475569;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.skill-card-field {
-  margin: 8px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.skill-card-field label {
-  font-size: 12px;
-  font-weight: 500;
-  color: #475569;
-}
-.skill-card-input,
-.skill-card-textarea {
-  width: 100%;
-  padding: 6px 10px;
-  border: 1px solid rgba(139, 92, 246, 0.35);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.85);
-  color: #1f2937;
-  font-family: inherit;
-  font-size: 13px;
-  box-sizing: border-box;
-  resize: vertical;
-}
-.skill-card-input:focus,
-.skill-card-textarea:focus {
-  outline: none;
-  border-color: rgba(139, 92, 246, 0.75);
-  background: #fff;
-}
-.skill-card-input:disabled,
-.skill-card-textarea:disabled {
-  opacity: 0.7;
-  cursor: not-allowed;
-}
-.skill-card-textarea {
-  min-height: 120px;
-  font-family: ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.5;
-}
-.skill-card-error {
-  margin-top: 8px;
-  padding: 6px 10px;
-  background: rgba(239, 68, 68, 0.1);
-  color: #b91c1c;
-  border-radius: 6px;
-  font-size: 12px;
-}
-.skill-card-saved {
-  margin-top: 8px;
-  display: flex;
-  gap: 8px;
-}
-.skill-card-saved-tag {
-  font-size: 11px;
-  padding: 2px 8px;
-  background: rgba(34, 197, 94, 0.2);
-  color: #15803d;
-  border-radius: 999px;
-}
-.skill-card-actions {
-  margin-top: 12px;
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.skill-card-btn {
-  padding: 6px 14px;
-  border-radius: 6px;
-  border: 1px solid rgba(139, 92, 246, 0.35);
-  background: rgba(255, 255, 255, 0.85);
-  color: #6d28d9;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.skill-card-btn:hover {
-  background: rgba(139, 92, 246, 0.1);
-  border-color: rgba(139, 92, 246, 0.6);
-}
-.skill-card-btn.primary {
-  background: rgba(34, 197, 94, 0.15);
-  border-color: rgba(34, 197, 94, 0.6);
-  color: #15803d;
-}
-.skill-card-btn.primary:hover {
-  background: rgba(34, 197, 94, 0.3);
-}
-.skill-card-btn.danger {
-  background: rgba(239, 68, 68, 0.08);
-  border-color: rgba(239, 68, 68, 0.45);
-  color: #b91c1c;
-}
-.skill-card-btn.danger:hover {
-  background: rgba(239, 68, 68, 0.18);
 }
 
 /* 拖拽悬停：输入区绿色虚线高亮 */
@@ -9470,41 +8675,17 @@ defineExpose({
 
 /* 悬浮窗工具栏内的模型切换：不占满剩余空间，下拉框向下弹出（工具栏在顶部） */
 .toolbar-model-switcher {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 0 0 auto;
   max-width: none;
-}
-.toolbar-model-switcher .model-switch-btn {
-  width: 100%;
-  min-width: 0;
-}
-.toolbar-model-switcher .model-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 11px;
 }
 .toolbar-model-switcher .model-dropdown {
   top: calc(100% + 6px);
   bottom: auto;
   left: auto;
   right: 0;
-  width: 200px;
+  width: 180px;
   max-width: calc(100vw - 32px);
   max-height: 240px;
-}
-
-/* 悬浮窗模式：缩小"创建能力"和"新建对话"按钮（图标+文字变紧凑） */
-.chat-toolbar.compact-toolbar .toolbar-btn.create-ability-btn,
-.chat-toolbar.compact-toolbar .toolbar-btn.primary {
-  padding: 0 6px;
-  font-size: 10.5px;
-  height: 28px;
-  gap: 3px;
-}
-.chat-toolbar.compact-toolbar .toolbar-btn.create-ability-btn svg,
-.chat-toolbar.compact-toolbar .toolbar-btn.primary svg {
-  width: 13px;
-  height: 13px;
 }
 
 .model-switch-btn {
@@ -9582,6 +8763,13 @@ defineExpose({
 
 .kb-mode-text {
   display: none;
+}
+
+.thinking-level-glyph {
+  font-weight: 600;
+  line-height: 1;
+  font-size: 13px;
+  user-select: none;
 }
 
 .model-spinner {
@@ -9671,202 +8859,6 @@ defineExpose({
 
 .model-option.active {
   background: rgba(0, 122, 255, 0.08);
-}
-
-/* 深度思考开关：脑子图标按钮 + 强度菜单 */
-.deep-thinking-switcher {
-  position: relative;
-  display: inline-flex;
-}
-.toolbar-btn.deep-thinking-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  transition: color 0.15s, background 0.15s;
-}
-.toolbar-btn.deep-thinking-btn.on {
-  color: #8b5cf6;
-  background: rgba(139, 92, 246, 0.10);
-}
-.toolbar-btn.deep-thinking-btn.on:hover {
-  background: rgba(139, 92, 246, 0.16);
-}
-.deep-thinking-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 2200;
-  min-width: 180px;
-  background: #fff;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 10px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.10);
-  padding: 6px;
-}
-.deep-thinking-menu-header {
-  font-size: 11px;
-  color: #999;
-  padding: 4px 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.deep-thinking-option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background-color 0.15s;
-  font-size: 13px;
-}
-.deep-thinking-option:hover {
-  background: rgba(139, 92, 246, 0.06);
-}
-.deep-thinking-option.active {
-  background: rgba(139, 92, 246, 0.10);
-  color: #8b5cf6;
-}
-.deep-thinking-check {
-  color: #8b5cf6;
-  font-weight: bold;
-}
-.deep-thinking-menu-foot {
-  border-top: 1px solid rgba(0, 0, 0, 0.06);
-  padding: 6px;
-  margin-top: 4px;
-}
-.deep-thinking-foot-btn {
-  width: 100%;
-  padding: 6px 10px;
-  border: none;
-  background: transparent;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
-  color: #666;
-  transition: background 0.15s;
-}
-.deep-thinking-foot-btn:hover {
-  background: rgba(0, 0, 0, 0.04);
-  color: #333;
-}
-
-/* 底部工具栏中的深度思考按钮（悬浮窗模式）：菜单向上弹出 */
-.bottom-bar-deep-thinking .deep-thinking-menu {
-  top: auto;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-/* ============ 输入框 + 右下角深度思考上拉按钮（侧边栏模式） ============ */
-.chat-input-wrap {
-  position: relative;
-  display: flex;
-}
-
-.input-deep-thinking-pullup {
-  position: absolute;
-  right: 8px;
-  bottom: 6px;
-  z-index: 10;
-}
-.pullup-btn {
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.04);
-  color: #999;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-  font-size: 11px;
-  font-weight: 600;
-}
-.pullup-btn:hover {
-  background: rgba(0, 0, 0, 0.08);
-  color: #666;
-}
-.pullup-btn.on {
-  background: rgba(139, 92, 246, 0.12);
-  color: #8b5cf6;
-}
-.pullup-btn.on:hover {
-  background: rgba(139, 92, 246, 0.18);
-}
-.pullup-level {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-}
-
-/* 上拉菜单 */
-.pullup-menu {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  right: 0;
-  z-index: 2200;
-  min-width: 160px;
-  background: #fff;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 10px;
-  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.10);
-  padding: 6px;
-}
-.pullup-menu-title {
-  font-size: 11px;
-  color: #999;
-  padding: 4px 10px 6px;
-  letter-spacing: 0.5px;
-}
-.pullup-option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 7px 12px;
-  border-radius: 7px;
-  cursor: pointer;
-  transition: background-color 0.15s;
-  font-size: 12.5px;
-  color: var(--text-primary);
-}
-.pullup-option:hover {
-  background: rgba(139, 92, 246, 0.06);
-}
-.pullup-option.active {
-  background: rgba(139, 92, 246, 0.10);
-  color: #8b5cf6;
-}
-.pullup-check {
-  color: #8b5cf6;
-  font-weight: bold;
-  font-size: 12px;
-}
-.pullup-divider {
-  height: 1px;
-  background: rgba(0, 0, 0, 0.06);
-  margin: 4px 6px;
-}
-.pullup-option.pullup-disable {
-  color: #ff3b30;
-}
-.pullup-option.pullup-disable:hover {
-  background: rgba(255, 59, 48, 0.06);
-}
-
-/* 上拉菜单过渡动画 */
-.pullup-menu-enter-active,
-.pullup-menu-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-.pullup-menu-enter-from,
-.pullup-menu-leave-to {
-  opacity: 0;
-  transform: translateY(6px);
 }
 
 .model-option-name {
@@ -10463,6 +9455,44 @@ defineExpose({
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ext-wizard-types {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+.ext-wizard-type {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.ext-wizard-type:hover {
+  border-color: #409eff;
+  background: #f5faff;
+}
+.ext-wizard-type b {
+  font-size: 15px;
+  color: #303133;
+}
+.ext-wizard-type span {
+  font-size: 12px;
+  color: #86868b;
+}
+.ext-wizard-form {
+  max-height: 55vh;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+.ext-wizard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
 </style>
-
-

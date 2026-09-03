@@ -1,12 +1,10 @@
 const { ipcMain, app } = require('electron')
 const fs = require('fs')
 const path = require('path')
-const store = require('../utils/store')
 
-// 支持的文件扩展名（搜索/索引用）：思维导图 + 常见文档类型
-// 修复 review：原列表只覆盖 .smm/.json/.md/.xmind，导致 rebuildSearchIndex 扫不到 PDF/Excel/TXT/PPT 等文档，
-// 用户用 search_knowledge_base 检索时只能匹配到思维导图，无法命中已存在的文档内容
-const SUPPORTED_EXTENSIONS = /\.(smm|json|md|xmind|markdown|txt|log|html|xml|csv|tsv|docx|xlsx|xls|pdf|pptx|ppt)$/i
+// 支持的文件扩展名
+const SUPPORTED_EXTENSIONS = /\.(smm|json|md|xmind)$/i
+const SCAN_FILE_EXTENSIONS = /\.(smm|json|md|xmind|pdf|docx|pptx|xlsx|xls|csv|tsv|txt|log|html|xml)$/i
 
 // 最大扫描深度
 const MAX_SCAN_DEPTH = 5
@@ -15,78 +13,10 @@ const MAX_SCAN_DEPTH = 5
 const MAX_NODES = 500
 
 /**
- * 获取默认保存目录（与 fileManager 保持一致，优先用户指定的保存目录）
+ * 获取默认保存目录
  */
 function getDefaultSaveDir() {
-  let saved = ''
-  try {
-    saved = store.get('saveDir') || ''
-  } catch {
-    saved = ''
-  }
-  if (saved && path.isAbsolute(saved) && fs.existsSync(saved)) {
-    return saved
-  }
-  return app.defaultSaveDir || app.getPath('desktop')
-}
-
-// 路径安全校验（复用 fileManager 的安全策略）
-function assertSafePath(rawPath) {
-  const s = typeof rawPath === 'string' ? rawPath : ''
-  if (!s.trim()) throw new Error('路径无效')
-  if (s.includes('\0')) throw new Error('路径包含非法字符')
-  if (/[\x00-\x1f\x7f]/.test(s)) throw new Error('路径包含非法控制字符')
-  return path.normalize(s)
-}
-
-// 白名单根目录（与 fileManager.js 共享 fsGuard 注册的白名单）
-function getAllowedRoots() {
-  try {
-    const fileManager = require('./fileManager')
-    if (fileManager && fileManager.allowedPathRoots) return fileManager.allowedPathRoots
-  } catch (e) {}
-  return null
-}
-
-// 检查路径是否在安全范围内。
-// 优先复用 fileManager 的统一白名单（包含渲染层注册的 folderRoots 与活跃文件目录），
-// 保证布局恢复、引用文件读取等场景能访问用户已信任的自定义目录。
-function isPathAllowed(targetPath) {
-  try {
-    const fileManager = require('./fileManager')
-    if (fileManager && typeof fileManager.assertPathAllowed === 'function') {
-      try {
-        fileManager.assertPathAllowed(targetPath, { readOnly: true })
-        return true
-      } catch (e) {
-        return false
-      }
-    }
-  } catch (e) { /* fileManager 不可用时走兜底 */ }
-  // 兜底：独立硬编码白名单（fileManager 模块不可用时的保守策略）
-  const target = path.resolve(String(targetPath || ''))
-  // 永远放行 userData / temp
-  const safeRoots = [
-    path.normalize(app.getPath('userData')),
-    path.normalize(app.getPath('temp')),
-    path.normalize(require('os').tmpdir())
-  ]
-  for (const root of safeRoots) {
-    if (target === root || target.startsWith(root + path.sep)) return true
-  }
-  // 额外放行 documents/downloads/desktop
-  const extra = [app.getPath('documents'), app.getPath('downloads'), app.getPath('desktop')].filter(Boolean)
-  for (const dir of extra) {
-    const n = path.normalize(dir)
-    if (target === n || target.startsWith(n + path.sep)) return true
-  }
-  // 默认保存目录
-  const saveDir = getDefaultSaveDir()
-  if (saveDir) {
-    const n = path.normalize(saveDir)
-    if (target === n || target.startsWith(n + path.sep)) return true
-  }
-  return false
+  return app.defaultSaveDir || 'C:\\我的mindmap'
 }
 
 /**
@@ -113,7 +43,7 @@ function normalizeRootDirs(rootPath) {
  * @param {number} maxDepth 最大深度
  * @param {Array} results 结果数组
  */
-async function scanDir(dir, depth = 0, maxDepth = MAX_SCAN_DEPTH, results = []) {
+async function scanDir(dir, depth = 0, maxDepth = MAX_SCAN_DEPTH, results = [], extRegex = SUPPORTED_EXTENSIONS) {
   if (depth > maxDepth) return results
 
   let entries
@@ -130,7 +60,7 @@ async function scanDir(dir, depth = 0, maxDepth = MAX_SCAN_DEPTH, results = []) 
     const fullPath = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       await scanDir(fullPath, depth + 1, maxDepth, results)
-    } else if (entry.isFile() && SUPPORTED_EXTENSIONS.test(entry.name)) {
+    } else if (entry.isFile() && extRegex.test(entry.name)) {
       const stat = await fs.promises.stat(fullPath)
       results.push({
         name: entry.name,
@@ -238,17 +168,10 @@ function extractNodesFromMarkdown(content, filePath, fileName) {
 ipcMain.handle('ref:scanFiles', async (event, rootPath) => {
   try {
     const dirs = normalizeRootDirs(rootPath)
-    // 安全校验：每个目录都必须在允许范围内
-    for (const dir of dirs) {
-      assertSafePath(dir)
-      if (!isPathAllowed(dir)) {
-        return { success: false, error: '扫描目录不在允许范围内：' + dir }
-      }
-    }
     const fileMap = new Map()
     for (const dir of dirs) {
       if (!fs.existsSync(dir)) continue
-      const files = await scanDir(dir)
+      const files = await scanDir(dir, 0, MAX_SCAN_DEPTH, [], SCAN_FILE_EXTENSIONS)
       for (const f of files) {
         if (!fileMap.has(f.path)) fileMap.set(f.path, f)
       }
@@ -270,13 +193,6 @@ ipcMain.handle('ref:scanFiles', async (event, rootPath) => {
 ipcMain.handle('ref:scanNodes', async (event, rootPath) => {
   try {
     const dirs = normalizeRootDirs(rootPath)
-    // 安全校验：每个目录都必须在允许范围内
-    for (const dir of dirs) {
-      assertSafePath(dir)
-      if (!isPathAllowed(dir)) {
-        return { success: false, error: '扫描目录不在允许范围内：' + dir }
-      }
-    }
     const fileMap = new Map()
     for (const dir of dirs) {
       if (!fs.existsSync(dir)) continue
@@ -322,19 +238,14 @@ ipcMain.handle('ref:scanNodes', async (event, rootPath) => {
  */
 ipcMain.handle('ref:readFile', async (event, filePath) => {
   try {
-    // 用 normalize 后的路径做白名单校验与 fs 操作，兼容正斜杠分隔的路径
-    const safePath = assertSafePath(filePath)
-    if (!isPathAllowed(safePath)) {
-      return { success: false, error: '文件不在允许的读取范围内：' + safePath }
-    }
-    if (!fs.existsSync(safePath)) {
+    if (!fs.existsSync(filePath)) {
       return { success: false, error: '文件不存在' }
     }
-    const content = await fs.promises.readFile(safePath, 'utf-8')
+    const content = await fs.promises.readFile(filePath, 'utf-8')
     let data
     let type = 'json'
 
-    if (safePath.endsWith('.md')) {
+    if (filePath.endsWith('.md')) {
       type = 'markdown'
       data = content
     } else {
@@ -347,7 +258,7 @@ ipcMain.handle('ref:readFile', async (event, filePath) => {
       }
     }
 
-    return { success: true, data, type, fileName: path.basename(safePath) }
+    return { success: true, data, type, fileName: path.basename(filePath) }
   } catch (error) {
     return { success: false, error: error.message }
   }

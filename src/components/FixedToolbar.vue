@@ -1,20 +1,11 @@
 <template>
-  <div
-    v-if="mindMap"
-    class="fixed-toolbar"
-    :class="{ 'split-mode': splitMode, 'is-dragging': isDragging }"
-    ref="toolbarRef"
-    :style="{ transform: 'translate(calc(-50% + ' + dragOffset.x + 'px), ' + dragOffset.y + 'px)' }"
-    @mousedown.prevent
-  >
-    <!-- 抓手：拖动整个工具条（双击重置为默认位置） -->
+  <div v-if="mindMap" class="fixed-toolbar" :class="{ 'split-mode': splitMode }" ref="toolbarRef">
     <span
-      class="ft-drag-handle"
-      :class="{ active: isDragging }"
-      @pointerdown.stop.prevent="onDragHandleDown"
-      @dblclick.stop.prevent="onDragHandleDblClick"
-      title="按住可拖动工具条（双击重置位置）"
-    >⋮⋮</span>
+      class="toolbar-drag-handle"
+      title="拖动工具条到画布边缘，可吸附为横条或竖条"
+      @mousedown.prevent="onDragStart"
+    >⠿</span>
+
     <!-- 抓手工具：开启后左键拖动画布，不触发节点选择/编辑 -->
     <button
       class="ft-btn"
@@ -127,7 +118,7 @@
             v-for="c in nodeBorderColors"
             :key="'nb' + c"
             class="ft-swatch ft-swatch-border"
-            :style="{ borderColor: c }"
+            :style="{ backgroundColor: c, borderColor: c }"
             :title="c"
             @click="onNodeBorder(c)"
           ></button>
@@ -267,14 +258,13 @@
       </svg>
     </button>
 
-    <!-- 一键切换全部挖空显示 / 隐藏 -->
+    <!-- 一键切换全部挖空显示/隐藏 -->
     <button
       class="ft-btn"
       :class="{ active: clozeHidden }"
-      :title="clozeHidden ? '一键显示全部挖空' : '一键隐藏全部挖空'"
-      @click="onToggleAllCloze"
+      :title="clozeHidden ? '当前已隐藏全部挖空，点击显示' : '当前已显示全部挖空，点击隐藏'"
+      @click="onToggleCloze"
     >
-      <!-- 隐藏态：闭眼；显示态：睁眼 -->
       <svg v-if="clozeHidden" viewBox="0 0 24 24" width="14" height="14" fill="none">
         <path d="M3 13.5c2 1.8 4.5 3 9 3s7-1.2 9-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
         <circle cx="12" cy="14" r="2.6" fill="currentColor" />
@@ -362,7 +352,7 @@ import { buildInteractiveHtml } from '../utils/svgExport'
 import { buildGraphDataFromRaw, downloadGraphHtml } from '../utils/graphExport'
 import { buildTriModeHtml } from '../utils/triModeExport'
 import { safeExportSvg } from '../utils/safeExportSvg'
-import { useDraggableToolbar } from '../composables/useDraggableToolbar'
+import { useDockToolbar } from '../utils/toolbarDock'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
@@ -372,10 +362,9 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['node-note'])
-// 工具条拖动（review：把顶部固定工具条改为可拖动，默认位置不变，跨视图持久化）
-const { dragOffset, isDragging, onDragHandleDown, onDragHandleDblClick } = useDraggableToolbar('fixed-toolbar-offset')
 
 const toolbarRef = ref(null)
+const { startDrag: onDragStart } = useDockToolbar(toolbarRef, 'mindmap_fixed_toolbar_dock')
 const panel = ref(null) // 'color' | 'highlight' | 'font' | 'fontSize' | 'export' | null
 const assocCreating = ref(false)
 const painting = ref(false)
@@ -603,17 +592,6 @@ const onShowAllCloze = () => {
     ElMessage.success('已一键取消隐藏全部挖空')
   } catch (e) {
     console.error('[FixedToolbar] 显示挖空失败:', e)
-  }
-}
-
-// 一键切换全部挖空的显示/隐藏（合并自 onHideAllCloze + onShowAllCloze）
-const onToggleAllCloze = () => {
-  try {
-    const nextHidden = !clozeHidden.value
-    clozeHidden.value = setAllClozeHidden(nextHidden)
-    ElMessage.success(nextHidden ? '已一键隐藏全部挖空' : '已一键取消隐藏全部挖空')
-  } catch (e) {
-    console.error('[FixedToolbar] 切换挖空失败:', e)
   }
 }
 
@@ -949,27 +927,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.fixed-toolbar.is-dragging { box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
-.fixed-toolbar.is-dragging * { cursor: move !important; }
-.ft-drag-handle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 28px;
-  margin: 0 6px 0 2px;
-  color: rgba(0,0,0,0.35);
-  font-size: 12px;
-  letter-spacing: -1px;
-  line-height: 1;
-  user-select: none;
-  cursor: move;
-  border-radius: 4px;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-.ft-drag-handle:hover { background: rgba(0,0,0,0.05); color: rgba(0,0,0,0.55); }
-.ft-drag-handle.active { background: rgba(64,158,255,0.15); color: #409eff; }
 .fixed-toolbar {
   position: absolute;
   top: 8px;
@@ -978,14 +935,35 @@ onBeforeUnmount(() => {
   z-index: 100;
   display: flex;
   align-items: center;
-  gap: 1px;
-  padding: 3px 6px;
+  gap: 0;
+  padding: 2px 4px;
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(8px);
   border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 9px;
+  border-radius: 8px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
   user-select: none;
+}
+
+.toolbar-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 10px;
+  height: 24px;
+  margin: 0 1px 0 -1px;
+  color: #9a9aa2;
+  font-size: 14px;
+  line-height: 1;
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+  opacity: 0.65;
+}
+
+.toolbar-drag-handle:active {
+  cursor: grabbing;
+  opacity: 1;
 }
 
 /* 分屏模式：工具条已放在 pane-body（标题栏之外）内，相对 pane 定位，无需再下移 */
@@ -1002,15 +980,15 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  min-width: 26px;
-  height: 24px;
-  padding: 0 4px;
+  gap: 2px;
+  min-width: 21px;
+  height: 22px;
+  padding: 0 3px;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: #444;
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
   /* 工具栏为 absolute 居中定位，可用宽度受限时按钮会被压缩导致"字体"等文字竖排换行 */
@@ -1102,12 +1080,12 @@ onBeforeUnmount(() => {
 }
 
 .ft-font-btn {
-  font-size: 12px;
-  padding: 0 5px;
+  font-size: 11px;
+  padding: 0 3px;
 }
 
 .ft-size-preview {
-  min-width: 26px;
+  min-width: 22px;
   text-align: center;
 }
 
@@ -1122,8 +1100,8 @@ onBeforeUnmount(() => {
 
 .ft-divider {
   width: 1px;
-  height: 14px;
-  margin: 0 4px;
+  height: 12px;
+  margin: 0 2px;
   background: rgba(0, 0, 0, 0.1);
   flex-shrink: 0;
 }

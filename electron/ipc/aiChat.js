@@ -21,6 +21,15 @@ function buildChatURL(baseURL, autoComplete = true) {
   return url + '/v1/chat/completions'
 }
 
+function buildEmbeddingURL(baseURL, autoComplete = true) {
+  if (!baseURL) return ''
+  let url = baseURL.trim().replace(/\/+$/, '')
+  if (autoComplete === false) return url
+  if (/\/embeddings$/i.test(url)) return url
+  if (/\/v\d+[a-z]*$/i.test(url)) return url + '/embeddings'
+  return url + '/v1/embeddings'
+}
+
 // 延迟 require，避免与 aiConfig.js 的循环依赖（aiConfig 也 require 本模块的 buildChatURL）
 let resolveApiKeyForProfile = null
 const getApiKeyResolver = () => {
@@ -88,6 +97,38 @@ ipcMain.handle('ai:chat', async (event, { url, headers, body, profileId }) => {
     }
   }
   return { success: false, error: '请求失败（重试次数已用尽）' }
+})
+
+ipcMain.handle('ai:embedding', async (event, { baseURL, model, input, profileId, autoComplete }) => {
+  try {
+    if (!baseURL || !model || !Array.isArray(input) || !input.length) {
+      return { success: false, error: '缺少 embedding 配置或输入' }
+    }
+    const url = buildEmbeddingURL(baseURL, autoComplete !== false)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 30000)
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: injectAuth({ 'Content-Type': 'application/json' }, profileId),
+        body: JSON.stringify({ model, input }),
+        signal: controller.signal
+      })
+      const text = await response.text()
+      if (!response.ok) return { success: false, error: `embedding API error ${response.status}: ${text}` }
+      const data = JSON.parse(text)
+      const list = data?.data || []
+      const vectors = list
+        .map(item => item?.embedding)
+        .filter(v => Array.isArray(v) && v.length)
+      if (!vectors.length) return { success: false, error: 'embedding API 未返回向量' }
+      return { success: true, vectors }
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
 })
 
 /**

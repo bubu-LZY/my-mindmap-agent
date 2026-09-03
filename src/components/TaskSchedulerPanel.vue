@@ -62,6 +62,7 @@
         <div class="form-row form-row-column">
           <label>AI 提示词</label>
           <textarea
+            ref="promptTextareaRef"
             v-model="newTask.prompt"
             rows="3"
             class="form-input form-textarea"
@@ -278,7 +279,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { taskSchedulerService } from '../services/taskSchedulerService'
 import { addPanelLog } from '../utils/panelLogStore'
@@ -293,6 +294,9 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'run-now'])
+
+const promptTextareaRef = ref(null)
+const promptMentionRanges = { skill: null, mcp: null, tool: null }
 
 // 面板运行日志（与 AI 对话运行日志同构）
 const runLogVisible = ref(false)
@@ -435,51 +439,79 @@ function closePromptPickers() {
 
 function onPromptInput() {
   const value = newTask.prompt || ''
-  const atIdx = value.lastIndexOf('@')
-  const hashIdx = value.lastIndexOf('#')
-  const slashIdx = value.lastIndexOf('/')
+  const pos = promptTextareaRef.value?.selectionStart ?? value.length
+  const before = value.slice(0, pos)
+  const atIdx = before.lastIndexOf('@')
+  const hashIdx = before.lastIndexOf('#')
+  const slashIdx = before.lastIndexOf('/')
   const latest = Math.max(atIdx, hashIdx, slashIdx)
   const trigger = latest === atIdx ? '@' : latest === hashIdx ? '#' : latest === slashIdx ? '/' : ''
   closePromptPickers()
   if (!trigger) return
-  const query = value.slice(latest + 1)
-  if (query.includes(' ')) return
+  const query = before.slice(latest + 1)
+  if (query.includes(' ') || query.includes('\n')) return
   if (trigger === '@') {
     promptSkillQuery.value = query
     promptSkillPickerVisible.value = true
+    promptMentionRanges.skill = { start: atIdx, end: pos }
     loadPromptSkillOptions()
   } else if (trigger === '#') {
     promptMcpQuery.value = query
     promptMcpPickerVisible.value = true
+    promptMentionRanges.mcp = { start: hashIdx, end: pos }
     loadPromptMcpOptions()
   } else {
     promptToolQuery.value = query
     promptToolPickerVisible.value = true
+    promptMentionRanges.tool = { start: slashIdx, end: pos }
     loadPromptToolOptions()
   }
 }
 
-function removeTriggerToken(trigger) {
+function removePromptMentionRange(type) {
+  const range = promptMentionRanges[type]
+  promptMentionRanges[type] = null
   const value = newTask.prompt || ''
-  const idx = value.lastIndexOf(trigger)
-  if (idx >= 0) newTask.prompt = value.slice(0, idx).trimEnd()
+  if (!range) return value
+  return value.slice(0, range.start) + value.slice(range.end)
 }
 
 function selectPromptSkill(s) {
   if (!promptSkills.value.some(x => x.id === s.id)) promptSkills.value.push(s)
-  removeTriggerToken('@')
+  const start = promptMentionRanges.skill?.start ?? null
+  newTask.prompt = removePromptMentionRange('skill')
+  if (start != null) {
+    nextTick(() => {
+      promptTextareaRef.value?.focus()
+      try { promptTextareaRef.value?.setSelectionRange(start, start) } catch (e) {}
+    })
+  }
   closePromptPickers()
 }
 
 function selectPromptMcp(m) {
   if (!promptMcps.value.some(x => x.id === m.id)) promptMcps.value.push(m)
-  removeTriggerToken('#')
+  const start = promptMentionRanges.mcp?.start ?? null
+  newTask.prompt = removePromptMentionRange('mcp')
+  if (start != null) {
+    nextTick(() => {
+      promptTextareaRef.value?.focus()
+      try { promptTextareaRef.value?.setSelectionRange(start, start) } catch (e) {}
+    })
+  }
   closePromptPickers()
 }
 
 function selectPromptTool(t) {
   if (!promptTools.value.some(x => x.id === t.id)) promptTools.value.push(t)
-  removeTriggerToken('/')
+  const start = promptMentionRanges.tool?.start ?? null
+  newTask.prompt = removePromptMentionRange('tool')
+  if (start != null) {
+    nextTick(() => {
+      promptTextareaRef.value?.focus()
+      try { promptTextareaRef.value?.setSelectionRange(start, start) } catch (e) {}
+    })
+  }
   closePromptPickers()
 }
 

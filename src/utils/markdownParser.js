@@ -10,6 +10,37 @@ import { createUid } from 'simple-mind-map/src/utils'
 import { escapeHtml } from './sanitizeHtml'
 
 /**
+ * 兼容旧版本遗留的“整张表格塞进单个节点”的数据。
+ * 把 <table class="mm-md-table"> 转成多行富文本（每行一个表格行，列名做前缀），
+ * 避免 simple-mind-map 的 Quill 编辑器无法编辑 <table>、退出后表格被剥成纯文本的问题。
+ */
+export const legacyTableHtmlToText = (html) => {
+  if (!html || typeof html !== 'string' || !/<table\b/i.test(html)) return html
+  try {
+    const div = document.createElement('div')
+    div.innerHTML = html
+    const table = div.querySelector('table')
+    if (!table) return html
+    const header = Array.from(table.querySelectorAll('thead th, tr:first-child th')).map(td => (td.textContent || '').trim())
+    const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr => Array.from(tr.children).map(td => (td.textContent || '').trim()))
+    if (!rows.length) {
+      const cells = header.filter(Boolean)
+      return cells.length ? `<p><span>${cells.map(c => escapeHtml(c)).join('、')}</span></p>` : html
+    }
+    const lineHtml = rows.map(row => {
+      const parts = row.map((cell, idx) => {
+        const label = header[idx] ? `【${escapeHtml(header[idx])}】` : ''
+        return cell ? `${label}${escapeHtml(cell)}` : ''
+      }).filter(Boolean)
+      return parts.join('<br>')
+    }).filter(Boolean).join('<br><br>')
+    return `<p><span>${lineHtml}</span></p>`
+  } catch (e) {
+    return html
+  }
+}
+
+/**
  * 将 Markdown 文本解析为 simple-mind-map 树形数据结构
  * @param {string} markdown Markdown 文本
  * @returns {object} 树形数据 { data: { text, uid, richText }, children: [] }
@@ -110,11 +141,13 @@ function parseLines(lines, indentUnit) {
     const quoteMatch = line.match(/^([ \t]*)>[ \t]*(.+)/)
     if (quoteMatch) {
       const depth = currentHeadingDepth + 1 + indentLevelOf(quoteMatch[1])
-      nodes.push({ depth, text: quoteMatch[2].trim() })
+      nodes.push({ depth, text: quoteMatch[2].trim(), quote: true })
       continue
     }
 
-    // Markdown 表格：连续的 | ... | 行合并为一个节点（保留整体性，不拆成多行节点）
+    // Markdown 表格：连续的 | ... | 行拆成“每行一个节点”，列名作为前缀写入同一节点。
+    // 不再把 <table> 塞进节点文本：simple-mind-map 的富文本编辑基于 Quill，无法编辑/还原
+    // <table>，双击编辑后会卡住，退出后表格还会被剥成纯文本。多行节点仍可正常双击编辑。
     if (/^\s*\|.*\|\s*$/.test(line)) {
       const tableLines = []
       let j = i
@@ -130,11 +163,23 @@ function parseLines(lines, indentUnit) {
       // 去掉分隔行（|---|:--| 等）
       const dataRows = tableLines.filter(l => !/^\|[\s:|-]+\|$/.test(l))
       if (dataRows.length) {
-        const cellText = dataRows.map(r => {
-          const cells = r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim())
-          return cells.join('　|　')
-        })
-        nodes.push({ depth: currentHeadingDepth + 1, text: cellText.join('\n') })
+        const rows = dataRows.map(r => r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim()))
+        const header = rows[0] || []
+        const body = rows.slice(1)
+        const baseDepth = currentHeadingDepth + 1
+        if (body.length) {
+          body.forEach(row => {
+            const parts = row.map((cell, idx) => {
+              const label = header[idx] ? `【${header[idx]}】` : ''
+              return cell ? `${label}${cell}` : ''
+            }).filter(Boolean)
+            if (parts.length) {
+              nodes.push({ depth: baseDepth, text: parts.join('\n') })
+            }
+          })
+        } else if (header.length) {
+          nodes.push({ depth: baseDepth, text: header.filter(Boolean).join('、') })
+        }
       }
       i = j - 1
       continue
@@ -153,11 +198,13 @@ function parseLines(lines, indentUnit) {
  * 将扁平节点列表构建为树形结构（使用栈维护层级关系）
  */
 function buildTree(nodes) {
-  const root = { data: { text: '', uid: createUid() }, children: [] }
+  const root = { data: { text: '', uid: createUid(), richText: true }, children: [] }
   const stack = [{ node: root, depth: 0 }]
 
   for (const item of nodes) {
-    const newNode = { data: { text: item.text, uid: createUid() }, children: [] }
+    const newNode = { data: { text: item.text, uid: createUid(), richText: true }, children: [] }
+    if (item.tableHtml) newNode.data.tableHtml = item.tableHtml
+    if (item.quote) newNode.data.quote = true
 
     // 弹出栈中深度 >= 当前的节点，找到父节点
     while (stack.length > 1 && stack[stack.length - 1].depth >= item.depth) {
@@ -174,7 +221,7 @@ function buildTree(nodes) {
     root.data.text = '思维导图'
     return root
   }
-  return { data: { text: '思维导图', uid: createUid() }, children: [] }
+  return { data: { text: '思维导图', uid: createUid(), richText: true }, children: [] }
 }
 
 /**
@@ -202,10 +249,16 @@ function normalizeTree(node) {
   if (!node.data) node.data = {}
   if (!node.data.uid) node.data.uid = createUid()
   node.data.richText = true
-  // 先转义防注入，再转换行内 Markdown（粗体/斜体/删除线/代码）为富文本 HTML
-  node.data.text = (typeof node.data.text === 'string' && node.data.text)
-    ? `<p><span>${inlineMarkdownToHtml(escapeHtml(node.data.text))}</span></p>`
-    : '<p><span></span></p>'
+  if (node.data.tableHtml) {
+    node.data.text = node.data.tableHtml
+  } else if (node.data.quote) {
+    const escaped = escapeHtml(node.data.text || '')
+    node.data.text = `<p><span class="mm-md-quote">${inlineMarkdownToHtml(escaped)}</span></p>`
+  } else {
+    node.data.text = (typeof node.data.text === 'string' && node.data.text)
+      ? `<p><span>${inlineMarkdownToHtml(escapeHtml(node.data.text))}</span></p>`
+      : '<p><span></span></p>'
+  }
   if (node.children) {
     node.children.forEach(normalizeTree)
   }

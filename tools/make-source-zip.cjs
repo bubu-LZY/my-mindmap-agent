@@ -1,97 +1,46 @@
-/**
- * 制作脱敏源码 zip：
- *  - 排除 node_modules / dist / release / .workbuddy / 历史 zip 等大文件或隐私目录
- *  - 仅打包源码 + 配置 + 文档（与 .gitignore 互补）
- *  - 跳过 .gitignore 列出的所有路径
- *
- * 用法：node tools/make-source-zip.cjs [outputPath]
- *        默认输出到 c:\Users\lizhu\Desktop\my-mindmap-agent-source.zip
- */
 const fs = require('fs')
 const path = require('path')
-const archiver = require('archiver')
+const JSZip = require('jszip')
 
-// .gitignore 的简化版：这里硬编码以避免依赖 git CLI
-const IGNORE_PATTERNS = [
-  /^node_modules\//,
-  /^dist\//,
-  /^release\//,
-  /^\.workbuddy/,
-  /^\.workbuddy-/,
-  /^my-mindmap-agent-setup\.zip$/,
-  /^my-mindmap-agent-source-[^/]+\.zip$/,
-  /^my-mindmap-agent-source\.zip$/,
-  /^simple-mind-map-[^/]+\.tgz$/,
-  /^AI工具测试对话\.md$/,
-  /^对话总结\.md$/,
-  /^多窗口多标签改造计划\.md$/,
-  /^_probe\.cjs$/,
-  /^electron\/_syntax_check_stub_electron\.cjs$/,
-  /^electron\/ipc\/_syntax_check_stub_electron\.cjs$/,
-  /^tools\/fix-prompt\.ps1$/,
-  /^tools\/make-icons\.mjs$/,
-  /^tools\/inspect-legacy\.js$/,
-  /^tools\/test-[^/]+\.mjs$/,
-  /^tools\/api-toolcall-probe\.js$/,
-  /^tools\/make-package\.ps1$/,
-  /^tools\/make-source-zip\.cjs$/,
-  // simple-mind-map 离线源码（已通过 dependencies 走 npm registry）
-  /^package\//,
-  /\.(log|tmp)$/,
-  /^Thumbs\.db$/i,
-  /(^|\/)\.DS_Store$/,
-  /\.(ldb|ldb-shm|ldb-wal)$/,
-]
-
-const isIgnored = (relPath) => IGNORE_PATTERNS.some((re) => re.test(relPath))
+const projectDir = process.cwd()
+const outPath = path.join(projectDir, 'my-mindmap-agent-source.zip')
+const excludeDirs = new Set([
+  'node_modules', 'dist', 'release', '.git',
+  '.workbuddy', '.trae', '.trae-cn', '.vscode', 'package'
+])
 
 async function main() {
-  const src = path.resolve(__dirname, '..')
-  const output = process.argv[2] || path.resolve(require('os').homedir(), 'Desktop', 'my-mindmap-agent-source.zip')
+  const zip = new JSZip()
+  let fileCount = 0
 
-  if (!fs.existsSync(path.dirname(output))) {
-    throw new Error(`输出目录不存在：${path.dirname(output)}`)
-  }
-  if (fs.existsSync(output)) fs.unlinkSync(output)
-
-  const output_ = fs.createWriteStream(output)
-  const archive = archiver('zip', { zlib: { level: 9 } })
-  archive.pipe(output_)
-
-  let totalFiles = 0
-  let totalBytes = 0
-
-  const walk = (dir, relDir = '') => {
+  function walk(dir, rel) {
     const entries = fs.readdirSync(dir, { withFileTypes: true })
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name)
-      const rel = path.posix.join(relDir, entry.name)
-      if (isIgnored(rel)) continue
-      if (entry.isDirectory()) {
-        walk(full, rel)
-      } else if (entry.isFile()) {
-        archive.file(full, { name: rel })
-        totalFiles++
-        totalBytes += fs.statSync(full).size
+    for (const e of entries) {
+      const name = e.name
+      if (rel === '' && excludeDirs.has(name)) continue
+      const full = path.join(dir, name)
+      const relPath = rel ? rel + '/' + name : name
+      if (e.isDirectory()) {
+        walk(full, relPath)
+      } else if (e.isFile()) {
+        if (name.toLowerCase().endsWith('.zip')) continue
+        if (name.toLowerCase().endsWith('.tgz')) continue
+        zip.file(relPath, fs.readFileSync(full))
+        fileCount++
       }
     }
   }
-  walk(src)
 
-  await archive.finalize()
-  await new Promise((res, rej) => {
-    output_.on('close', res)
-    output_.on('error', rej)
+  walk(projectDir, '')
+  const buf = await zip.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 9 }
   })
-
-  const outSize = fs.statSync(output).size
-  console.log(`✅ 已生成：${output}`)
-  console.log(`   文件数：${totalFiles}`)
-  console.log(`   源码体积（压缩前）：${(totalBytes / 1024 / 1024).toFixed(2)} MB`)
-  console.log(`   zip 体积：${(outSize / 1024 / 1024).toFixed(2)} MB`)
+  fs.writeFileSync(outPath, buf)
+  console.log('DONE:', outPath)
+  console.log('Files:', fileCount)
+  console.log('Size MB:', (buf.length / 1024 / 1024).toFixed(2))
 }
 
-main().catch((e) => {
-  console.error('❌ 打包失败：', e.message)
-  process.exit(1)
-})
+main().catch((e) => { console.error(e); process.exit(1) })

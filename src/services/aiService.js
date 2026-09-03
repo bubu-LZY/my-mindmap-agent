@@ -3,11 +3,8 @@
  * 支持 OpenAI 兼容 API（流式和非流式）
  */
 
-import { stripThinkBlocks, createThinkStreamFilter } from '../utils/thinkFilter'
+import { stripThinkBlocks, createThinkStreamFilter, extractThinkBlocks } from '../utils/thinkFilter'
 import { createPlanStreamFilter } from '../utils/planFilter'
-import { useDeepThinkingStore } from '../stores/deepThinkingStore'
-import { addLogEvent } from '../utils/logStore'
-import { estimateTokens } from '../utils/contextWindow'
 
 /**
  * 清洗工具返回值，移除/截断 AI 不需要且会爆上下文的大字段：
@@ -90,46 +87,10 @@ export function buildBaseURL(baseURL) {
 }
 
 /**
- * 按 baseURL 域名匹配厂商，返回兼容的深度思考参数字段集合。
- * 命中规则按厂商权威文档：
- * - OpenAI（o3/o4-mini/gpt-5 系列）顶层 reasoning_effort
- * - DeepSeek v3.2+：thinking: { type: 'enabled', reasoning_effort }
- * - 阿里百炼（Qwen3/GLM/Kimi 兼容端）：enable_thinking + reasoning_effort
- * - 兼容 OpenAI 协议的中转站 / 第三方：默认走顶层 reasoning_effort（多数透传支持）
- *
- * 未知厂商或不匹配返回空对象 → 调用方不传任何参数（静默降级）。
- *
- * @param {string} baseURL  用户配置的 baseURL
- * @param {string} effort   'low' | 'medium' | 'high'
- * @returns {object}       应合并进请求 body 的字段（可能为空）
- */
-export function buildDeepThinkingParams(baseURL, effort) {
-  if (!baseURL) return {}
-  const url = String(baseURL).toLowerCase()
-  // DeepSeek：api-docs.deepseek.com 系列（含中转）
-  if (url.includes('deepseek')) {
-    return { thinking: { type: 'enabled', reasoning_effort: effort || 'high' } }
-  }
-  // 阿里百炼 / 阿里云通义千问 / Qwen：dashscope / aliyun
-  if (url.includes('dashscope') || url.includes('aliyun') || url.includes('qwen')) {
-    return { enable_thinking: true, reasoning_effort: effort || 'high' }
-  }
-  // 智谱 GLM：bigmodel / zhipu（bigmodel 已逐步支持 reasoning_effort）
-  if (url.includes('bigmodel') || url.includes('zhipu')) {
-    return { reasoning_effort: effort || 'high' }
-  }
-  // 默认（OpenAI、Azure、Moonshot、Ollama、各类中转）：顶层 reasoning_effort
-  return { reasoning_effort: effort || 'high' }
-}
-
-/**
  * 并行安全工具（纯查询、无副作用、互不依赖）：
  * 同一批 tool_calls 全部属于此集合时用 Promise.all 并行执行
  */
-// 单工具软超时：防止单个工具 hang 死整批处理
-const TOOL_TIMEOUT_MS = 60000
 const PARALLEL_SAFE_TOOLS = new Set([
-
   'get_mindmap_content',
   'get_mindmap_info',
   'search_nodes',
@@ -166,7 +127,6 @@ export function resetWebSearchTask(taskId = `search_${Date.now()}_${Math.random(
   return taskId
 }
 export async function searchWeb(query, options = {}) {
-  if (isOffline()) throw new Error('网络不可用：当前处于离线状态，请稍后或连接网络后再试（NETWORK_DOWN）')
   const deepResearch = options.deepResearch === true || /深度调研|系统调研|全面调研/.test(String(query || ''))
   const taskId = options.taskId || currentWebSearchTaskId || resetWebSearchTask()
   // 优先走主进程 IPC：渲染进程直接 fetch 会被 CORS 拦截而永远返回空
@@ -197,7 +157,6 @@ export async function searchWeb(query, options = {}) {
 
 // 读取网页正文（主进程抓取并提取纯文本，配合联网搜索使用）
 export async function readWebpage(url) {
-  if (isOffline()) throw new Error('网络不可用：当前处于离线状态，无法读取网页（NETWORK_DOWN）')
   if (typeof window !== 'undefined' && window.electronAPI && window.electronAPI.webFetch) {
     const r = await window.electronAPI.webFetch(url)
     if (r && r.success) {
@@ -365,7 +324,17 @@ async function semanticToolMatch(userQuery, pool, activeNames) {
     .map(t => `${t.function.name}：${String(t.function.description || '').slice(0, 60)}`)
     .join('\n')
   if (!catalog) return []
-  const sys = '你是工具路由器。根据用户需求，从工具目录中挑选真正匹配的工具。只输出 JSON：{"tools":["工具名1","工具名2"]}；没有匹配输出 {"tools":[]}。规则：用户要做"操作"（修改/查询/导出/发送/上传/删除/切换/显示/隐藏/生成等）且目录里有对应工具时才选；纯知识问答、闲聊、寒暄不要选任何工具；最多选 3 个。'
+  const sys = `你是工具路由器。根据用户需求，从工具目录中挑选真正匹配的工具。只输出 JSON，且可以包裹在 \`\`\`json 代码块中：{"tools":["工具名1","工具名2"]}；没有匹配输出 {"tools":[]}。
+
+规则：
+1. 只有用户明确要求执行"操作"（修改/查询/导出/发送/上传/删除/切换/显示/隐藏/生成等），且目录里有对应工具时才选择。
+2. 纯知识问答、闲聊、寒暄、询问方法但未要求执行时，不选任何工具。
+3. 最多选 3 个工具。
+
+示例：
+1. 用户："你好，今天天气不错" → {"tools":[]}
+2. 用户："把根节点改成“项目总结”" → {"tools":["update_node_text"]}
+3. 用户："怎么导出Markdown？"（只是询问方法） → {"tools":[]}`
   const usr = `用户需求：${userQuery}\n\n工具目录：\n${catalog}`
   try {
     const choice = await aiService.chat(usr, sys, null, { responseFormat: 'json' })
@@ -413,14 +382,6 @@ function extractLatestUserQuery(messages) {
 /** 拒答特征检测：模型没用任何工具却输出"无法完成"类回复时触发语义兜底 */
 const REFUSAL_RE = /(无法|不能|做不到|不支持|没有.{0,6}(功能|工具|能力)|暂不|无法执行|无法完成|我帮不了)/
 
-
-// 网络检测（review #14/#22）：离线时短路 AI 请求、联网工具，避免挂起
-function isOffline() {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
-  } catch (e) {}
-  return false
-}
 class AIService {
   constructor() {
     this.baseURL = ''
@@ -431,6 +392,8 @@ class AIService {
     this.autoComplete = true
     // 生成温度（可在设置中自定义，默认 0.7）
     this.temperature = 0.7
+    // 深度思考模式（可在设置中开关与选择 low/medium/high）
+    this.thinking = { enabled: false, level: 'medium' }
     this.initialized = false
     // 暴露提供商预设供 UI 使用
     this.providerPresets = providerPresets
@@ -496,6 +459,9 @@ class AIService {
     this.model = config.model
     this.autoComplete = config.autoComplete !== false
     this.temperature = Number.isFinite(Number(config.temperature)) ? Number(config.temperature) : 0.7
+    this.thinking = config.thinking && typeof config.thinking === 'object'
+      ? { enabled: !!config.thinking.enabled, level: ['low', 'medium', 'high'].includes(config.thinking.level) ? config.thinking.level : 'medium' }
+      : { enabled: false, level: 'medium' }
     this.initialized = true
   }
 
@@ -510,6 +476,9 @@ class AIService {
     this.model = config.model || ''
     this.autoComplete = config.autoComplete !== false
     this.temperature = Number.isFinite(Number(config.temperature)) ? Number(config.temperature) : 0.7
+    this.thinking = config.thinking && typeof config.thinking === 'object'
+      ? { enabled: !!config.thinking.enabled, level: ['low', 'medium', 'high'].includes(config.thinking.level) ? config.thinking.level : 'medium' }
+      : { enabled: false, level: 'medium' }
     this.initialized = true
   }
 
@@ -526,6 +495,18 @@ class AIService {
    */
   async ensureInitialized() {
     if (!this.initialized) await this.init()
+  }
+
+  /**
+   * 按用户配置为请求体追加深度思考参数。
+   * 使用 OpenAI 兼容的 reasoning_effort（low/medium/high），主流模型忽略不支持的字段。
+   */
+  _applyThinking(body) {
+    if (!body || typeof body !== 'object') return body
+    if (!this.thinking?.enabled) return body
+    const level = ['low', 'medium', 'high'].includes(this.thinking.level) ? this.thinking.level : 'medium'
+    body.reasoning_effort = level
+    return body
   }
 
   /* ============================================================
@@ -774,6 +755,14 @@ class AIService {
       : { baseURL: this.baseURL, profileId: this.profileId, model: this.model, autoComplete: this.autoComplete }
     const messages = []
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt })
+    // thinking === false 的任务（挖空/改写/出题等 JSON 输出）：追加禁止思考指令，
+    // 从源头阻止 MiniMax-M3 等模型输出 <think> 思考块挤占 token 导致正式输出被截断为空。
+    if (options.thinking === false) {
+      messages.push({
+        role: 'system',
+        content: '【重要指令】直接输出最终结果，禁止输出 <think> 思考过程、推理过程或任何解释性前缀。'
+      })
+    }
     messages.push({ role: 'user', content: userMessage })
 
     // 如果开启联网搜索，先搜索
@@ -806,23 +795,18 @@ class AIService {
       throw err
     }
 
-    const body = { model: cfg.model, messages, temperature: options.temperature ?? this.temperature ?? 0.7 }
+    const baseBody = { model: cfg.model, messages, temperature: options.temperature ?? this.temperature ?? 0.7 }
+    // options.thinking === false：本请求强制不携带 reasoning_effort，用于挖空/校验等高频小任务，
+    // 避免用户开启深度思考后，批量小请求也被推理模型拖到超时并误降级为本地兜底。
+    const body = options.thinking === false
+      ? baseBody
+      : (options.configOverride && options.configOverride.baseURL ? baseBody : this._applyThinking(baseBody))
     if (tools) body.tools = tools
     if (Number.isFinite(options.max_tokens) && options.max_tokens > 0) body.max_tokens = options.max_tokens
 
     // JSON 严格模式：支持的供应商会强制输出合法 JSON，从源头减少解析失败
     if (options.responseFormat === 'json') {
       body.response_format = { type: 'json_object' }
-    }
-
-    // 深度思考开关：按 baseURL 自动适配厂商参数（OpenAI 顶层 reasoning_effort / DeepSeek thinking 对象 / 阿里百炼 enable_thinking 等）
-    if (!options.skipDeepThinking) {
-      try {
-        const store = useDeepThinkingStore()
-        if (store && store.enabled) {
-          Object.assign(body, buildDeepThinkingParams(cfg.baseURL, store.effort))
-        }
-      } catch (e) { /* store 不可用时跳过，不影响主流程 */ }
     }
 
     // 记录 AI 请求摘要（供运行日志：工序/子 Agent 内部 AI 调用可见）
@@ -849,11 +833,68 @@ class AIService {
       throw err
     }
     const data = await response.json()
-    const choice = data.choices[0]
-    // MiniMax 等推理模型会在 content 中输出 <think> 思考过程：剥离后再交给调用方（挖空 JSON 解析等依赖干净文本）
-    if (typeof choice?.message?.content === 'string') {
-      choice.message.content = stripThinkBlocks(choice.message.content)
+    const choice = data.choices && data.choices[0]
+    const originalContent = choice?.message?.content
+    const finishReason = choice?.finish_reason || ''
+    const reasoning = choice?.message?.reasoning_content || choice?.message?.reasoning || ''
+
+    // 诊断：content 为空时记录完整原因（finish_reason / reasoning_content / error），
+    // 避免"静默返回空"导致运行日志看不出任何线索。
+    if (this.logCallback) {
+      const trimmed = typeof originalContent === 'string' ? originalContent.trim() : ''
+      if (!trimmed) {
+        try {
+          const diag = {
+            finish_reason: finishReason,
+            choice_count: Array.isArray(data.choices) ? data.choices.length : -1,
+            message_keys: choice?.message ? Object.keys(choice.message) : [],
+            content_type: typeof originalContent,
+            content_len: typeof originalContent === 'string' ? originalContent.length : -1,
+            reasoning_len: typeof reasoning === 'string' ? reasoning.length : -1,
+            reasoning_preview: typeof reasoning === 'string' ? reasoning.slice(0, 150) : '',
+            has_error: !!data.error,
+            error: data.error ? String(data.error.message || JSON.stringify(data.error)).slice(0, 300) : ''
+          }
+          this.logCallback('receive', `返回空内容诊断: ${JSON.stringify(diag)}`)
+        } catch (e) {}
+      }
     }
+
+    // MiniMax 等推理模型会在 content 中输出 <think> 思考过程：剥离后再交给调用方（挖空 JSON 解析等依赖干净文本）
+    // 同时提取思考内容到 message.reasoning，便于调用方单独展示
+    let strippedContent = originalContent
+    if (typeof choice?.message?.content === 'string') {
+      const rawStr = choice.message.content
+      // 优先从独立字段取 reasoning，再从 content 的 <think> 标签中提取
+      const fieldReasoning = choice.message.reasoning_content || choice.message.reasoning || ''
+      const thinkFromContent = typeof extractThinkBlocks === 'function' ? extractThinkBlocks(rawStr) : ''
+      const fullReasoning = [fieldReasoning, thinkFromContent].filter(Boolean).join('\n\n')
+      if (fullReasoning) {
+        choice.message.reasoning = fullReasoning
+      }
+      strippedContent = stripThinkBlocks(rawStr)
+      choice.message.content = strippedContent
+    }
+
+    // 自动重试：正式 content 为空，但思考内容非空（推理模型把 max_tokens 预算耗在 reasoning 上）。
+    // 触发条件：finish_reason === 'length'（被截断）或剥离 <think> 后正文为空但原始非空。
+    const strippedTrimmed = typeof strippedContent === 'string' ? strippedContent.trim() : ''
+    const originalTrimmed = typeof originalContent === 'string' ? originalContent.trim() : ''
+    if (!strippedTrimmed && originalTrimmed.length > 0 && !options._noThinkRetry && !this._abortedTokens.has(this._activeRunToken)) {
+      const retryOptions = { ...options, _noThinkRetry: true }
+      // 重试时不限制 max_tokens：让模型使用默认上限（现代模型上下文足够长），
+      // 通过提示词（禁止思考 + 字数要求）控制输出，而不是手动设一个可能偏小的上限。
+      delete retryOptions.max_tokens
+      const forbidThink = '【强制】绝对不要输出 <think> 或任何思考/推理过程，直接输出最终结果正文，不要有任何前缀。'
+      const retrySystem = systemPrompt ? `${systemPrompt}\n\n${forbidThink}` : forbidThink
+      if (this.logCallback) {
+        try {
+          this.logCallback('info', `检测到输出被截断（finish_reason=${finishReason}，思考 ${typeof reasoning === 'string' ? reasoning.length : 0} 字符，正文为空），自动以默认 max_tokens 重试并强制禁止思考`)
+        } catch (e) {}
+      }
+      return this.chat(userMessage, retrySystem, tools, retryOptions)
+    }
+
     if (this.logCallback) {
       try {
         const brief = String(choice?.message?.content || '').slice(0, 200)
@@ -878,23 +919,15 @@ class AIService {
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt })
     messages.push({ role: 'user', content: userMessage })
 
-    const body = {
+    const body = this._applyThinking({
       model: this.model,
       messages,
       temperature: this.temperature ?? 0.7,
       stream: true
-    }
+    })
     if (tools) {
       body.tools = tools
     }
-
-    // 深度思考：按 baseURL 自动适配（OpenAI / DeepSeek / Qwen 等）
-    try {
-      const store = useDeepThinkingStore()
-      if (store && store.enabled) {
-        Object.assign(body, buildDeepThinkingParams(this.baseURL, store.effort))
-      }
-    } catch (e) { /* 跳过 */ }
 
     const streamResponse = await this._fetchStream(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(body), this.profileId)
 
@@ -1023,12 +1056,12 @@ class AIService {
     messages.push({ role: 'user', content: userMessage })
 
     // 第一轮：发送请求，带 tools 参数
-    const body = {
+    const body = this._applyThinking({
       model: this.model,
       messages,
       temperature: this.temperature ?? 0.7,
       tools
-    }
+    })
 
     const response = await this._fetchAPI(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(body), this.profileId)
 
@@ -1059,11 +1092,11 @@ class AIService {
     }
 
     // 第二轮：带上工具结果再次发送请求，获取最终回复
-    const secondBody = {
+    const secondBody = this._applyThinking({
       model: this.model,
       messages,
       temperature: this.temperature ?? 0.7
-    }
+    })
 
     const secondResponse = await this._fetchAPI(buildChatURL(this.baseURL, this.autoComplete), JSON.stringify(secondBody), this.profileId)
 
@@ -1083,16 +1116,7 @@ class AIService {
    *   - onBeforeRetry(hits)：自动工具发现兜底触发时回调（界面应清空已流式输出的首答），hits=[{name,desc}]
    */
   async chatWithCallbacks({ messages, tools, allTools, runToken, configOverride, toolMetadata }, callbacks = {}) {
-    // review #11: 打点 entry + durationMs
-    const __chatStartTime = Date.now()
-    let __chatLoggedEnd = false
-    const __logChatEnd = (status, extraMeta = {}) => {
-      if (__chatLoggedEnd) return
-      __chatLoggedEnd = true
-      try { addLogEvent('info', 'chat_request', 'AI 请求完成：' + status, { durationMs: Date.now() - __chatStartTime, ...extraMeta }) } catch (e) {}
-    }
-
-    const { onChunk, onToolCall, onDone, onError, onPlan, onStepDone, onBeforeRetry } = callbacks
+    const { onChunk, onToolCall, onDone, onError, onPlan, onStepDone, onBeforeRetry, onReasoning } = callbacks
     await this.ensureInitialized()
     this._resetAbort()
     // 本次运行实际使用的连接配置：默认当前配置，多模态带图消息等场景传入独立配置档
@@ -1164,89 +1188,55 @@ class AIService {
         }
         round++
 
-        // 循环内溢出保护（review #9：用混合 token 估算替代字符数粗估）
-        // 工具调用多轮后 currentMessages 会持续增长（assistant+tool result 对），
-        // 计算所有非 system 消息的 token 总数；超过 70K 时按"最早的 assistant+tool 对"裁剪
-        const SAFE_TOKEN_THRESHOLD = 70000
-        const MIN_KEEP_MESSAGES = 6          // 消息数量下限（最后一轮上下文必须保留）
-        const SAFE_TAIL_KEEP = 3             // 末尾几条消息绝不裁剪（避免当前轮上下文被删）
-        const SAFE_CHARS = 400000            // 字符数兜底：极端 case 下 token 估算漏算时的二次保险
+        // 循环内溢出保护：工具调用多轮后 currentMessages 会持续增长（assistant+tool result对），
+        // 若总字符数超过安全阈值，从最前面（跳过system）删除最早的 assistant+tool 对，保留最后几轮
+        const SAFE_CHARS = 280000 // ~70K tokens，留足响应空间
         const trimMessagesIfNeeded = (msgs) => {
-          const totalTokensOf = () => msgs.reduce(
-            (s, m) => s + estimateTokens(
-              typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '')
-            ),
-            0
-          )
-          // 1) 主路径：按 token 数裁剪
-          let safetyRounds = 0
-          while (msgs.length > MIN_KEEP_MESSAGES && safetyRounds < 100) {
-            safetyRounds++
-            if (totalTokensOf() <= SAFE_TOKEN_THRESHOLD) break
-            // 找第一条非 system 消息开始的 assistant，删除它及其后面的连续 tool 结果
+          const trySerialize = () => { try { return JSON.stringify(msgs); } catch { return '' } }
+          let serialized = trySerialize()
+          while (serialized.length > SAFE_CHARS && msgs.length > 6) {
+            // 找第一条非system消息开始的assistant，删除它及其后面的连续tool结果
             let startIdx = 0
             for (let i = 0; i < msgs.length; i++) {
               if (msgs[i].role !== 'system') { startIdx = i; break }
             }
+            // 从startIdx开始找第一个assistant
             let delEnd = -1
             for (let i = startIdx; i < msgs.length; i++) {
               if (msgs[i].role === 'assistant') {
+                // 找到这个assistant后面的连续tool结果
                 delEnd = i + 1
                 while (delEnd < msgs.length && msgs[delEnd].role === 'tool') delEnd++
-                // 不删除末尾 N 条消息（保留当前轮上下文）
-                if (delEnd >= msgs.length - SAFE_TAIL_KEEP) break
+                // 不删除最后3条消息（保留当前轮）
+                if (delEnd >= msgs.length - 3) break
                 msgs.splice(startIdx, delEnd - startIdx)
                 break
               }
             }
-            if (delEnd < 0 || msgs.length <= MIN_KEEP_MESSAGES) break
+            // 如果无法再删除（没有assistant或已到尾部），强制截断第一条非system消息的content
+            if (delEnd < 0 || msgs.length <= 6) break
+            serialized = trySerialize()
           }
-          // 2) 字符数兜底：极端 case 下 token 估算漏算时（极少见的超大 JSON）也强制截断
-          try {
-            const trySerialize = () => { try { return JSON.stringify(msgs); } catch { return '' } }
-            let serialized = trySerialize()
-            let charRounds = 0
-            while (serialized.length > SAFE_CHARS && msgs.length > MIN_KEEP_MESSAGES && charRounds < 50) {
-              charRounds++
-              let startIdx2 = 0
-              for (let i = 0; i < msgs.length; i++) {
-                if (msgs[i].role !== 'system') { startIdx2 = i; break }
-              }
-              let delEnd2 = -1
-              for (let i = startIdx2; i < msgs.length; i++) {
-                if (msgs[i].role === 'assistant') {
-                  delEnd2 = i + 1
-                  while (delEnd2 < msgs.length && msgs[delEnd2].role === 'tool') delEnd2++
-                  if (delEnd2 >= msgs.length - SAFE_TAIL_KEEP) break
-                  msgs.splice(startIdx2, delEnd2 - startIdx2)
-                  break
-                }
-              }
-              if (delEnd2 < 0) break
-              serialized = trySerialize()
-            }
-          } catch (e) { /* ignore */ }
           return msgs
         }
         trimMessagesIfNeeded(currentMessages)
 
-        const body = {
-          model: cfg.model,
-          messages: currentMessages,
-          temperature: this.temperature ?? 0.7,
-          stream: true
-        }
+        const body = configOverride && configOverride.baseURL
+          ? {
+              model: cfg.model,
+              messages: currentMessages,
+              temperature: this.temperature ?? 0.7,
+              stream: true
+            }
+          : this._applyThinking({
+              model: cfg.model,
+              messages: currentMessages,
+              temperature: this.temperature ?? 0.7,
+              stream: true
+            })
         if (activeTools.length > 0) {
           body.tools = activeTools
         }
-
-        // 深度思考：按 baseURL 自动适配（OpenAI 顶层 / DeepSeek thinking 对象 / 阿里百炼 enable_thinking 等）
-        try {
-          const store = useDeepThinkingStore()
-          if (store && store.enabled) {
-            Object.assign(body, buildDeepThinkingParams(cfg.baseURL, store.effort))
-          }
-        } catch (e) { /* 跳过 */ }
 
         const streamResponse = await this._fetchStream(buildChatURL(cfg.baseURL, cfg.autoComplete), JSON.stringify(body), cfg.profileId)
 
@@ -1259,8 +1249,19 @@ class AIService {
         // rawContent 保留 <plan> 等标记（喂回模型保持计划上下文）；fullContent 为界面显示的净文本
         let rawContent = ''
         let fullContent = ''
+        let reasoningContent = '' // 累积深度思考内容（来自 reasoning_content 字段 + <think> 块）
         // 每轮独立过滤 <think> 思考过程（只影响 content 文本，tool_calls 是独立字段不受影响）
-        const thinkFilter = createThinkStreamFilter()
+        const thinkFilter = createThinkStreamFilter({
+          onThink: (chunk, isEnd) => {
+            if (chunk) {
+              reasoningContent += chunk
+              if (onReasoning) onReasoning(chunk, false)
+            }
+            if (isEnd && onReasoning) {
+              onReasoning('', true) // 思考块结束
+            }
+          }
+        })
         let toolCalls = [] // 收集工具调用
         let finishReason = null
 
@@ -1313,6 +1314,13 @@ class AIService {
                     if (onChunk) onChunk(visible)
                   }
                 }
+              }
+
+              // 独立 reasoning 字段（OpenAI 格式的 reasoning_content / reasoning）
+              const reasoningDelta = delta.reasoning_content || delta.reasoning
+              if (reasoningDelta) {
+                reasoningContent += reasoningDelta
+                if (onReasoning) onReasoning(reasoningDelta, false)
               }
 
               // 工具调用（流式增量）
@@ -1463,32 +1471,8 @@ class AIService {
               arguments: tc.function.arguments
             }
           }
-          // 单工具软超时 + 用户停止即时检测：任一 race 先 resolve 即返回，旧 promise 后续 resolve 是 noop
-          let __stopChecker
-          const __abortSignal = new Promise((resolve) => {
-            __stopChecker = setInterval(() => {
-              if (this._abortedTokens.has(token) || isStale()) resolve('aborted')
-            }, 200)
-          })
-          const __timeoutSignal = new Promise((resolve) => setTimeout(() => resolve('timeout'), TOOL_TIMEOUT_MS))
-          const __callPromise = Promise.resolve().then(() => onToolCall(toolCallObj))
-          const __settled = await Promise.race([
-            __callPromise.then((v) => ({ kind: 'done', v })).catch((e) => ({ kind: 'err', e })),
-            __abortSignal.then((k) => ({ kind: k })),
-            __timeoutSignal.then((k) => ({ kind: k }))
-          ])
-          try { clearInterval(__stopChecker) } catch (e) {}
-          let result
-          if (__settled.kind === 'done') {
-            result = __settled.v
-          } else if (__settled.kind === 'err') {
-            result = { success: false, message: '工具执行异常：' + ((__settled.e && __settled.e.message) || String(__settled.e)) }
-          } else if (__settled.kind === 'aborted') {
-            result = { success: false, message: '用户已停止 AI 运行' }
-          } else {
-            // 'timeout'：软超时，不报错让 AI 换路径
-            result = { success: false, code: 'TOOL_TIMEOUT', message: '工具 ' + tc.function.name + ' 在 ' + Math.round(TOOL_TIMEOUT_MS / 1000) + ' 秒内未完成，已跳过。建议：① 简化任务量；② 改用其他等效工具；③ 让用户确认后再发起。' }
-          }
+          const result = await onToolCall(toolCallObj)
+
           // 动态工具激活：get_tool_definitions 返回 activatedTools，下一轮即可直接调用
           if (result && Array.isArray(result.activatedTools) && result.activatedTools.length > 0) {
             for (const n of result.activatedTools) {
@@ -1542,19 +1526,11 @@ class AIService {
       // 超过最大轮次（过期运行不回调，静默退出）
       if (!isStale() && onDone) onDone()
     } catch (error) {
-      try { __logChatEnd('error', { error: String((error && error.message) || error) }) } catch (e) {}
       // 过期运行的错误不渲染（会话已切换/新运行已启动，错误不属于当前界面）
       if (isStale()) return
       if (onError) onError(error)
       else throw error
     } finally {
-      // 兜底：所有出口过 finally（catch 路径已 log 'error'，flag 守护避免重复）
-      try {
-        if (!__chatLoggedEnd) {
-          __chatLoggedEnd = true
-          try { addLogEvent('info', 'chat_request', 'AI 请求完成：finished', { durationMs: Date.now() - __chatStartTime }) } catch (e) {}
-        }
-      } catch (e) {}
       this._inLoop = false
     }
   }
@@ -1567,6 +1543,4 @@ export const aiService = new AIService()
 export const createAIService = () => new AIService()
 
 export default aiService
-
-
 

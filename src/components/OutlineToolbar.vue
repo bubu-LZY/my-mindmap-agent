@@ -1,20 +1,12 @@
 <template>
   <!-- mousedown.prevent：点击工具栏不夺走节点编辑焦点，否则 blur 先于 click 清空目标节点导致按钮禁用 -->
-  <div
-    class="fixed-toolbar"
-    :class="{ 'is-dragging': isDragging }"
-    ref="toolbarRef"
-    :style="{ transform: 'translate(calc(-50% + ' + dragOffset.x + 'px), ' + dragOffset.y + 'px)' }"
-    @mousedown.prevent
-  >
-    <!-- 抓手：拖动整个工具条（双击重置为默认位置） -->
+  <div class="fixed-toolbar outline-dock-toolbar" ref="toolbarRef" @mousedown.prevent>
     <span
-      class="ft-drag-handle"
-      :class="{ active: isDragging }"
-      @pointerdown.stop.prevent="onDragHandleDown"
-      @dblclick.stop.prevent="onDragHandleDblClick"
-      title="按住可拖动工具条（双击重置位置）"
-    >⋮⋮</span>
+      class="toolbar-drag-handle"
+      title="拖动工具条到大纲边缘，可吸附为横条或竖条"
+      @mousedown.prevent="onDragStart"
+    >⠿</span>
+
     <!-- 文字颜色 -->
     <div class="ft-group">
       <button class="ft-btn" :class="{ disabled }" title="文字颜色" @click="togglePanel('color')">
@@ -126,18 +118,14 @@
       </svg>
     </button>
 
-    <!-- 一键隐藏全部挖空 -->
-    <button class="ft-btn" :class="{ active: clozeHidden }" title="一键隐藏全部挖空" @click="emitAction('hide-cloze')">
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="none">
+    <!-- 一键切换全部挖空显示/隐藏 -->
+    <button class="ft-btn" :class="{ active: clozeHidden }" :title="clozeHidden ? '当前已隐藏全部挖空，点击显示' : '当前已显示全部挖空，点击隐藏'" @click="emitAction('toggle-cloze')">
+      <svg v-if="clozeHidden" viewBox="0 0 24 24" width="14" height="14" fill="none">
         <path d="M3 13.5c2 1.8 4.5 3 9 3s7-1.2 9-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
         <circle cx="12" cy="14" r="2.6" fill="currentColor" />
         <path d="M5.5 10.5L4 9M12 8.5V6.5M18.5 10.5L20 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
       </svg>
-    </button>
-
-    <!-- 一键取消隐藏全部挖空 -->
-    <button class="ft-btn" :class="{ active: !clozeHidden }" title="一键取消隐藏全部挖空" @click="emitAction('show-cloze')">
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="none">
+      <svg v-else viewBox="0 0 24 24" width="14" height="14" fill="none">
         <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />
         <circle cx="12" cy="12" r="3" fill="currentColor" />
       </svg>
@@ -167,7 +155,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { textColors, highlightColors } from '../utils/textStyle'
-import { useDraggableToolbar } from '../composables/useDraggableToolbar'
+import { useDockToolbar } from '../utils/toolbarDock'
 
 const props = defineProps({
   disabled: { type: Boolean, default: true },
@@ -177,10 +165,9 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['apply', 'note', 'gen', 'toggle-cloze', 'hide-cloze', 'show-cloze', 'export', 'format-painter'])
-// 工具条拖动（review：把顶部固定工具条改为可拖动，默认位置不变，跨视图持久化）
-const { dragOffset, isDragging, onDragHandleDown, onDragHandleDblClick } = useDraggableToolbar('outline-toolbar-offset')
 
 const toolbarRef = ref(null)
+const { startDrag: onDragStart } = useDockToolbar(toolbarRef, 'outline_fixed_toolbar_dock')
 const panel = ref(null)
 const fontSizeLabel = ref('字号')
 
@@ -251,42 +238,40 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 </script>
 
 <style scoped>
-/* 工具条拖动：抓手与拖动态 */
-.fixed-toolbar.is-dragging { box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
-.fixed-toolbar.is-dragging * { cursor: move !important; }
-.ft-drag-handle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 28px;
-  margin: 0 6px 0 2px;
-  color: rgba(0,0,0,0.35);
-  font-size: 12px;
-  letter-spacing: -1px;
-  line-height: 1;
-  user-select: none;
-  cursor: move;
-  border-radius: 4px;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-.ft-drag-handle:hover { background: rgba(0,0,0,0.05); color: rgba(0,0,0,0.55); }
-.ft-drag-handle.active { background: rgba(64,158,255,0.15); color: #409eff; }
-
 .fixed-toolbar {
-  position: relative;
+  position: absolute;
   z-index: 50;
   display: flex;
   align-items: center;
-  gap: 1px;
-  padding: 3px 6px;
+  gap: 0;
+  padding: 2px 4px;
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(8px);
   border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 9px;
+  border-radius: 8px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
   user-select: none;
+}
+
+.toolbar-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 10px;
+  height: 24px;
+  margin: 0 1px 0 -1px;
+  color: #9a9aa2;
+  font-size: 14px;
+  line-height: 1;
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+  opacity: 0.65;
+}
+
+.toolbar-drag-handle:active {
+  cursor: grabbing;
+  opacity: 1;
 }
 
 .ft-group { position: relative; display: flex; }
@@ -295,15 +280,15 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  min-width: 26px;
-  height: 24px;
-  padding: 0 4px;
+  gap: 2px;
+  min-width: 21px;
+  height: 22px;
+  padding: 0 3px;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: #444;
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
   white-space: nowrap;
@@ -346,8 +331,8 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
   padding: 0 1px;
 }
 
-.ft-font-btn { font-size: 12px; padding: 0 5px; }
-.ft-size-preview { min-width: 26px; text-align: center; }
+.ft-font-btn { font-size: 11px; padding: 0 3px; }
+.ft-size-preview { min-width: 22px; text-align: center; }
 
 .ft-caret {
   width: 0;
@@ -360,8 +345,8 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 
 .ft-divider {
   width: 1px;
-  height: 14px;
-  margin: 0 4px;
+  height: 12px;
+  margin: 0 2px;
   background: rgba(0, 0, 0, 0.1);
   flex-shrink: 0;
 }

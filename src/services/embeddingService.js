@@ -1,21 +1,37 @@
 /**
- * 向量嵌入服务（语义检索）
- * 双模式：
- * - 优先：用户配置的 Embedding API（效果好，需联网）
- * - 兜底：本地 @huggingface/transformers + multilingual-e5-small（离线可用，WASM 推理）
- * 
- * API 调用通过主进程代理（ai:embed），apiKey 由主进程注入，不暴露给渲染层
+ * 本地向量嵌入服务（三期：语义检索）
+ * - @huggingface/transformers 渲染进程本地推理（WASM/WebGPU），无需 API Key
+ * - 模型 Xenova/multilingual-e5-small（384 维，多语言含中文），首次调用自动下载并缓存
+ * - 模型加载/下载失败时静默降级（上层检索自动回退 BM25），不阻塞主流程
  */
 let embedPipeline = null
 let loadingPromise = null
-let localLoadFailed = false
+let loadFailed = false
 
 const MODEL_ID = 'Xenova/multilingual-e5-small'
 
-// ===== 本地模型（兜底） =====
-async function getLocalPipeline() {
+const embedViaApi = async (texts) => {
+  try {
+    if (!window.electronAPI?.getEmbeddingConfig || !window.electronAPI?.embedding) return null
+    const cfg = await window.electronAPI.getEmbeddingConfig()
+    if (!cfg?.available) return null
+    const res = await window.electronAPI.embedding({
+      baseURL: cfg.baseURL,
+      model: cfg.model,
+      input: texts.map(t => String(t || '')),
+      profileId: cfg.profileId || '',
+      autoComplete: cfg.autoComplete !== false
+    })
+    if (!res?.success || !Array.isArray(res.vectors)) return null
+    return res.vectors
+  } catch {
+    return null
+  }
+}
+
+async function getPipeline() {
   if (embedPipeline) return embedPipeline
-  if (localLoadFailed) return null
+  if (loadFailed) return null
   if (loadingPromise) return loadingPromise
   loadingPromise = (async () => {
     try {
@@ -25,8 +41,8 @@ async function getLocalPipeline() {
       })
       return embedPipeline
     } catch (e) {
-      console.warn('[Embedding] 本地模型加载失败（将仅使用 API 模式或降级关键词检索）:', e?.message || e)
-      localLoadFailed = true
+      console.warn('[Embedding] 模型加载失败（语义检索降级为关键词检索）:', e?.message || e)
+      loadFailed = true
       return null
     } finally {
       loadingPromise = null
@@ -35,9 +51,12 @@ async function getLocalPipeline() {
   return loadingPromise
 }
 
-const runLocalEmbed = async (texts) => {
+const runEmbed = async (texts) => {
   if (!texts.length) return []
-  const pipe = await getLocalPipeline()
+  // 优先使用用户配置的 Embedding API；不可用/失败时自动降级本地模型。
+  const apiVectors = await embedViaApi(texts)
+  if (apiVectors && apiVectors.length === texts.length) return apiVectors
+  const pipe = await getPipeline()
   if (!pipe) return []
   // 分批推理（每批 32 条），避免大文档一次性送入模型导致内存峰值过高
   const rows = []
@@ -58,38 +77,12 @@ const runLocalEmbed = async (texts) => {
   return rows
 }
 
-// ===== API 模式（优先） =====
-async function runApiEmbed(texts) {
-  try {
-    const api = window.electronAPI?.ai?.aiEmbed || window.electronAPI?.aiEmbed
-    if (!api) return null
-    const res = await api(texts)
-    if (res && res.success && Array.isArray(res.vectors) && res.vectors.length === texts.length) {
-      return res.vectors
-    }
-    return null
-  } catch (e) {
-    console.warn('[Embedding] API 调用失败，降级本地模型:', e?.message || e)
-    return null
-  }
-}
-
-// 统一入口：先试 API，失败走本地
-const runEmbed = async (texts) => {
-  if (!texts.length) return []
-  // 先试 API
-  const apiResult = await runApiEmbed(texts)
-  if (apiResult && apiResult.length === texts.length) return apiResult
-  // 失败走本地
-  return await runLocalEmbed(texts)
-}
-
 export const embeddingService = {
-  isLocalFailed() {
-    return localLoadFailed
+  isFailed() {
+    return loadFailed
   },
 
-  // 查询向量
+  // 查询向量（E5 规范：query 前缀）
   async embedQuery(text) {
     const rows = await runEmbed([`query: ${String(text || '')}`])
     return rows[0] || null
