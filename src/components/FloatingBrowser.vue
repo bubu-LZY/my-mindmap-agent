@@ -1,5 +1,6 @@
 <template>
   <div
+    ref="browserEl"
     class="floating-browser"
     :style="{ left: pos.x + 'px', top: pos.y + 'px', width: size.w + 'px', height: size.h + 'px' }"
     @mousedown.stop
@@ -182,12 +183,13 @@ const newSiteUrl = ref('')
 const webviewRefs = {}
 const zoomFactors = {}
 const appDragOver = ref(false)
+const browserEl = ref(null)
 
 const pos = ref({ x: Math.max(20, (window.innerWidth - 720) / 2), y: 70 })
 const size = ref({ w: 720, h: 500 })
 let dragOffset = null
 let resizeStart = null
-let appDragDepth = 0
+let appDragLeaveTimer = null
 
 const activeTab = computed(() => tabs.value.find(t => t.id === activeTabId.value) || tabs.value[0] || null)
 
@@ -382,20 +384,26 @@ const isAppFileDrag = () => {
 
 const onBrowserDragEnter = (e) => {
   if (!isAppFileDrag()) return
-  appDragDepth++
+  if (appDragLeaveTimer) { clearTimeout(appDragLeaveTimer); appDragLeaveTimer = null }
   appDragOver.value = true
 }
 
 const onBrowserDragLeave = (e) => {
   if (!isAppFileDrag()) return
-  appDragDepth = Math.max(0, appDragDepth - 1)
-  if (appDragDepth === 0) appDragOver.value = false
+  const related = e.relatedTarget
+  if (related && browserEl.value && (browserEl.value === related || browserEl.value.contains(related))) return
+  if (appDragLeaveTimer) clearTimeout(appDragLeaveTimer)
+  appDragLeaveTimer = setTimeout(() => {
+    appDragLeaveTimer = null
+    appDragOver.value = false
+  }, 150)
 }
 
 const onBrowserDragOver = (e) => {
   // 只接管应用内文件树拖拽；系统文件拖拽留给 webview 原生处理（用于直接上传）
   if (isAppFileDrag()) {
     e.preventDefault()
+    if (appDragLeaveTimer) { clearTimeout(appDragLeaveTimer); appDragLeaveTimer = null }
     appDragOver.value = true
   }
 }
@@ -430,7 +438,7 @@ const bytesToBase64 = (bytes) => {
 }
 
 const onBrowserDrop = async (e) => {
-  appDragDepth = 0
+  if (appDragLeaveTimer) { clearTimeout(appDragLeaveTimer); appDragLeaveTimer = null }
   appDragOver.value = false
   if (!isAppFileDrag()) return
   e.preventDefault()
@@ -467,9 +475,23 @@ const onBrowserDrop = async (e) => {
         var dt = new DataTransfer();
         dt.items.add(file);
         var target = document.elementFromPoint(${Math.round(gx)}, ${Math.round(gy)}) || document.body;
-        var opts = { bubbles: true, cancelable: true, composed: true, dataTransfer: dt };
-        target.dispatchEvent(new DragEvent('dragover', opts));
-        target.dispatchEvent(new DragEvent('drop', opts));
+        var opts = { bubbles: true, cancelable: true, composed: true };
+        function withDT(ev) {
+          try { Object.defineProperty(ev, 'dataTransfer', { value: dt }); } catch (e) {}
+          try { Object.defineProperty(ev, 'files', { value: dt.files }); } catch (e) {}
+          return ev;
+        }
+        target.dispatchEvent(withDT(new DragEvent('dragover', opts)));
+        target.dispatchEvent(withDT(new DragEvent('drop', opts)));
+        // 兜底：若目标点没有响应合成拖拽，尝试给最近的 file input 直接塞文件
+        var input = target && target.querySelector ? target.querySelector('input[type=file]') : null;
+        if (!input && target && target.closest) {
+          var scope = target.closest('form, [role=dialog]') || document.body;
+          input = scope && scope.querySelector ? scope.querySelector('input[type=file]') : null;
+        }
+        if (input) {
+          try { input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true })); } catch (e2) {}
+        }
         return true;
       } catch (err) { return String(err && err.message || err); }
     })()`
@@ -484,6 +506,7 @@ const onBrowserDrop = async (e) => {
 }
 
 onBeforeUnmount(() => {
+  if (appDragLeaveTimer) { clearTimeout(appDragLeaveTimer); appDragLeaveTimer = null }
   for (const el of Object.values(webviewRefs)) {
     try { el?.stop?.() } catch (e) {}
   }

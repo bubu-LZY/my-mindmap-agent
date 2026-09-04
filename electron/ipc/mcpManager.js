@@ -88,14 +88,19 @@ const getStdioCwd = (server) => {
 const getStdioClient = (server) => {
   if (!server.command) throw new Error('stdio MCP 需要 command')
   if (stdioClients.has(server.id)) return stdioClients.get(server.id)
-  // shell: true 让系统 shell 解析命令路径（解决 Electron 打包后找不到 npx/node 的问题）
   const isWindows = process.platform === 'win32'
+  // 安全加固：只有明确的 .cmd/.bat 或 npm/npx/pnpm/yarn 这类 Windows 批处理包装器才走 shell，
+  // 其它命令一律 shell:false，避免用户填写的 command 被 cmd.exe 拼接执行造成命令注入。
+  const needsShell = isWindows && (
+    /\.(cmd|bat)$/i.test(server.command) ||
+    /^(npx|npm|pnpm|yarn)$/i.test(server.command.trim())
+  )
   // 安全审计：stdio 模式会在本机启动外部程序，记录 command/args 便于事后审计
   console.log(`[MCP stdio 审计] 启动外部进程: ${server.command} ${(server.args || []).join(' ')}`)
   const proc = spawn(server.command, server.args || [], {
     env: { ...process.env, ...(server.env || {}) },
     stdio: ['pipe', 'pipe', 'pipe'],
-    shell: isWindows,
+    shell: needsShell,
     cwd: getStdioCwd(server)
   })
   const client = {

@@ -49,6 +49,11 @@
       {{ nodeCount }} 个节点 · {{ linkCount }} 条连线
     </div>
 
+    <!-- 超大图降级提示 -->
+    <div v-if="truncated" class="graph-truncated">
+      节点过多，已简化渲染：仅显示前 {{ renderedCount }} 个节点（共 {{ nodeCount }} 个）
+    </div>
+
     <!-- 导出按钮 -->
     <button v-if="nodeCount > 0" class="graph-export-btn" @click="onExport">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none">
@@ -89,6 +94,8 @@ const empty = ref(true)
 const initError = ref('')
 const nodeCount = ref(0)
 const linkCount = ref(0)
+const truncated = ref(false)
+const renderedCount = ref(0)
 
 let graph = null
 let resizeObserver = null
@@ -96,6 +103,7 @@ let hoveredNode = null
 let ForceGraphModule = null
 let currentNodes = []
 let currentLinks = []
+let panCleanup = null
 
 // 关联图节点悬浮预览（点击节点后显示其上下级，不再立即切回思维导图）
 const previewNode = ref(null)
@@ -159,6 +167,13 @@ const htmlToText = (html) => {
 // 按层级着色
 const DEPTH_COLORS = ['#0a84ff', '#30b0c7', '#34c759', '#ff9500', '#af52de', '#8e8e93', '#ff3b30']
 
+// 超大图保护：超过该数量只渲染前 N 个节点，避免力导向 + 逐字绘制卡死
+const MAX_RENDER_NODES = 1500
+// 节点数超过该阈值时不再逐字绘制文字，只绘制圆点，显著降低 Canvas 重绘开销
+const TEXT_RENDER_LIMIT = 700
+// 缩放到该倍率以下时不绘制文字，避免缩小后文字相对放大造成大量 overdraw
+const TEXT_ZOOM_MIN = 0.5
+
 // 从导图实例提取节点 + 关联线
 const buildFromInstance = (mindMap) => {
   const nodes = []
@@ -174,7 +189,18 @@ const buildFromInstance = (mindMap) => {
     let uid = node.getData?.('uid') || node.uid
     if (!uid) return
     uid = String(uid)
-    const text = htmlToText(node.getData?.('text') || '') || '未命名'
+    const markdownTable = node.getData?.('markdownTable') || ''
+    const markdownCode = node.getData?.('markdownCode') || ''
+    const isTable = !!(node.getData?.('tableHtml') || markdownTable)
+    const isCode = !!markdownCode
+    let text = htmlToText(node.getData?.('text') || '') || '未命名'
+    if (isTable) {
+      const rows = String(markdownTable || '').split('\n').filter(l => /^\s*\|/.test(l))
+      const bodyRows = Math.max(0, rows.filter(l => !/^\|[\s:|-]+\|$/.test(l)).length - 1)
+      text = `📊 表格（${bodyRows} 行）`
+    } else if (isCode) {
+      text = '💻 代码块'
+    }
     const note = node.getData?.('note') || ''
     const image = node.getData?.('image')?.url || node.getData?.('image')?.src || ''
     nodes.push({
@@ -302,7 +328,7 @@ const computeTreeLayout = (nodes, links) => {
   // 从根开始分配角度区间（按子树权重瓜分），半径按深度递增
   const angle = new Map()
   const radius = new Map()
-  const RADIUS_GAP = 120 // 每层半径间距
+  const RADIUS_GAP = 88 // 每层半径间距（减小根与一级节点过远的问题，密度高时力导向会再分散）
 
   const assignAngle = (id, start, end, depth) => {
     const mid = (start + end) / 2
@@ -338,14 +364,47 @@ const computeTreeLayout = (nodes, links) => {
 const render = () => {
   if (!graph) return
   try {
-    const { nodes, links } = buildGraphData()
+    const built = buildGraphData()
+    let nodes = built.nodes
+    let links = built.links
+    const totalNodes = nodes.length
+
+    // 超大图降级：只渲染前 MAX_RENDER_NODES 个节点（深度优先，根节点在前）
+    if (nodes.length > MAX_RENDER_NODES) {
+      const kept = new Set(nodes.slice(0, MAX_RENDER_NODES).map(n => String(n.id)))
+      nodes = nodes.slice(0, MAX_RENDER_NODES)
+      links = links.filter(l => {
+        const s = String(l.source?.id ?? l.source)
+        const t = String(l.target?.id ?? l.target)
+        return kept.has(s) && kept.has(t)
+      })
+      truncated.value = true
+    } else {
+      truncated.value = false
+    }
+    renderedCount.value = nodes.length
+
     currentNodes = nodes
     currentLinks = links
     computeTreeLayout(nodes, links)
     empty.value = nodes.length === 0
-    nodeCount.value = nodes.length
+    nodeCount.value = totalNodes
     linkCount.value = links.length
     graph.graphData({ nodes, links })
+
+    // 根据节点规模动态调整力导向参数，节点越多越早冷却
+    try {
+      if (totalNodes > TEXT_RENDER_LIMIT) {
+        graph.d3AlphaDecay(0.03)
+        graph.cooldownTicks(80)
+        graph.d3Force('charge').strength(-80)
+      } else {
+        graph.d3AlphaDecay(0.02)
+        graph.cooldownTicks(120)
+        graph.d3Force('charge').strength(-120)
+      }
+    } catch (e) { /* 忽略 */ }
+
     if (nodes.length) {
       setTimeout(() => {
         try { graph.zoomToFit(400, 40) } catch (e) { /* 忽略 */ }
@@ -486,8 +545,12 @@ const initGraph = async () => {
           ctx.lineWidth = 1
           ctx.stroke()
         }
-        // 文字显示：所有节点在任何缩放级别都显示文字（缩小后文字相对放大、偏乱，可接受）
-        if (node.name) {
+        // 文字显示：缩放过低时隐藏深层节点文字，但保留前几层层级节点文字，
+        // 让用户在缩到很小时仍能定位根与主分支位置；节点过多时进一步只保留前 2 层。
+        const depth = node.depth || 0
+        const showByZoom = globalScale >= TEXT_ZOOM_MIN
+        const showTopLevel = renderedCount.value > TEXT_RENDER_LIMIT ? depth < 2 : depth < 3
+        if (node.name && (showByZoom || showTopLevel)) {
           const fontSize = 12 / globalScale
           ctx.font = `${fontSize}px "Microsoft YaHei", "PingFang SC", sans-serif`
           ctx.textAlign = 'left'
@@ -514,11 +577,53 @@ const initGraph = async () => {
       })
       .onBackgroundClick(() => { previewNode.value = null })
 
+    // 支持右键 / 中键（滚轮键）拖动平移画布，并阻止右键弹出系统菜单。
+    // force-graph 内部 d3-zoom 只放行左键；这里不侵入其内部，改为自行监听中/右键，
+    // 通过公开 API centerAt() 平移（screen 像素增量 ÷ 当前 zoom 换算成图坐标增量）。
+    const setupMultiButtonPan = () => {
+      let pan = null
+      const onDown = (e) => {
+        if (e.button !== 1 && e.button !== 2) return
+        e.preventDefault()
+        try {
+          const center = graph.centerAt()
+          const k = graph.zoom() || 1
+          pan = { startX: e.clientX, startY: e.clientY, cx: center.x, cy: center.y, k }
+        } catch (err) {
+          pan = null
+        }
+      }
+      const onMove = (e) => {
+        if (!pan) return
+        const dx = e.clientX - pan.startX
+        const dy = e.clientY - pan.startY
+        try {
+          graph.centerAt(pan.cx - dx / pan.k, pan.cy - dy / pan.k)
+        } catch (err) { /* 忽略 */ }
+      }
+      const onUp = () => { pan = null }
+      const onCtx = (e) => e.preventDefault()
+      container.addEventListener('mousedown', onDown)
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+      container.addEventListener('contextmenu', onCtx)
+      panCleanup = () => {
+        container.removeEventListener('mousedown', onDown)
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        container.removeEventListener('contextmenu', onCtx)
+      }
+    }
+    setupMultiButtonPan()
+
     // 力导向参数（默认值）
     try {
       graph.d3Force('charge').strength(-120)
       graph.d3Force('link').distance(link => (link.type === 'assoc' ? 80 : 55))
       graph.d3Force('center').strength(0.05)
+      // 大量节点时降低模拟速度和迭代次数，优先保证可交互。
+      graph.d3AlphaDecay(0.02)
+      graph.cooldownTicks(120)
     } catch (e) {
       console.warn('[GraphView] d3Force 配置跳过:', e.message)
     }
@@ -567,6 +672,8 @@ watch(() => props.mindMapData, () => {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
+  try { panCleanup?.() } catch (e) { /* 忽略 */ }
+  panCleanup = null
   try { graph?._destructor?.() } catch (e) { /* 忽略 */ }
   graph = null
   ForceGraphModule = null
@@ -725,6 +832,21 @@ onBeforeUnmount(() => {
   color: #a8abb2;
   pointer-events: none;
   z-index: 2;
+}
+.graph-truncated {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  font-size: 12px;
+  color: #8a6d1a;
+  background: rgba(255, 244, 214, 0.92);
+  border: 1px solid rgba(200, 150, 40, 0.35);
+  border-radius: 8px;
+  pointer-events: none;
+  z-index: 3;
+  white-space: nowrap;
 }
 .graph-export-btn {
   position: absolute;

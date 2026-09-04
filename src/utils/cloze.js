@@ -10,9 +10,8 @@
 let hiddenAll = true
 const nodeOverrideMap = new Map()
 let mindMapRef = null
-let clozeObserver = null
-let clozeObserverTimer = null
-let clozeRenderHandler = null
+// 每个 MindMap 实例独立的挖空监听状态：分屏/多窗口时不再互相销毁或串扰。
+const instanceStates = new WeakMap()
 
 const CLOZE_STATE_KEY = 'SIMPLE_MIND_MAP_CLOZE_STATE'
 
@@ -50,8 +49,55 @@ export const applyClozeStateFromStorage = () => {
 
 /* ==================== 初始化 / 销毁 ==================== */
 
+const getClozeState = (mindMap) => {
+  if (!mindMap) return null
+  let state = instanceStates.get(mindMap)
+  if (!state) {
+    state = {
+      observer: null,
+      observerTimer: null,
+      renderHandler: null,
+      clickHandler: null,
+      dblclickHandler: null,
+      clickContainer: null
+    }
+    instanceStates.set(mindMap, state)
+  }
+  return state
+}
+
+const disposeClozeState = (mindMap) => {
+  const state = instanceStates.get(mindMap)
+  if (!state) return
+  if (state.renderHandler && typeof mindMap.off === 'function') {
+    try {
+      mindMap.off('node_tree_render_end', state.renderHandler)
+    } catch { /* 忽略 */ }
+  }
+  if (state.observerTimer) {
+    clearTimeout(state.observerTimer)
+    state.observerTimer = null
+  }
+  if (state.observer) {
+    try { state.observer.disconnect() } catch { /* 忽略 */ }
+    state.observer = null
+  }
+  if (state.clickContainer) {
+    if (state.clickHandler) {
+      try { state.clickContainer.removeEventListener('click', state.clickHandler, true) } catch { /* 忽略 */ }
+    }
+    if (state.dblclickHandler) {
+      try { state.clickContainer.removeEventListener('dblclick', state.dblclickHandler, true) } catch { /* 忽略 */ }
+    }
+  }
+  instanceStates.delete(mindMap)
+  if (mindMapRef === mindMap) mindMapRef = null
+}
+
 export const initCloze = (mindMap) => {
-  destroyCloze()
+  if (!mindMap) return
+  disposeClozeState(mindMap)
+  getClozeState(mindMap)
   mindMapRef = mindMap
   loadClozeState()
   // 注入CSS样式，确保 .smm-cloze 在 SVG foreignObject 中正确渲染
@@ -69,69 +115,43 @@ export const initCloze = (mindMap) => {
     `)
   }
   // 监听渲染完成事件，在每次渲染后重新应用样式（保存引用，销毁时解绑防止重复注册）
+  const state = getClozeState(mindMap)
   if (typeof mindMap.on === 'function') {
-    clozeRenderHandler = () => {
+    state.renderHandler = () => {
       setTimeout(() => applyClozeStyles(), 50)
       setTimeout(() => applyClozeStyles(), 200)
     }
-    mindMap.on('node_tree_render_end', clozeRenderHandler)
+    mindMap.on('node_tree_render_end', state.renderHandler)
   }
-  startClozeObserver()
+  startClozeObserver(mindMap)
   // initCloze 可能被 AI 挖空等功能重复调用，内部 destroyCloze 会解绑点击监听，这里必须重新注册
   setupClozeClickHandler(mindMap)
 }
 
-export const destroyCloze = () => {
-  if (clozeRenderHandler && mindMapRef && typeof mindMapRef.off === 'function') {
-    try {
-      mindMapRef.off('node_tree_render_end', clozeRenderHandler)
-    } catch (e) {}
-  }
-  clozeRenderHandler = null
-  if (clozeObserverTimer) {
-    clearTimeout(clozeObserverTimer)
-    clozeObserverTimer = null
-  }
-  if (clozeObserver) {
-    try {
-      clozeObserver.disconnect()
-    } catch (e) {}
-    clozeObserver = null
-  }
-  if (clozeClickContainer) {
-    if (clozeClickHandler) {
-      try {
-        clozeClickContainer.removeEventListener('click', clozeClickHandler, true)
-      } catch (e) {}
-    }
-    if (clozeDblclickHandler) {
-      try {
-        clozeClickContainer.removeEventListener('dblclick', clozeDblclickHandler, true)
-      } catch (e) {}
-    }
-  }
-  clozeClickHandler = null
-  clozeDblclickHandler = null
-  clozeClickContainer = null
+export const destroyCloze = (mindMap) => {
+  const target = mindMap || mindMapRef
+  if (!target) return
+  disposeClozeState(target)
 }
 
-const startClozeObserver = (retries = 20) => {
-  if (clozeObserver) return
-  if (!mindMapRef) return
+const startClozeObserver = (mindMap, retries = 20) => {
+  const state = getClozeState(mindMap)
+  if (!state || state.observer) return
+  if (!mindMap) return
 
   // 尝试获取思维导图容器
-  const container = mindMapRef.el || document.querySelector('.mind-map-container')
+  const container = mindMap.el || document.querySelector('.mind-map-container')
   if (!container) {
     if (retries > 0) {
-      setTimeout(() => startClozeObserver(retries - 1), 500)
+      setTimeout(() => startClozeObserver(mindMap, retries - 1), 500)
     }
     return
   }
-  clozeObserver = new MutationObserver(() => {
-    if (clozeObserverTimer) clearTimeout(clozeObserverTimer)
-    clozeObserverTimer = setTimeout(applyClozeStyles, 100)
+  state.observer = new MutationObserver(() => {
+    if (state.observerTimer) clearTimeout(state.observerTimer)
+    state.observerTimer = setTimeout(applyClozeStyles, 100)
   })
-  clozeObserver.observe(container, { childList: true, subtree: true })
+  state.observer.observe(container, { childList: true, subtree: true })
 }
 
 /* ==================== 状态查询 ==================== */
@@ -374,30 +394,29 @@ const findNodeByUid = (root, uid) => {
   return null
 }
 
-let clozeClickHandler = null
-let clozeDblclickHandler = null
-let clozeClickContainer = null
 // 双击去抖：双击的第二次单击不再切换，净效果为切换一次
 const clozeLastToggleTs = new Map()
 
 export const setupClozeClickHandler = (mindMap) => {
+  const state = getClozeState(mindMap)
+  if (!state) return
   const container = mindMap.el || document.querySelector('.mind-map-container')
   if (!container) {
     console.warn('[cloze] setupClozeClickHandler: container not found')
     return
   }
   // 容器变化（编辑器重建）时先解绑旧监听，避免失效或重复触发
-  if (clozeClickHandler && clozeClickContainer && clozeClickContainer !== container) {
+  if (state.clickHandler && state.clickContainer && state.clickContainer !== container) {
     try {
-      clozeClickContainer.removeEventListener('click', clozeClickHandler, true)
+      state.clickContainer.removeEventListener('click', state.clickHandler, true)
     } catch (e) {}
     try {
-      clozeClickContainer.removeEventListener('dblclick', clozeDblclickHandler, true)
+      state.clickContainer.removeEventListener('dblclick', state.dblclickHandler, true)
     } catch (e) {}
-    clozeClickHandler = null
-    clozeDblclickHandler = null
+    state.clickHandler = null
+    state.dblclickHandler = null
   }
-  if (clozeClickHandler) return
+  if (state.clickHandler) return
 
   const findClozeTarget = (e) => {
     const t = e.target
@@ -406,14 +425,14 @@ export const setupClozeClickHandler = (mindMap) => {
   }
 
   // 双击挖空文本：阻止进入编辑模式（切换显隐由单击完成）
-  clozeDblclickHandler = (e) => {
+  state.dblclickHandler = (e) => {
     const clozeEl = findClozeTarget(e)
     if (!clozeEl) return
     e.preventDefault()
     e.stopPropagation()
   }
 
-  clozeClickHandler = (e) => {
+  state.clickHandler = (e) => {
     // 仅当点击发生在真实可见的编辑框内部时忽略（编辑态挖空由 Ctrl+H 处理）
     const rt = mindMap.richText
     if (rt && rt.textEditNode && rt.textEditNode.contains &&
@@ -477,9 +496,9 @@ export const setupClozeClickHandler = (mindMap) => {
       console.warn('[cloze] click handler: node not found for uid', uid)
     }
   }
-  container.addEventListener('click', clozeClickHandler, true)
-  container.addEventListener('dblclick', clozeDblclickHandler, true)
-  clozeClickContainer = container
+  container.addEventListener('click', state.clickHandler, true)
+  container.addEventListener('dblclick', state.dblclickHandler, true)
+  state.clickContainer = container
   console.log('[cloze] click handler registered on container')
 }
 

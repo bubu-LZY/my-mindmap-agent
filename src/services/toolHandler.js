@@ -304,7 +304,7 @@ const toolCatalog = [
   { name: 'convert_doc_to_mindmap', category: 'Mindmap', desc: 'Read a local document (PDF/DOCX/PPTX/XLSX/XLS/CSV/MD/TXT) and generate a new .smm mindmap file without overwriting the current map; use when user explicitly asks to convert a document to a mindmap' },
   { name: 'list_references', category: 'Refs', desc: 'Reference list & broken-link check: list @file/#node references in the current map (or all files) and verify the referenced file/node still exists' },
   { name: 'scheduled_task', category: 'Scheduler', desc: 'AI scheduled tasks: create / list / update / delete (action param)' },
-  { name: 'run_code', category: 'AI', desc: 'Execute JavaScript code in a sandbox with full tool access. Use for batch operations, complex logic, or combining multiple tool calls into one script. Tools available via await tools.toolName(args). Requires user confirmation before execution.' },
+  { name: 'run_code', category: 'AI', desc: 'Execute JavaScript code in an isolated Web Worker with a minimal tool-calling API. Use for batch operations or complex logic. Tools available via await tools.toolName(args). Requires user confirmation before execution.' },
 ]
 
 
@@ -434,69 +434,28 @@ export const CORE_TOOL_NAMES = [
   // 导图读取
   'get_mindmap_content',
   'get_mindmap_info',
-  // 节点基础操作
-  'update_node_text',
-  'select_node',
-  'focus_node',
-  'search_nodes',
-  'query_node_styles',
+  // 节点基础操作：优先用 query_nodes + batch_node_actions 覆盖大部分查询与批量修改
+  'query_nodes',
   'batch_node_actions',
-  'delete_node',
-  'insert_parent_node',
-  'batch_move_nodes',
-  'merge_nodes',
-  'outer_frame',
-  'rename_mindmap_file',
-  'delete_local_file',
+  'update_node_text',
+  'focus_node',
+  'expand_node',
+  // 文件与目录
   'list_directory',
-  'list_mcp_servers',
-  'list_mcp_tools',
-  'mcp_call_tool',
-  'list_custom_tools',
-  'call_custom_tool',
-  'list_skills',
-  'get_skill',
-  'invoke_skill',
-  'create_skill',
-  'update_skill',
-  'delete_skill',
-  // 文件
-  'save_mindmap',
   'read_local_file',
   'retrieve_local_file',
   'find_local_file',
-  'save_text_file',
-  // 搜索
-  'search_knowledge_base',
-  'read_node_image',
-  // 挖空学习（高频，免去工具发现两轮往返）
+  'save_mindmap',
+  // MCP / Skills 发现入口
+  'list_mcp_servers',
+  'list_mcp_tools',
+  'mcp_call_tool',
+  'list_skills',
+  'invoke_skill',
+  // 挖空显隐：保留少量高频无副作用/低风险工具，其它学习能力按需激活
   'clear_cloze',
   'toggle_cloze_visibility',
   'list_cloze_nodes',
-  'ai_cloze',
-  'mechanical_cloze',
-  'ai_cloze_full_map',
-  'ai_recite_rewrite',
-  'ai_quiz_append',
-  'add_to_review',
-  'get_today_review_status',
-  'get_review_schedule',
-  'complete_review_task',
-  'audit_mindmap',
-  'refactor_mindmap',
-  'reorganize_mindmap',
-  'research_to_mindmap',
-  'search_web',
-  'read_webpage',
-  // 生成/扩展（高频AI能力）
-  'generate_mindmap',
-  'ai_continue_children',
-  'parallel_ai_workers',
-  'run_code',
-  // 高频批处理（避免逐节点 select_node 循环的关键工具）
-  'add_child_nodes',
-  'expand_node',
-  'find_replace_text'
 ]
 
 // 工具名称排序函数（保证工具定义序列化字节一致，最大化前缀缓存命中）
@@ -1332,7 +1291,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'query_nodes',
-      description: 'Advanced node query with rich filters (AND logic). Replaces multiple search_nodes + query_node_styles calls. Filters: textContains/textNotContains/textRegex/textStartsWith/hasCloze/clozeContains/hasStyle/hasNote/isLeaf/minDepth/maxDepth. Returns full node info: uid, plainText, path, clozeWords, styles, depth. Use for "find all nodes where X and do Y" patterns.',
+      description: 'Advanced node query with rich filters (AND logic). Replaces multiple search_nodes + query_node_styles calls. Filters: textContains/textNotContains/textRegex/textStartsWith/hasCloze/clozeContains/hasStyle/hasNote/isLeaf/minDepth/maxDepth. Returns uid, plainText, path, parentUid, parentText, childrenUids, hasChildren, siblingTexts, clozeWords, styles, depth. Use for "find all nodes where X and do Y" patterns.',
       parameters: {
         type: 'object',
         properties: {
@@ -1361,7 +1320,7 @@ export const aiTools = [
           limit: { type: 'number', description: 'Max results to return (default 200, max 500)' },
           returnFields: {
             type: 'array',
-            items: { type: 'string', enum: ['uid', 'plainText', 'path', 'clozeWords', 'styles', 'depth', 'isLeaf', 'hasNote', 'rawHtml'] },
+            items: { type: 'string', enum: ['uid', 'plainText', 'path', 'parentUid', 'parentText', 'childrenUids', 'hasChildren', 'siblingTexts', 'clozeWords', 'styles', 'depth', 'isLeaf', 'hasNote', 'rawHtml'] },
             description: 'Only return these fields (default all except rawHtml). rawHtml includes the node HTML text.'
           }
         }
@@ -1431,11 +1390,11 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'switch_view',
-      description: 'Switch view mode',
+      description: 'Switch view mode (outline/mindmap/review/graph/markdown)',
       parameters: {
         type: 'object',
         properties: {
-          mode: { type: 'string', enum: ['outline', 'mindmap', 'review'], description: 'outline=outline mode, mindmap=mindmap mode, review=review mode' }
+          mode: { type: 'string', enum: ['outline', 'mindmap', 'review', 'graph', 'markdown'], description: 'outline=outline mode, mindmap=mindmap mode, review=review mode, graph=graph mode, markdown=Markdown mode' }
         },
         required: ['mode']
       }
@@ -2467,7 +2426,7 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'run_code',
-      description: 'Execute JavaScript code in a sandbox with full access to all tools. Use for batch operations, complex multi-step logic, data processing, or when multiple tool calls can be efficiently combined into one script. Tools are available via await tools.toolName(args). The code has access to: tools (all registered tools), mindMap (current mindmap instance), console (log output), context (execution context). Return a value to include it in the result. Requires user confirmation before execution.',
+      description: 'Execute JavaScript code in an isolated Web Worker with a minimal tool-calling API. Use for batch operations, complex multi-step logic, or data processing. Tools are available via await tools.toolName(args). The code has access to: tools (allowlisted tool-calling proxy), mindMap (serializable snapshot), console, context. Return a value to include it in the result. Requires user confirmation before execution.',
       parameters: {
         type: 'object',
         properties: {
@@ -3658,11 +3617,19 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
   let args = normalizeToolArgs(name, parseToolCallArgs(toolCall.function.arguments))
 
   // 调用方传入的实例可能是一次性快照（启动时容器隐藏导致快照为 null 且永不更新）。
-  // 兜底从全局注册表（MindMapEditor 创建实例后写入）惰性获取，保证导图类工具始终可用
+  // 兜底从全局注册表（MindMapEditor 创建实例后写入）惰性获取，保证导图类工具始终可用。
+  // 但如果调用方已经声明了明确的目标文件路径，则不能用“当前前台导图”兜底。
   if (!mindMap) {
     try {
       const store = useMindMapStore()
-      if (store.mindMapInstance) mindMap = store.mindMapInstance
+      const taskPath = typeof extraHandlers.currentFilePath === 'function'
+        ? extraHandlers.currentFilePath()
+        : (extraHandlers.currentFilePath || '')
+      const norm = (s) => String(s || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '')
+      const currentPath = store.currentFilePath || ''
+      if (!taskPath || norm(taskPath) === norm(currentPath)) {
+        mindMap = store.mindMapInstance || null
+      }
     } catch (e) { /* pinia 未就绪时保持 null，由各工具自行报错 */ }
   }
 
@@ -3931,9 +3898,17 @@ ${mindMapTypePrompt(mapType, 'organize')}
         const treeData = mindMap.getData()
         const saveData = JSON.stringify(treeData, null, 2)
         // 当前打开的是 .smm 文件时，优先原地覆盖保存，避免「每次修改都另存一个导图」
-        const curPath = typeof extraHandlers.currentFilePath === 'function'
+        let curPath = typeof extraHandlers.currentFilePath === 'function'
           ? extraHandlers.currentFilePath()
           : (extraHandlers.currentFilePath || '')
+        // 后台任务/路径优先场景：即使 extraHandlers.currentFilePath 为空，
+        // 也要使用本轮任务绑定的 fileId，避免错误落盘到默认目录。
+        if (!curPath) {
+          try {
+            const taskStore = useMindMapStore()
+            curPath = taskStore.activeTaskFileId || taskStore.currentFilePath || ''
+          } catch { /* store 未就绪时继续走默认目录 */ }
+        }
         // 用户明确要另存为新文件时，不再原地覆盖当前文件。
         const wantsNewFile = !!(args.fileName || args.save_dir || args.new_file)
         if (!wantsNewFile && curPath && /\.smm$/i.test(curPath) && window.electronAPI?.saveFile) {
@@ -3945,30 +3920,29 @@ ${mindMapTypePrompt(mapType, 'organize')}
           }
         }
         const rawRootText = treeData?.data?.text || ''
-        const rootText = args.fileName || rawRootText.replace(/<[^>]+>/g, '').trim() || '思维导图'
+        let rootText = String(args.fileName || '').trim()
+        if (!rootText) {
+          rootText = rawRootText.replace(/<[^>]+>/g, '').trim() || '思维导图'
+        }
         const safeName = rootText.replace(/[<>:"/\\|?*]/g, '_').slice(0, 50)
-        const fileName = `${safeName}.smm`
+        // 避免模型传了“文件名.smm”时再次追加 .smm，形成 .smm.smm。
+        const fileName = /\.smm$/i.test(safeName) ? safeName : `${safeName}.smm`
         if (window.electronAPI?.saveFile) {
-          const targets = []
           if (args.save_dir) {
             const dir = String(args.save_dir).replace(/[\\/]+$/, '')
-            targets.push(dir + (/\\/.test(dir) ? '\\' : '/') + fileName)
-          }
-          targets.push(fileName) // 默认保存目录
-          const errors = []
-          for (const t of targets) {
-            try {
-              // overwrite 覆盖同名文件，避免产生「文件名 (1).smm」的连环副本
-              const result = await window.electronAPI.saveFile(t, saveData, { overwrite: true })
-              if (result && result.success) {
-                return { success: true, message: `已保存：${result.filePath}`, filePath: result.filePath, fileName }
-              }
-              if (result && result.error) errors.push(result.error)
-            } catch (e) {
-              errors.push(e.message)
+            const sep = dir.includes('\\') ? '\\' : '/'
+            const targetPath = dir + sep + fileName
+            const result = await window.electronAPI.saveFile(targetPath, saveData, { overwrite: true })
+            if (result && result.success) {
+              return { success: true, message: `已保存：${result.filePath}`, filePath: result.filePath, fileName }
             }
+            return { success: false, message: `保存失败：${result?.error || '无法写入指定目录'}` }
           }
-          return { success: false, message: `保存失败：${errors.join('；') || '无法访问文件系统'}` }
+          const result = await window.electronAPI.saveFile(fileName, saveData, { overwrite: true })
+          if (result && result.success) {
+            return { success: true, message: `已保存：${result.filePath}`, filePath: result.filePath, fileName }
+          }
+          return { success: false, message: `保存失败：${result?.error || '无法访问文件系统'}` }
         }
         return { success: false, message: '保存失败：无法访问文件系统（未运行在 Electron 环境）' }
       } catch (e) {
@@ -4840,6 +4814,22 @@ ${mindMapTypePrompt(mapType, 'organize')}
             }
             entry.path = parts.join(' > ')
           }
+          if (returnFields.has('parentUid')) {
+            entry.parentUid = n.parent?.getData?.('uid') || n.parent?.uid || ''
+          }
+          if (returnFields.has('parentText')) {
+            entry.parentText = n.parent ? nodePlainText(n.parent.getData?.('text') || '').slice(0, 120) : ''
+          }
+          if (returnFields.has('childrenUids')) {
+            entry.childrenUids = (children || []).map(c => c.getData?.('uid') || c.uid).filter(Boolean)
+          }
+          if (returnFields.has('hasChildren')) {
+            entry.hasChildren = children.length > 0
+          }
+          if (returnFields.has('siblingTexts')) {
+            const siblings = (n.parent?.children || []).filter(s => s && (s.getData?.('uid') || s.uid) !== uid)
+            entry.siblingTexts = siblings.map(s => nodePlainText(s.getData?.('text') || '').slice(0, 80)).filter(Boolean)
+          }
           if (returnFields.has('clozeWords') && clozeWords.length) entry.clozeWords = clozeWords
           if (returnFields.has('depth')) entry.depth = depth
           if (returnFields.has('isLeaf')) entry.isLeaf = children.length === 0
@@ -4911,7 +4901,8 @@ ${mindMapTypePrompt(mapType, 'organize')}
       try {
         if (extraHandlers.switchView) {
           extraHandlers.switchView(args.mode)
-          return { success: true, message: `已切换到${args.mode === 'outline' ? '大纲' : args.mode === 'review' ? '复习' : '思维导图'}模式` }
+          const modeLabel = args.mode === 'outline' ? '大纲' : args.mode === 'review' ? '复习' : args.mode === 'graph' ? '关联图' : args.mode === 'markdown' ? 'Markdown' : '思维导图'
+          return { success: true, message: `已切换到${modeLabel}模式` }
         }
         return { success: false, message: '视图切换功能不可用' }
       } catch (e) {
@@ -6621,6 +6612,11 @@ ${block}`
           const active = mindMap.renderer.activeNodeList || []
           if (!active.length) return { success: false, message: '请提供 uid 或 keyword' }
           node = active[0]
+        }
+        // 若当前在大纲/关联图/Markdown 视图，先切回导图视图，保证定位结果真正可见。
+        if (typeof extraHandlers.switchView === 'function') {
+          extraHandlers.switchView('mindmap')
+          await new Promise((resolve) => setTimeout(resolve, 0))
         }
         if (typeof mindMap.renderer.moveNodeToCenter === 'function') {
           mindMap.renderer.moveNodeToCenter(node)

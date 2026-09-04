@@ -272,6 +272,7 @@ export const searchService = {
 
   // 文档向量索引（模型就绪后异步计算；失败静默，BM25 检索不受影响）
   async indexDocumentVectors(filePath, fileName, mtime, chunks) {
+    await waitForVectorSlot()
     try {
       const api = window.electronAPI?.vector
       if (!api || typeof api.indexDocument !== 'function') return false
@@ -306,6 +307,27 @@ export const searchService = {
       return indexed > 0
     } catch {
       return false
+    } finally {
+      releaseVectorSlot()
     }
   }
+}
+
+// 向量索引并发门：embedding 在渲染进程执行，多个大文档同时索引会卡住 UI。
+// 这里限制同时最多 2 个文档在算向量，其余排队，避免主线程被模型推理占满。
+let vectorIndexActive = 0
+const vectorIndexWaiters = []
+const VECTOR_INDEX_MAX_CONCURRENT = 2
+
+const waitForVectorSlot = async () => {
+  if (vectorIndexActive >= VECTOR_INDEX_MAX_CONCURRENT) {
+    await new Promise((resolve) => vectorIndexWaiters.push(resolve))
+  }
+  vectorIndexActive++
+}
+
+const releaseVectorSlot = () => {
+  vectorIndexActive = Math.max(0, vectorIndexActive - 1)
+  const next = vectorIndexWaiters.shift()
+  if (next) next()
 }

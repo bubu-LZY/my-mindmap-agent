@@ -3148,7 +3148,8 @@ onBeforeUnmount(() => {
   top: 24px;
   width: 150px;
   min-width: 150px;
-  height: fit-content;
+  max-height: calc(70vh - 48px);
+  overflow-y: auto;
   padding: 12px 0;
   margin: 24px 0 0 24px;
   background: transparent;

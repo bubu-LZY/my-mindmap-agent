@@ -1,0 +1,22 @@
+{
+  "id": "example_timeout",
+  "name": "超时测试工具",
+  "description": "测试自定义工具的超时保护：按 sleep_ms 参数睡眠指定毫秒数后返回。设置 sleep_ms 大于本工具 timeoutMs（3000ms）时会被主进程判为超时并返回“执行超时”。",
+  "category": "Custom",
+  "enabled": true,
+  "autoInvoke": false,
+  "readOnly": true,
+  "risk": "low",
+  "timeoutMs": 3000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "sleep_ms": {
+        "type": "number",
+        "description": "要睡眠的毫秒数。例如 500 会正常返回，10000 会触发超时。"
+      }
+    },
+    "required": ["sleep_ms"]
+  },
+  "resultHint": "返回是否在超时前完成。"
+}

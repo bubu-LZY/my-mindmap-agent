@@ -129,6 +129,25 @@ const executeTool = async (id, args = {}, meta = {}) => {
   }
   const execute = mod.execute || mod.default?.execute || mod.default
   if (typeof execute !== 'function') throw new Error('tool.js 必须导出 execute 函数')
+  const allowedRoots = [
+    app.getPath('userData'),
+    app.getPath('temp'),
+    app.getPath('documents'),
+    app.getPath('downloads'),
+    app.getPath('desktop'),
+    String(meta.currentFilePath || '') ? path.dirname(String(meta.currentFilePath)) : ''
+  ].filter(Boolean)
+  const assertAllowedFile = (filePath) => {
+    if (!filePath || typeof filePath !== 'string') throw new Error('filePath 无效')
+    const target = path.resolve(filePath)
+    const inside = allowedRoots.some((root) => {
+      const rel = path.relative(path.resolve(root), target)
+      return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+    })
+    if (!inside) {
+      throw new Error('自定义工具只能访问用户数据目录、临时目录、常用文档目录或当前文件所在目录')
+    }
+  }
   const context = {
     app: {
       version: app.getVersion(),
@@ -138,16 +157,17 @@ const executeTool = async (id, args = {}, meta = {}) => {
       currentFilePath: String(meta.currentFilePath || ''),
       currentFileName: String(meta.currentFileName || ''),
       writeText: async (filePath, content) => {
-        if (!filePath || typeof filePath !== 'string') throw new Error('filePath 无效')
+        assertAllowedFile(filePath)
         await fs.promises.writeFile(filePath, String(content ?? ''), 'utf8')
         return { success: true, filePath }
       },
       readText: async (filePath) => {
-        if (!filePath || typeof filePath !== 'string') throw new Error('filePath 无效')
+        assertAllowedFile(filePath)
         return await fs.promises.readFile(filePath, 'utf8')
       },
       exists: async (filePath) => {
         try {
+          assertAllowedFile(filePath)
           await fs.promises.access(filePath)
           return true
         } catch {
@@ -176,10 +196,23 @@ const executeTool = async (id, args = {}, meta = {}) => {
       fetch: globalThis.fetch
     }
   }
-  const result = await execute(args || {}, context)
-  if (typeof result === 'string') return { success: true, message: result }
-  if (result && typeof result === 'object') return result
-  return { success: true, message: '工具执行完成', data: result }
+  // 超时保护：避免异常/挂起的自定义工具长期占用主进程。
+  // 注意：对同步死循环无效，只能隔离异步永不 resolve 的情况；真正的同步阻塞仍需进程隔离。
+  const timeoutMs = Math.min(Math.max(Number(item.manifest.timeoutMs) || 30000, 1000), 120000)
+  let timer
+  const timeoutGuard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`自定义工具执行超时（${timeoutMs}ms）`)), timeoutMs)
+  })
+  try {
+    const result = await Promise.race([execute(args || {}, context), timeoutGuard])
+    if (typeof result === 'string') return { success: true, message: result }
+    if (result && typeof result === 'object') return result
+    return { success: true, message: '工具执行完成', data: result }
+  } catch (e) {
+    return { success: false, message: e?.message || String(e) }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 const getSpecPath = () => {

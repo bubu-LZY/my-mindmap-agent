@@ -1,14 +1,14 @@
 /**
  * 本地向量嵌入服务（三期：语义检索）
- * - @huggingface/transformers 渲染进程本地推理（WASM/WebGPU），无需 API Key
- * - 模型 Xenova/multilingual-e5-small（384 维，多语言含中文），首次调用自动下载并缓存
- * - 模型加载/下载失败时静默降级（上层检索自动回退 BM25），不阻塞主流程
+ * - 优先使用用户配置的 Embedding API
+ * - API 不可用时降级到 Web Worker 中的本地 multilingual-e5-small
+ * - 本地模型加载/推理都不再占用主线程；失败时静默降级 BM25
  */
-let embedPipeline = null
-let loadingPromise = null
-let loadFailed = false
 
-const MODEL_ID = 'Xenova/multilingual-e5-small'
+let worker = null
+let workerFailed = false
+let requestSeq = 0
+const pendingRequests = new Map()
 
 const embedViaApi = async (texts) => {
   try {
@@ -29,57 +29,54 @@ const embedViaApi = async (texts) => {
   }
 }
 
-async function getPipeline() {
-  if (embedPipeline) return embedPipeline
-  if (loadFailed) return null
-  if (loadingPromise) return loadingPromise
-  loadingPromise = (async () => {
-    try {
-      const { pipeline } = await import('@huggingface/transformers')
-      embedPipeline = await pipeline('feature-extraction', MODEL_ID, {
-        dtype: 'q8'
-      })
-      return embedPipeline
-    } catch (e) {
-      console.warn('[Embedding] 模型加载失败（语义检索降级为关键词检索）:', e?.message || e)
-      loadFailed = true
-      return null
-    } finally {
-      loadingPromise = null
+const getWorker = () => {
+  if (workerFailed) return null
+  if (worker) return worker
+  try {
+    worker = new Worker(new URL('./embedding.worker.js', import.meta.url), { type: 'module' })
+    worker.onmessage = (event) => {
+      const { id, vectors, error } = event.data || {}
+      const pending = pendingRequests.get(id)
+      if (!pending) return
+      pendingRequests.delete(id)
+      if (error) pending.reject(new Error(error))
+      else pending.resolve(vectors || [])
     }
-  })()
-  return loadingPromise
+    worker.onerror = () => {
+      workerFailed = true
+      for (const pending of pendingRequests.values()) {
+        pending.reject(new Error('Embedding Worker 执行失败'))
+      }
+      pendingRequests.clear()
+    }
+  } catch {
+    workerFailed = true
+    return null
+  }
+  return worker
+}
+
+const embedLocal = (texts) => {
+  const currentWorker = getWorker()
+  if (!currentWorker) return Promise.resolve([])
+  const id = ++requestSeq
+  return new Promise((resolve, reject) => {
+    pendingRequests.set(id, { resolve, reject })
+    currentWorker.postMessage({ id, texts })
+  })
 }
 
 const runEmbed = async (texts) => {
   if (!texts.length) return []
-  // 优先使用用户配置的 Embedding API；不可用/失败时自动降级本地模型。
+  // 优先使用用户配置的 Embedding API；不可用/失败时自动降级本地 Worker。
   const apiVectors = await embedViaApi(texts)
   if (apiVectors && apiVectors.length === texts.length) return apiVectors
-  const pipe = await getPipeline()
-  if (!pipe) return []
-  // 分批推理（每批 32 条），避免大文档一次性送入模型导致内存峰值过高
-  const rows = []
-  const BATCH = 32
-  for (let i = 0; i < texts.length; i += BATCH) {
-    const batch = texts.slice(i, i + BATCH)
-    const out = await pipe(batch, { pooling: 'mean', normalize: true })
-    const data = out.data || out
-    const dim = out.dims?.[out.dims.length - 1] || data.length
-    if (batch.length === 1) {
-      rows.push(Array.from(data))
-    } else {
-      for (let j = 0; j < batch.length; j++) {
-        rows.push(Array.from(data.slice(j * dim, (j + 1) * dim)))
-      }
-    }
-  }
-  return rows
+  return await embedLocal(texts)
 }
 
 export const embeddingService = {
   isFailed() {
-    return loadFailed
+    return workerFailed
   },
 
   // 查询向量（E5 规范：query 前缀）

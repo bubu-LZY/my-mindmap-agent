@@ -355,7 +355,6 @@
       class="plan-float"
       @mouseenter="planHover = true"
       @mouseleave="planHover = false"
-      @click="planHover = !planHover"
     >
       <div class="plan-float-capsule">
         <span class="plan-float-icon">☑</span>
@@ -1007,6 +1006,7 @@ import { smartClozeNodes, smartClozeFullMap } from '../utils/aiCloze'
 import { classifyMindMap, mindMapTypePrompt } from '../utils/mindMapType'
 import { parseDocument } from '../services/docParseService'
 import { ConcurrencyLimiter } from '../utils/concurrencyLimiter'
+import { ensureBackgroundMindMap, extractFilePathFromText, normalizeFileId } from '../services/backgroundMindMapService'
 import {
   createConversation,
   loadConversations,
@@ -1105,10 +1105,11 @@ const activePlan = computed(() => {
   return null
 })
 // 后台任务运行状态：Set<source>（多通道并行，各自独立；不影响主界面发送按钮）
-const backgroundRunning = ref(new Set())
+// 使用 reactive(new Set()) 保证 .add/.delete 能触发模板更新。
+const backgroundRunning = reactive(new Set())
 const backgroundSourceLabel = computed(() => {
   const map = { feishu: '飞书', wechat: '微信', task: '定时任务', agent: '外部 Agent' }
-  const list = [...backgroundRunning.value].map(s => map[s] || s)
+  const list = [...backgroundRunning].map(s => map[s] || s)
   return list.join('、') || '外部 Agent'
 })
 // 信任模式：开启后所有危险操作跳过弹窗确认，直接执行
@@ -1118,11 +1119,13 @@ const toggleTrustMode = () => {
   setTrustMode(trustMode.value)
   ElMessage.info(trustMode.value ? '信任模式已开启：所有操作将直接执行，不再弹窗确认' : '信任模式已关闭：危险操作将恢复确认')
 }
-// 全局AI锁：标记是否有AI调用在运行（前台或后台），用于防止并发
+// 全局AI锁：标记是否有AI调用在运行（前台或后台），用于防止并发。
+// 与 runSeq 解耦：runSeq 用于运行代际，aiLockSeq 只服务于这把锁。
 let aiLockToken = 0
+let aiLockSeq = 0
 const acquireAILock = (source) => {
   if (aiLockToken !== 0) return 0 // 已被占用
-  aiLockToken = ++runSeq
+  aiLockToken = ++aiLockSeq
   return aiLockToken
 }
 const releaseAILock = (token) => {
@@ -1414,25 +1417,38 @@ const aiUndoSnapshots = new Map()
 // 快照体积较大，内存优先：只保留最近 3 轮 AI 操作的撤销快照，更早的自动淘汰
 const AI_UNDO_SNAPSHOT_MAX = 3
 
-const captureMindMapSnapshot = () => {
+const captureMindMapSnapshot = (mindMap = props.mindMap, fileId = props.currentFilePath) => {
   try {
-    const snapshot = props.mindMap?.getData()
-    return snapshot && Object.keys(snapshot).length ? snapshot : null
+    const data = mindMap?.getData()
+    if (!data || !Object.keys(data).length) return null
+    return {
+      data,
+      fileId: fileId || ''
+    }
   } catch { return null }
 }
 
 const undoAiTransaction = async (msg) => {
   if (!msg) return
-  const mindMap = props.mindMap
   const snapshot = aiUndoSnapshots.get(msg.id)
   aiUndoSnapshots.delete(msg.id)
   msg.undoSteps = 0
-  if (!mindMap) {
-    ElMessage.warning('思维导图实例未初始化，无法撤销')
-    return
-  }
   if (!snapshot) {
     ElMessage.info('没有可撤销的 AI 操作（快照已失效或被后续操作覆盖）')
+    return
+  }
+  // 优先找回任务发起时绑定的文件实例，避免用户切换文件后撤销落到当前画布。
+  const normFileId = String(snapshot.fileId || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '')
+  let mindMap = null
+  try {
+    const store = useMindMapStore()
+    if (normFileId && typeof store.getInstance === 'function') {
+      mindMap = store.getInstance(normFileId)
+    }
+  } catch { /* store 未就绪时使用当前实例 */ }
+  if (!mindMap) mindMap = props.mindMap
+  if (!mindMap) {
+    ElMessage.warning('目标思维导图实例未初始化，无法撤销')
     return
   }
   // AI 工具大多走 setData 更新画布，会清空命令历史栈，因此不能用命令栈步数回退；
@@ -1442,16 +1458,16 @@ const undoAiTransaction = async (msg) => {
   // 再手动 addHistory 保留命令栈，撤销后仍可 Ctrl+Z 回到撤销前。
   try {
     if (mindMap.renderer && typeof mindMap.renderer.setData === 'function' && typeof mindMap.reRender === 'function') {
-      mindMap.renderer.setData(snapshot)
+      mindMap.renderer.setData(snapshot.data)
       // 撤销后调度完全重绘（短延迟防抖），避免快速连续撤销时渲染叠加
       scheduleReRender('reRender', 100)
       if (mindMap.command && typeof mindMap.command.addHistory === 'function') {
         mindMap.command.addHistory()
       }
     } else if (typeof mindMap.updateData === 'function') {
-      mindMap.updateData(snapshot)
+      mindMap.updateData(snapshot.data)
     } else {
-      mindMap.setData(snapshot)
+      mindMap.setData(snapshot.data)
     }
   } catch (e) {
     console.error('撤销 AI 操作失败:', e)
@@ -2591,7 +2607,7 @@ const generateSkillFromConversation = async () => {
 // ========== 对话上下文增量摘要压缩 ==========
 
 // 精简英文系统提示词：只保留核心动作规则；工具发现走 activate_tools（按需返回目录与参数 schema）
-const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/review. Discover inactive tools via activate_tools.
+const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/graph/markdown/review. Discover inactive tools via activate_tools.
 
 ## ROUTING (match the user's DOMAIN before acting — never default to local-file search)
 - 飞书云文档/云盘/云空间/飞书文件/飞书文档 → cloud storage, NOT local files. Call activate_tools(keyword="feishu"), then feishu_list_files. Do NOT use find_local_file / list_directory / search_knowledge_base for Feishu cloud items.
@@ -2603,10 +2619,11 @@ const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/revi
 ## RULES
 - Batch in ONE call. Never loop select_node+edit. Use batch_node_actions for multi-node ops. Feishu multi-file ops use array params in ONE call: feishu_delete_file(items=[{fileToken,fileType}]), feishu_rename_file(items=[{fileToken,newName,fileType}]), feishu_get_doc_content(docTokens=[...]).
 - Multi-step: emit <plan> first, then <step-done>N after each. Never skip/reorder.
-- Use DEDICATED tools: delete_node, insert_parent_node, batch_move_nodes, merge_nodes, outer_frame — do NOT simulate with expand_node/update_node_text.
+- Use DEDICATED tools for non-core operations; if a required tool is not active, call activate_tools(keyword="...") once, then use it. Examples: delete_node, insert_parent_node, batch_move_nodes, merge_nodes, outer_frame.
 - Editing an EXISTING map: modify in-place (update_node_text / batch_node_actions / delete_node / merge_nodes). NEVER regenerate with generate_mindmap (writes a new file; only for pasted/new content).
-- Review tasks: get_today_review_status / get_review_schedule / complete_review_task / add_to_review. Never search nodes for review questions.
-- ai_recite_rewrite for recitation. ai_quiz / ai_quiz_append for quizzes. mechanical_cloze for exact-text cloze. ai_cloze for smart keyword cloze.
+- Background/path-scoped edits (用户说「后台修改文件 X.smm」「修改文件 X.smm」「改这个文件」并给出本地 .smm 路径): after in-place edits, AUTOMATICALLY persist by calling save_mindmap (overwrite that same file path). Do NOT ask the user "是否保存/需要保存吗" — persistence is part of the request. Reply must include the final absolute file path.
+- Review tasks: activate_tools(keyword="review") then get_today_review_status / get_review_schedule / complete_review_task / add_to_review. Never search nodes for review questions.
+- ai_recite_rewrite for recitation. ai_quiz / ai_quiz_append for quizzes. mechanical_cloze for exact-text cloze. ai_cloze for smart keyword cloze. Activate by keyword if not active.
 - find_local_file returns absolute paths; open found files directly. merge_mindmap_files reads source in background. rename_mindmap_file in place. list_directory for folder listing.
 - MCP: list_mcp_servers → list_mcp_tools → mcp_call_tool. Skills: list_skills / invoke_skill / create_skill (only after success).
 - Include returned filePath in reply when a tool creates/renames/exports a file. Verify results; retry ≤2 on failure.
@@ -3257,10 +3274,43 @@ const sendMessage = async (overrideText = null) => {
     // 获取记忆内容
     const memoryContent = loadMemory()
 
+    // 内部主对话同样采用“路径优先”：
+    // 用户在消息里写明了目标 .smm 路径时，任务绑定到该文件；未打开则后台离屏加载，不切前台。
+    const explicitRequestedPath = extractFilePathFromText(fullContent)
+    const requestedFilePath = explicitRequestedPath || props.currentFilePath || ''
+    const requestedNorm = normalizeFileId(requestedFilePath)
+    let taskMindMap = props.mindMap
+    if (requestedNorm) {
+      try {
+        useMindMapStore().setActiveTaskFileId(requestedFilePath)
+        const isCurrentFile = normalizeFileId(props.currentFilePath || '') === requestedNorm
+        // 用户明确写了另一个文件路径时，绝不能用当前前台导图兜底；加载失败则保持 null，
+        // 让后续工具明确报“目标文件不可用”，避免误改当前打开文件。
+        if (explicitRequestedPath && !isCurrentFile) {
+          const backgroundMindMap = await ensureBackgroundMindMap(requestedFilePath)
+          taskMindMap = backgroundMindMap || null
+        } else if (!taskMindMap) {
+          const backgroundMindMap = await ensureBackgroundMindMap(requestedFilePath)
+          if (backgroundMindMap) taskMindMap = backgroundMindMap
+        }
+      } catch (e) {
+        console.warn('[主对话] 目标文件绑定失败，回退当前实例:', e)
+      }
+    }
+    const taskExtraHandlers = requestedNorm
+      ? {
+          ...extraHandlers,
+          currentFilePath: () => requestedFilePath,
+          currentFileName: () => requestedFilePath.split(/[\\/]/).pop() || props.currentFileName || '目标导图'
+        }
+      : extraHandlers
+
     // 当前文件信息
-    const fileInfo = props.currentFilePath
-      ? `当前打开的文件：${props.currentFileName}（路径：${props.currentFilePath}）`
-      : '当前没有打开任何文件。'
+    const fileInfo = requestedNorm
+      ? `目标文件路径：${requestedFilePath}${requestedNorm === normalizeFileId(props.currentFilePath || '') ? `（当前打开文件：${props.currentFileName}）` : ''}`
+      : (props.currentFilePath
+        ? `当前打开的文件：${props.currentFileName}（路径：${props.currentFilePath}）`
+        : '当前没有打开任何文件。')
 
     // 系统提示词（精简英文铁律；工具发现与参数 schema 由 activate_tools 按需返回）
     // 每次一字不差 → 最大化前缀缓存命中
@@ -3271,16 +3321,17 @@ const sendMessage = async (overrideText = null) => {
 
     // 导图内容按需注入：默认只给文件信息+节点数+骨架（前2层），完整内容由AI主动调用get_mindmap_content获取
     // 避免每轮发送完整导图文本导致token爆炸
-    if (props.mindMap && props.currentFilePath) {
-      const data = props.mindMap.getData()
+    if (taskMindMap && requestedNorm) {
+      const data = taskMindMap.getData()
       const nodeCount = countNodes(data)
       const skeleton = treeToSkeletonText(data, 2) // 只取前2层骨架
-      dynamicContext += `\n\n## Current mind map (file: ${props.currentFileName})\n- Total nodes: ${nodeCount}\n- Skeleton (top 2 levels):\n${skeleton || '(empty)'}\n- To read full map content, call get_mindmap_content(mode="full"); to query specific nodes call search_nodes(keyword="...") or focus_node.`
+      const taskFileName = requestedFilePath.split(/[\\/]/).pop() || props.currentFileName || '目标导图'
+      dynamicContext += `\n\n## Current mind map (file: ${taskFileName})\n- File path: ${requestedFilePath}\n- Total nodes: ${nodeCount}\n- Skeleton (top 2 levels):\n${skeleton || '(empty)'}\n- To read full map content, call get_mindmap_content(mode="full"); to query specific nodes call query_nodes or focus_node.`
     }
 
     // 当前选中节点摘要：AI 无需查询即知作用目标（提示词 PIPELINE 第2步 b 证据来源）
     try {
-      const sel = (props.mindMap?.renderer?.activeNodeList || []).filter(n => n && !n.isGeneralization)
+      const sel = (taskMindMap?.renderer?.activeNodeList || []).filter(n => n && !n.isGeneralization)
       if (sel.length > 0) {
         const shown = sel.slice(0, 10).map((n, i) => {
           const t = (extractNodeText(n) || '').replace(/\s+/g, ' ').slice(0, 40)
@@ -3476,7 +3527,7 @@ const sendMessage = async (overrideText = null) => {
     emit('log-updated')
 
     // AI 任务撤销快照：本轮开始前的完整导图节点树，结束后若画布有变化则挂到消息上供一键撤销
-    const baselineSnapshot = captureMindMapSnapshot()
+    const baselineSnapshot = captureMindMapSnapshot(taskMindMap, requestedFilePath || props.currentFilePath || '')
     const runStats = { startedAt: Date.now(), toolTimeMs: 0, toolCalls: 0, searchCalls: 0, failedEngines: [] }
 
     // 单次对话运行（多模态直发失败后，可用相同回调以 OCR 文本重发）
@@ -3602,7 +3653,7 @@ const sendMessage = async (overrideText = null) => {
 
           const toolStartTs = Date.now()
           try {
-            const result = await handleToolCall(toolCall, props.mindMap, props.activeNode, extraHandlers)
+            const result = await handleToolCall(toolCall, taskMindMap, null, taskExtraHandlers)
             tcEntry.status = result && result.success === false ? 'error' : 'done'
             // 关键返回值留档：压缩成摘要时保留
             tcEntry.resultBrief = briefFromResult(result)
@@ -3723,9 +3774,9 @@ const sendMessage = async (overrideText = null) => {
           }
           // 事务撤销：本轮 AI 前后画布有差异时，把开始前快照挂到消息上，供"一键撤销本次 AI 操作"
           if (baselineSnapshot) {
-            const finalSnapshot = captureMindMapSnapshot()
+            const finalSnapshot = captureMindMapSnapshot(taskMindMap, requestedFilePath || props.currentFilePath || '')
             const changed = !finalSnapshot ||
-              JSON.stringify(finalSnapshot) !== JSON.stringify(baselineSnapshot)
+              JSON.stringify(finalSnapshot.data) !== JSON.stringify(baselineSnapshot.data)
             if (changed) {
               aiUndoSnapshots.set(aiMsg.id, baselineSnapshot)
               if (aiUndoSnapshots.size > AI_UNDO_SNAPSHOT_MAX) {
@@ -5141,6 +5192,11 @@ const parseRewriteJSON = (content, nodeCount) => {
       return extracted
     }
   }
+  // 如果内容里明显包含 JSON 结构，但上面的严格/容错解析都失败，
+  // 说明 AI 输出损坏或格式不完整；不要降级按行解析，否则可能把整段 JSON 当作文本写入概要。
+  if (/[\[{]/.test(raw)) {
+    return { rewrites: [], memoryTip: '' }
+  }
   // 降级：按行解析
   const lines = raw.split('\n').map(l => l.trim()).filter(Boolean).slice(0, nodeCount)
   return {
@@ -6291,13 +6347,46 @@ const runExternalMessage = async (text, source, extLogger) => {
   }
 
   // 标记后台运行状态（Set 记录运行中的通道）
-  backgroundRunning.value.add(source)
+  backgroundRunning.add(source)
   const bgRunToken = nextBgRunToken()
 
+  // 方案 A：后台任务按“路径优先”绑定目标文件。
+  // 优先取用户消息里明确写出的本地路径；没有则使用当前打开文件；再没有则保持前台实例兜底。
+  const explicitRequestedPath = extractFilePathFromText(text)
+  const requestedFilePath = explicitRequestedPath || props.currentFilePath || ''
+  const requestedNorm = normalizeFileId(requestedFilePath)
+  let taskMindMap = props.mindMap
+  if (requestedNorm) {
+    try {
+      useMindMapStore().setActiveTaskFileId(requestedFilePath)
+      const isCurrentFile = normalizeFileId(props.currentFilePath || '') === requestedNorm
+      if (explicitRequestedPath && !isCurrentFile) {
+        const backgroundMindMap = await ensureBackgroundMindMap(requestedFilePath)
+        taskMindMap = backgroundMindMap || null
+      } else if (!taskMindMap) {
+        const backgroundMindMap = await ensureBackgroundMindMap(requestedFilePath)
+        if (backgroundMindMap) taskMindMap = backgroundMindMap
+      }
+    } catch (e) {
+      console.warn('[外部消息] 目标文件绑定失败，回退当前实例:', e)
+    }
+  }
+
+  // 后台任务的操作上下文：工具读取/保存路径必须指向目标任务文件，而不是前台文件。
+  const taskExtraHandlers = requestedNorm
+    ? {
+        ...extraHandlers,
+        currentFilePath: () => requestedFilePath,
+        currentFileName: () => requestedFilePath.split(/[\\/]/).pop() || props.currentFileName || '目标导图'
+      }
+    : extraHandlers
+
   const memoryContent = loadMemory()
-  const fileInfo = props.currentFilePath
-    ? `当前打开的文件：${props.currentFileName}（路径：${props.currentFilePath}）`
-    : '当前没有打开任何文件。'
+  const fileInfo = requestedNorm
+    ? `目标文件路径：${requestedFilePath}${requestedNorm === normalizeFileId(props.currentFilePath || '') ? `（当前打开文件：${props.currentFileName}）` : ''}`
+    : (props.currentFilePath
+      ? `当前打开的文件：${props.currentFileName}（路径：${props.currentFilePath}）`
+      : '当前没有打开任何文件。')
 
   // 系统提示词（精简英文铁律，同 sendMessage，保证前缀缓存一致）
   let systemPrompt = await buildSystemPromptWithSkills(SYSTEM_PROMPT)
@@ -6306,11 +6395,12 @@ const runExternalMessage = async (text, source, extLogger) => {
   let dynamicContext = `\n\n## Current time\nToday is ${(() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') })()}. Use this date for time references.\n\n## Current file\n${fileInfo}`
 
   // 导图按需注入：骨架+节点数
-  if (props.mindMap && props.currentFilePath) {
-    const data = props.mindMap.getData()
+  if (taskMindMap && requestedNorm) {
+    const data = taskMindMap.getData()
     const nodeCount = countNodes(data)
     const skeleton = treeToSkeletonText(data, 2)
-    dynamicContext += `\n\n## Current mind map (file: ${props.currentFileName})\n- Total nodes: ${nodeCount}\n- Skeleton (top 2 levels):\n${skeleton || '(empty)'}\n- To read full map content, call get_mindmap_content(mode="full").`
+    const taskFileName = requestedFilePath.split(/[\\/]/).pop() || props.currentFileName || '目标导图'
+    dynamicContext += `\n\n## Current mind map (file: ${taskFileName})\n- File path: ${requestedFilePath}\n- Total nodes: ${nodeCount}\n- Skeleton (top 2 levels):\n${skeleton || '(empty)'}\n- To read full map content, call get_mindmap_content(mode="full").`
   }
 
   if (memoryContent && memoryContent.trim()) {
@@ -6389,16 +6479,13 @@ const runExternalMessage = async (text, source, extLogger) => {
             extLogger('tool_call', `${toolCall.function.name}: ${toolCall.function.arguments || ''}`)
           }
           try {
-            const result = await handleToolCall(toolCall, props.mindMap, props.activeNode, extraHandlers)
+            const result = await handleToolCall(toolCall, taskMindMap, null, taskExtraHandlers)
             tcEntry.status = 'done'
             // 关键返回值留档：压缩成摘要时保留
             tcEntry.resultBrief = briefFromResult(result)
             if (result && result.filePath && !result.notNewFile) {
-              if (result.externalFile) {
-                emit('external-file-created')
-              } else {
-                emit('file-created', result.filePath, result.fileName)
-              }
+              // 后台任务统一只刷新文件树，不自动打开/切换前台文件。
+              emit('external-file-created')
             }
             if (extLogger) {
               extLogger('tool_result', `${toolCall.function.name}: ${result?.message || JSON.stringify(result)}`)
@@ -6415,7 +6502,8 @@ const runExternalMessage = async (text, source, extLogger) => {
         },
         onDone: () => {
           // 后台任务完成：清除该通道的后台状态，不修改 aiStatus（它应该保持 idle）
-          backgroundRunning.value.delete(source)
+          backgroundRunning.delete(source)
+          try { useMindMapStore().setActiveTaskFileId('') } catch { /* 忽略 */ }
           svc.resetAbort()
           if (extLogger) {
             extLogger('send', fullResponse || '(AI 未返回内容)')
@@ -6425,14 +6513,16 @@ const runExternalMessage = async (text, source, extLogger) => {
         onError: (error) => {
           // 用户主动中止不渲染成错误（后台任务被中止时 AbortError 走这里）
           if (error && (error.name === 'AbortError' || error.aborted === true)) {
-            backgroundRunning.value.delete(source)
+            backgroundRunning.delete(source)
+            try { useMindMapStore().setActiveTaskFileId('') } catch { /* 忽略 */ }
             svc.resetAbort()
             resolve('（已被用户操作中断）')
             return
           }
           console.error('AI 服务错误:', error)
           aiEntry.content = fullResponse || `错误: ${error.message || 'AI 服务异常'}`
-          backgroundRunning.value.delete(source)
+          backgroundRunning.delete(source)
+          try { useMindMapStore().setActiveTaskFileId('') } catch { /* 忽略 */ }
           svc.resetAbort()
           resolve(aiEntry.content)
         }
@@ -6441,7 +6531,8 @@ const runExternalMessage = async (text, source, extLogger) => {
       // 启动失败（如 AI 配置未初始化）：复位状态并回复错误，避免调用方永久挂起
       console.error('外部消息 AI 初始化失败:', err)
       aiEntry.content = `错误: ${err.message || 'AI 服务初始化失败'}`
-      backgroundRunning.value.delete(source)
+      backgroundRunning.delete(source)
+      try { useMindMapStore().setActiveTaskFileId('') } catch { /* 忽略 */ }
       svc.resetAbort()
       resolve(aiEntry.content)
     })
@@ -7357,27 +7448,46 @@ defineExpose({
 
 .plan-float-panel {
   position: absolute;
-  bottom: calc(100% + 8px);
+  bottom: calc(100% + 6px);
   left: 50%;
   transform: translateX(-50%);
-  width: min(420px, calc(100vw - 32px));
-  max-height: 300px;
+  width: auto;
+  min-width: 240px;
+  max-width: min(380px, calc(100vw - 32px));
+  max-height: 170px;
   overflow-y: auto;
-  padding: 10px 12px;
-  background: #fff;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 12px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.14);
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 9px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+/* 气泡小箭头：指向下方 Todo 胶囊 */
+.plan-float-panel::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: rgba(255, 255, 255, 0.98);
 }
 
 .plan-float-step {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  padding: 6px 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-  font-size: 13px;
+  gap: 6px;
+  padding: 3px 2px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--text-primary);
+}
+
+.plan-float-step-text {
+  word-break: break-word;
+  min-width: 0;
 }
 
 .plan-float-step:last-child {

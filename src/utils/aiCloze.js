@@ -327,8 +327,39 @@ const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 })[c])
 
+// 硬约束：节点包含“标签：值”结构时，只允许挖冒号后面的内容。
+// 这是规则兜底，不依赖模型遵守提示词；若某个挖空片段只出现在冒号前则整段移除。
+const filterClozesBeforeColon = (plainText, clozes) => {
+  if (!Array.isArray(clozes) || clozes.length === 0) return clozes
+  const text = String(plainText || '')
+  const delimiters = ['：', ':']
+  let colonIndex = -1
+  let delimiterLength = 0
+  for (const delimiter of delimiters) {
+    const index = text.indexOf(delimiter)
+    if (index >= 0 && (colonIndex < 0 || index < colonIndex)) {
+      colonIndex = index
+      delimiterLength = delimiter.length
+    }
+  }
+  if (colonIndex < 0) return clozes
+
+  return clozes.filter((cloze) => {
+    const value = String(cloze || '')
+    if (!value) return false
+    let fromIndex = 0
+    while (true) {
+      const found = text.indexOf(value, fromIndex)
+      if (found < 0) return true
+      // 只要存在一处位于冒号前的匹配，就放弃该挖空，确保不会把提示词挖掉。
+      if (found < colonIndex) return false
+      fromIndex = found + value.length
+    }
+  })
+}
+
 const applyClozeToNode = (node, item) => {
-  const clozes = item && Array.isArray(item.clozes) ? item.clozes : []
+  let clozes = item && Array.isArray(item.clozes) ? item.clozes : []
   const rewrite = item && item.rewrite ? String(item.rewrite).trim() : ''
   if (clozes.length === 0 && !rewrite) return 0
 
@@ -354,6 +385,11 @@ const applyClozeToNode = (node, item) => {
       try { node.setData({ clozeRewrite: true, clozeRewriteClozes: clozes }) } catch (e) {}
     }
   }
+
+  // 冒号前不挖空的硬约束放在最终写入前，覆盖 AI、本地兜底、审查补充等所有路径。
+  const plainForFilter = extractPlainText(text).trim()
+  clozes = filterClozesBeforeColon(plainForFilter, clozes)
+  if (clozes.length === 0 && !rewrite) return 0
 
   // 先清除已有的挖空标记（平衡移除，避免嵌套 span 结构损坏）
   text = removeClozeSpansBalanced(text)

@@ -51,6 +51,7 @@
                   v-if="msg.role === 'assistant' && msg.content"
                   class="md-content"
                   v-html="renderMarkdown(stripThinkBlocks(msg.content))"
+                  @click="onContentClick"
                 ></div>
                 <div v-else-if="msg.content" class="tp-text">{{ msg.content }}</div>
                 <div v-if="msg.toolCalls && msg.toolCalls.length" class="tp-tool-calls">
@@ -102,6 +103,17 @@ const selectChannel = (key) => {
 
 const clearChannel = (key) => {
   clearThirdPartyChannel(key)
+}
+
+// 消息中心里的本地路径点击：交给 App 在应用内打开，而不是跳到系统资源管理器。
+const onContentClick = (event) => {
+  const fileEl = event.target?.closest?.('.md-file-path')
+  if (!fileEl) return
+  event.preventDefault()
+  const path = fileEl.getAttribute('data-path') || fileEl.dataset?.path || ''
+  if (path) {
+    window.dispatchEvent(new CustomEvent('open-local-file', { detail: { path } }))
+  }
 }
 
 // 打开日志时刷新信号

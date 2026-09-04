@@ -41,7 +41,7 @@
         :data="treeData"
         node-key="uid"
         draggable
-        default-expand-all
+        :default-expanded-keys="defaultExpandedKeys"
         :indent="24"
         :props="defaultProps"
         :expand-on-click-node="false"
@@ -62,10 +62,11 @@
             <span
               class="node-text"
               :class="{ 'node-selected': selectedUid === data.uid && editingUid !== data.uid }"
-              contenteditable="true"
+              :contenteditable="!data.tableNode"
               :data-uid="data.uid"
               @focus="onNodeFocus($event, data)"
               @blur="onNodeBlur($event, data)"
+              @click.stop="onNodeTextClick($event, data)"
               @keydown.enter.prevent="onEnterKey($event, data)"
               @keydown.tab.prevent="onTabKey($event, data)"
               @keydown.backspace="onBackspace($event, data)"
@@ -229,7 +230,8 @@ import {
   removeClozeSpansBalanced,
   clearAllCloze,
   resetClozeState,
-  saveClozeState
+  saveClozeState,
+  syncMindMapRef
 } from '../utils/cloze'
 import { sanitizeSafeHtml } from '../utils/sanitizeHtml'
 import { buildTriModeHtml } from '../utils/triModeExport'
@@ -297,6 +299,29 @@ const outlineHtmlToRichText = (html) => {
   return textToNodeRichTextWithWrap(plainText)
 }
 
+// 把裸引用链接（mindmap-file:/mindmap-node: 的 <a>，来自思维导图或 Markdown 往返）
+// 统一包成 <span class="ref-tag" contenteditable="false">，让大纲里的引用成为可整块删除的原子对象，
+// 与 @/# 引用（Tribute）插入的结构一致，复用现有 Backspace/Delete 整块删除逻辑。
+const normalizeOutlineRefTags = (html) => {
+  if (!html || typeof html !== 'string' || !html.includes('mindmap-')) return html
+  try {
+    const div = document.createElement('div')
+    div.innerHTML = html
+    const links = Array.from(div.querySelectorAll('a[href^="mindmap-file:"], a[href^="mindmap-node:"]'))
+    for (const a of links) {
+      if (a.closest('.ref-tag')) continue
+      const span = document.createElement('span')
+      span.setAttribute('contenteditable', 'false')
+      span.className = 'ref-tag'
+      a.parentNode.insertBefore(span, a)
+      span.appendChild(a)
+    }
+    return div.innerHTML
+  } catch (e) {
+    return html
+  }
+}
+
 const props = defineProps({
   mindMap: {
     type: Object,
@@ -339,7 +364,10 @@ const emit = defineEmits([
 
 const treeRef = ref(null)
 const treeData = ref([])
+const defaultExpandedKeys = ref([])
 const defaultProps = { label: 'label', children: 'children' }
+// 展开/收起所有的一次性覆盖指令：'all'=全部展开，'none'=全部收起，null=按首屏层级启发式
+const outlineExpandOverride = ref(null)
 
 // 全屏展示（与思维导图模式一致）：整个界面只保留大纲，ESC 或再次点击退出
 const isFullscreen = ref(false)
@@ -410,6 +438,7 @@ const onTreeClickCapture = (e) => {
   e.stopPropagation()
   const uid = nodeTextEl.dataset?.uid
   if (!uid) return
+  syncMindMapRef(props.mindMap)
   toggleClozeByUid(uid)
   // 点击挖空只做显隐切换，不进入编辑：blur 触发编辑内容保存
   if (document.activeElement === nodeTextEl) nodeTextEl.blur()
@@ -426,6 +455,7 @@ const onDocumentClozeClick = (e) => {
   e.stopPropagation()
   const uid = nodeTextEl.dataset?.uid
   if (!uid) return
+  syncMindMapRef(props.mindMap)
   toggleClozeByUid(uid)
   if (document.activeElement === nodeTextEl) nodeTextEl.blur()
   applyOutlineClozeStyles()
@@ -525,12 +555,14 @@ const onToggleCloze = () => {
 
 /** 右键菜单：显示/隐藏全部挖空 */
 const onToggleClozeAll = () => {
+  syncMindMapRef(props.mindMap)
   toggleAllCloze()
   nextTick(() => applyOutlineClozeStyles())
 }
 
 /** 右键菜单：清除全文挖空（操作 mindMap 数据，大纲树经 node_tree_render_end 自动刷新） */
 const onClearAllCloze = () => {
+  syncMindMapRef(props.mindMap)
   const count = clearAllCloze()
   resetClozeState()
   saveClozeState()
@@ -699,8 +731,9 @@ const transformData = (node) => {
     : (nodeData.generalization ? [nodeData.generalization] : [])
   const result = {
     uid: nodeData.uid || createUid(),
+    tableNode: !!(nodeData.tableHtml || nodeData.markdownTable || nodeData.markdownCode),
     // 大纲中使用 [==text==] 语法显示挖空
-    label: sanitizeSafeHtml(revertOutlineClozeSyntax(nodeData.text || '')),
+    label: normalizeOutlineRefTags(sanitizeSafeHtml(revertOutlineClozeSyntax(nodeData.text || ''))),
     children: [],
     // 保留思维导图的折叠状态（expand=false 表示已折叠），refresh 后据此恢复 el-tree 折叠
     expand: nodeData.expand === false ? false : true,
@@ -875,6 +908,43 @@ const refresh = () => {
   const focusUidForExpand = pendingSelectUid.value
   if (data) {
     treeData.value = transformToTreeData(clonePlainTree(data))
+    const countOutlineNodes = (node) => {
+      if (!node) return 0
+      let count = 1
+      if (Array.isArray(node.children)) {
+        node.children.forEach(child => { count += countOutlineNodes(child) })
+      }
+      return count
+    }
+    const totalNodes = countOutlineNodes(data)
+    // 一次性覆盖指令优先：展开/收起所有按钮需要真实展开到末级或收起到根。
+    const override = outlineExpandOverride.value
+    outlineExpandOverride.value = null
+    // 大图首屏只默认展开前 2 层；超过 600 个节点时只展开第 1 层，减少初始 DOM 数量。
+    const maxExpandDepth = totalNodes > 600 ? 1 : 2
+    const expanded = []
+    const collectExpanded = (node, depth) => {
+      if (!node) return
+      if (Array.isArray(node.children) && node.children.length > 0 && depth < maxExpandDepth) {
+        expanded.push(node.uid)
+        node.children.forEach(child => collectExpanded(child, depth + 1))
+      }
+    }
+    const collectAllExpanded = (node) => {
+      if (!node) return
+      if (Array.isArray(node.children) && node.children.length > 0) {
+        expanded.push(node.uid)
+        node.children.forEach(collectAllExpanded)
+      }
+    }
+    if (override === 'all') {
+      ;(treeData.value || []).forEach(collectAllExpanded)
+    } else if (override === 'none') {
+      // 收起所有：不展开任何节点
+    } else {
+      ;(treeData.value || []).forEach(node => collectExpanded(node, 0))
+    }
+    defaultExpandedKeys.value = expanded
   }
 
   // 刷新后选中待选节点
@@ -980,7 +1050,7 @@ const handleDataChange = () => {
     notHandleDataChange = false
     return
   }
-  refresh()
+  scheduleOutlineRefresh()
 }
 
 const handleNodeTreeRenderEnd = () => {
@@ -988,7 +1058,18 @@ const handleNodeTreeRenderEnd = () => {
     notHandleDataChange = false
     return
   }
-  refresh()
+  scheduleOutlineRefresh()
+}
+
+// 大纲刷新合并：AI 全文挖空/清除挖空等批量操作会在很短时间内连续触发
+// data_change / node_tree_render_end，每次都整树重建会卡死。这里做 80ms 尾沿合并。
+let outlineRefreshTimer = null
+const scheduleOutlineRefresh = () => {
+  if (outlineRefreshTimer) clearTimeout(outlineRefreshTimer)
+  outlineRefreshTimer = setTimeout(() => {
+    outlineRefreshTimer = null
+    refresh()
+  }, 80)
 }
 
 const registerListeners = (mindMap) => {
@@ -1019,6 +1100,13 @@ const onNodeFocus = (event, data) => {
     blurTimer = null
   }
   textToolbarVisible.value = true
+}
+
+const onNodeTextClick = (event, data) => {
+  // 表格/代码块节点在大纲只读，点击时给出明确提示，避免用户误以为不可编辑是 bug。
+  if (data && data.tableNode) {
+    try { ElMessage.info('表格 / 代码块节点请切换到 Markdown 模式编辑') } catch (e) {}
+  }
 }
 
 const onNodeBlur = (event, data) => {
@@ -2111,6 +2199,7 @@ const pasteNodeByUid = (uid) => {
 const setAllExpand = (expand) => {
   if (!props.mindMap?.renderer?.renderTree) return
   ensureUids()
+  outlineExpandOverride.value = expand ? 'all' : 'none'
   const walk = (node) => {
     if (node.children && node.children.length > 0) {
       node.data.expand = expand
@@ -2877,6 +2966,7 @@ const onToolbarGen = () => {
 // 显示/隐藏全部挖空
 const onToolbarToggleCloze = () => {
   try {
+    syncMindMapRef(props.mindMap)
     toggleAllCloze()
     nextTick(() => applyOutlineClozeStyles())
   } catch (e) {
@@ -2886,6 +2976,7 @@ const onToolbarToggleCloze = () => {
 
 const onToolbarHideCloze = () => {
   try {
+    syncMindMapRef(props.mindMap)
     setAllClozeHidden(true)
     nextTick(() => applyOutlineClozeStyles())
   } catch (e) {
@@ -2895,6 +2986,7 @@ const onToolbarHideCloze = () => {
 
 const onToolbarShowCloze = () => {
   try {
+    syncMindMapRef(props.mindMap)
     setAllClozeHidden(false)
     nextTick(() => applyOutlineClozeStyles())
   } catch (e) {
@@ -3497,6 +3589,10 @@ onBeforeUnmount(() => {
     clearInterval(cacheTimer)
     cacheTimer = null
   }
+  if (outlineRefreshTimer) {
+    clearTimeout(outlineRefreshTimer)
+    outlineRefreshTimer = null
+  }
 })
 
 watch(
@@ -3856,6 +3952,12 @@ defineExpose({
 /* ========== Element Plus Tree Overrides ========== */
 :deep(.el-tree) {
   background: transparent;
+}
+
+/* 大型大纲按需渲染优化：浏览器可跳过视口外节点的绘制，保留 DOM 与交互。 */
+:deep(.el-tree-node) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 28px;
 }
 
 /* 恢复 el-tree 默认层级缩进（不覆盖 padding-left）；

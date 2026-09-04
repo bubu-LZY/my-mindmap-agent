@@ -32,7 +32,14 @@ export function buildGraphDataFromRaw(rawData) {
     if (!uid) return
     if (d.generalization && !d.text) return // 跳过概括节点
 
-    const text = htmlToText(d.text || '') || '未命名'
+    const markdownTable = d.markdownTable || ''
+    const isTable = !!(d.tableHtml || markdownTable)
+    let text = htmlToText(d.text || '') || '未命名'
+    if (isTable) {
+      const rows = String(markdownTable || '').split('\n').filter(l => /^\s*\|/.test(l))
+      const bodyRows = Math.max(0, rows.filter(l => !/^\|[\s:|-]+\|$/.test(l)).length - 1)
+      text = `📊 表格（${bodyRows} 行）`
+    }
     const note = d.note || ''
     const image = d.image?.url || d.image?.src || ''
     nodes.push({

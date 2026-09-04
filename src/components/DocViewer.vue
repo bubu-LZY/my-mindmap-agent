@@ -802,6 +802,7 @@ const indexPdfText = async (token) => {
     const pageCount = pdfDoc.numPages || 0
     for (let i = 1; i <= pageCount; i++) {
       if (token !== loadToken) return
+      if (i % 5 === 0) await new Promise((resolve) => setTimeout(resolve, 0))
       let page
       try {
         page = await pdfDoc.getPage(i)

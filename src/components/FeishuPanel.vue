@@ -505,7 +505,13 @@ function clearCallLogs() {
 }
 
 function openUrl(url) {
-  window.open(url, '_blank')
+  // Electron 渲染进程中 window.open 不会在系统默认浏览器打开，
+  // 需走主进程 shell.openExternal。
+  if (window.electronAPI?.openExternal) {
+    window.electronAPI.openExternal(url)
+  } else {
+    window.open(url, '_blank')
+  }
 }
 
 function formatTime(ts) {

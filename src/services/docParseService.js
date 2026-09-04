@@ -187,6 +187,8 @@ async function parsePdf(filePath) {
   const totalPages = pdf.numPages || 0
   const parts = []
   for (let i = 1; i <= totalPages; i++) {
+    // 每 5 页让出主线程，避免大 PDF 同步解析把界面卡死。
+    if (i % 5 === 0) await new Promise((resolve) => setTimeout(resolve, 0))
     let page
     try {
       page = await pdf.getPage(i)

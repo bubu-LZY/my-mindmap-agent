@@ -651,8 +651,11 @@ function normalizeNodeData(node) {
     node.data.generalization = sanitizeGeneralizationList(node.data.generalization)
   }
   cleanCorruptedArrayFields(node.data)
-  // 兼容旧版把整张 <table> 塞进单个节点后导致双击编辑卡死、退出丢表格的问题
-  if (node.data.text && /<table\b/i.test(node.data.text)) {
+  // 新版 Markdown 表格节点优先保留原始表格 HTML 与 Markdown 源码；
+  // 只有旧数据里的普通 <table> 才继续走兼容转换，避免把正常表格拆成异常文本。
+  if (node.data.markdownTable && node.data.tableHtml) {
+    node.data.text = node.data.tableHtml
+  } else if (node.data.text && /<table\b/i.test(node.data.text)) {
     node.data.text = legacyTableHtmlToText(node.data.text)
   }
   if (node.data.text && !node.data.text.startsWith('<')) {
@@ -1654,8 +1657,9 @@ const initMindMap = () => {
       padding: 120,
       removeNodeWhenOutCanvas: false
     },
-    // 编辑时实时在节点上渲染文字，编辑框透明无阴影贴合节点，而非独立悬浮窗
-    openRealtimeRenderOnNodeTextEdit: true,
+    // 编辑时不再实时重绘节点，减少大图编辑时的布局/绘制抖动。
+    // 文字编辑仍由 Quill 独立编辑框完成，退出编辑后再统一渲染。
+    openRealtimeRenderOnNodeTextEdit: false,
     // 编辑框挂载在 document.body，默认 z-index 3000 低于全屏层（5000），
     // 全屏模式下双击编辑时输入框连同光标/选中态会被全屏容器整体遮挡，文字"看不见"。
     // 调高到 7000（高于全屏层 5000 与悬浮 AI 对话 6000），保证任何模式下编辑框可见
@@ -1949,6 +1953,16 @@ const initMindMap = () => {
 
   // 双击节点进入文字编辑 -> 显示工具栏
   mindMap.on('node_dblclick', (node) => {
+    // 表格节点不在导图/大纲里编辑，统一引导到 Markdown 模式，避免 Quill 破坏表格 HTML。
+    if (node && (node.getData?.('tableHtml') || node.getData?.('markdownTable') || node.getData?.('markdownCode'))) {
+      try {
+        if (mindMap.renderer?.textEdit?.hideEditTextBox) {
+          mindMap.renderer.textEdit.hideEditTextBox()
+        }
+      } catch { /* 忽略 */ }
+      ElMessage.info('表格节点请在 Markdown 模式下编辑')
+      return
+    }
     // 双击进入编辑时取消多选状态：只保留被编辑的节点。
     // 否则编辑期间按文字操作快捷键会错误地作用到整个多选集合
     const r = mindMap.renderer
@@ -2478,14 +2492,14 @@ const promoteActiveNode = () => {
   // 更新数据（setData 内部已走 reRender 完整重绘，再 render 会造成残留「重影」）
   isSettingData = true
   mindMap.setData(mindData)
-  nextTick(() => {
+  setTimeout(() => {
     isSettingData = false
     // 重新激活被提升的节点
     const newNode = mindMap.renderer.findNodeByUid(nodeUid)
     if (newNode) {
       mindMap.renderer.moveNodeToCenter(newNode)
     }
-  })
+  }, 0)
 }
 
 /**
@@ -3616,6 +3630,16 @@ watch(
               }
             }
             mindMap.el = containerRef.value
+            // 离屏容器迁移后，simple-mind-map 的 wheel/mousedown 等 DOM 事件仍绑定在旧容器上。
+            // 重新绑定到真实容器，否则隐藏态初始化的导图切回后滚轮缩放会失效。
+            if (mindMap.event && typeof mindMap.event.unbind === 'function' && typeof mindMap.event.bind === 'function') {
+              try {
+                mindMap.event.unbind()
+                mindMap.event.bind()
+              } catch (e) {
+                console.warn('[MindMapEditor] 事件重绑失败:', e)
+              }
+            }
             if (offscreenContainer.parentNode) offscreenContainer.parentNode.removeChild(offscreenContainer)
             offscreenContainer = null
             try { mindMap.resize() } catch (e) { /* 容器尺寸异常时忽略 */ }
@@ -3750,7 +3774,7 @@ onBeforeUnmount(() => {
     containerSizeObserver = null
   }
   // 销毁挖空观察器
-  destroyCloze()
+  destroyCloze(mindMap)
   if (mindMap) {
     try {
       if (mindMap.view && typeof mindMap.view.getTransformData === 'function') {
@@ -3830,9 +3854,9 @@ defineExpose({
       // setData 内部已走 reRender（clearDraw+clearCache+render），无需再 render，避免产生重影
       mindMap.setData(normalized)
       // render 是异步的，下一帧解除锁定
-      nextTick(() => {
+      setTimeout(() => {
         isSettingData = false
-      })
+      }, 0)
     }
   },
   // 容器隐藏（display:none，如先切到大纲视图）时实例可能从未初始化：
@@ -4255,7 +4279,6 @@ defineExpose({
      非 scoped 样式，因为编辑器元素被附加到 document.body -->
 <style>
 .smm-richtext-node-edit-wrap {
-  background: transparent !important;
   box-shadow: none !important;
   border: none !important;
 }
@@ -4320,6 +4343,24 @@ defineExpose({
   text-underline-offset: 3px;
   padding-bottom: 1px;
   border-radius: 2px;
+}
+
+/* Markdown 表格节点：只读展示，不在 Quill 中编辑 */
+.mind-map-container :deep(.mm-md-table) {
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 2px 0;
+}
+.mind-map-container :deep(.mm-md-table th),
+.mind-map-container :deep(.mm-md-table td) {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  padding: 2px 6px;
+  text-align: left;
+}
+.mind-map-container :deep(.mm-md-table th) {
+  background: rgba(0, 0, 0, 0.04);
+  font-weight: 600;
 }
 
 /* 节点内粘贴的多张图片：编辑态与渲染态统一按内容缩略显示 */

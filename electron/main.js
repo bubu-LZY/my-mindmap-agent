@@ -737,6 +737,11 @@ function createWindow() {
   // 用于临时查看页面元素与渲染层报错。
   if (process.env.NODE_ENV === 'development' || process.env.MINDMAP_DEVTOOLS === '1' || process.argv.includes('--devtools')) {
     mainWindow.webContents.openDevTools({ mode: 'detach' })
+  } else {
+    // 生产环境禁止误开 DevTools，避免普通用户直接看到 localStorage / 调试面板。
+    mainWindow.webContents.on('devtools-opened', () => {
+      try { mainWindow.webContents.closeDevTools() } catch { /* 忽略 */ }
+    })
   }
 
   // 兜底拦截窗口导航（如拖入文件时 Chromium 默认打开 file:// 导致应用被替换；正常业务不使用页面跳转）

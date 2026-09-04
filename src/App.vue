@@ -60,23 +60,39 @@
 
     <!-- ============ Tab 标签栏 ============ -->
     <nav class="tab-bar" v-show="tabs.length > 0 || docTabs.length > 0">
+      <!-- 多屏组合标签：多个分屏合并显示为一个标签 -->
       <div
-        v-for="t in orderedTabs"
-        :key="t.key"
-        class="tab-item"
-        :class="{ active: t.active, 'drag-over': dragOverTabKey === t.key }"
-        :title="t.title"
-        draggable="true"
-        @click="t.onClick"
-        @dragstart="onAnyTabDragStart($event, t.key)"
-        @dragover.prevent="onAnyTabDragOver($event, t.key)"
-        @dragleave="onAnyTabDragLeave(t.key)"
-        @drop.prevent="onAnyTabDrop($event, t.key)"
-        @dragend="onAnyTabDragEnd"
+        v-if="isMultiPane"
+        class="tab-item multi-tab active"
+        :title="combinedTabTitle"
       >
-        <span class="tab-name">{{ t.name }}</span>
-        <span class="tab-close" @click.stop="t.onClose" title="关闭标签">×</span>
+        <span class="tab-name multi-name">
+          <span class="multi-prefix">多屏：</span>
+          <template v-for="(p, i) in combinedPanes" :key="p.id">
+            <span v-if="i > 0" class="multi-sep">｜</span>
+            <span class="multi-item">{{ shortPaneTitle(p.title) }}</span>
+          </template>
+        </span>
       </div>
+      <template v-else>
+        <div
+          v-for="t in orderedTabs"
+          :key="t.key"
+          class="tab-item"
+          :class="{ active: t.active, 'drag-over': dragOverTabKey === t.key }"
+          :title="t.title"
+          draggable="true"
+          @click="t.onClick"
+          @dragstart="onAnyTabDragStart($event, t.key)"
+          @dragover.prevent="onAnyTabDragOver($event, t.key)"
+          @dragleave="onAnyTabDragLeave(t.key)"
+          @drop.prevent="onAnyTabDrop($event, t.key)"
+          @dragend="onAnyTabDragEnd"
+        >
+          <span class="tab-name">{{ t.name }}</span>
+          <span class="tab-close" @click.stop="t.onClose" title="关闭标签">×</span>
+        </div>
+      </template>
     </nav>
 
     <!-- ============ 主内容区 ============ -->
@@ -96,7 +112,7 @@
             ></div>
             <button
               class="segment-btn"
-              :class="{ active: viewMode === 'mindmap' || viewMode === 'outline' || viewMode === 'graph' }"
+              :class="{ active: viewMode === 'mindmap' || viewMode === 'outline' || viewMode === 'graph' || viewMode === 'markdown' }"
               @click="switchToFileTree"
             >
               文件目录
@@ -237,14 +253,29 @@
             <button class="pane-close" title="关闭分屏" @click.stop="closePane(pl.pane.id)">×</button>
           </div>
           <div class="pane-body">
+            <div v-if="pl.pane.empty" class="pane-welcome">
+              <div class="welcome-logo">
+                <svg viewBox="0 0 120 120" fill="none" width="64" height="64">
+                  <circle cx="60" cy="60" r="56" fill="rgba(0,122,255,0.06)" />
+                  <circle cx="60" cy="60" r="40" fill="rgba(0,122,255,0.10)" />
+                  <circle cx="60" cy="60" r="24" fill="rgba(0,122,255,0.15)" />
+                  <circle cx="60" cy="20" r="6" fill="var(--apple-blue)" />
+                  <circle cx="20" cy="80" r="6" fill="var(--apple-blue)" />
+                  <circle cx="100" cy="80" r="6" fill="var(--apple-blue)" />
+                </svg>
+              </div>
+              <h1 class="welcome-title">My-mindmap</h1>
+              <p class="welcome-subtitle">智能体 + 思维导图</p>
+              <p class="welcome-hint">从左侧文件树打开文件；拖拽顶部标签到分屏边缘可组合多个导图</p>
+            </div>
             <MindMapEditor
-              v-if="pl.pane.fileType === 'mindmap'"
-              v-show="pl.pane.view !== 'outline' && pl.pane.view !== 'graph'"
+              v-if="pl.pane.fileType === 'mindmap' && !pl.pane.empty"
+              v-show="pl.pane.view !== 'outline' && pl.pane.view !== 'graph' && pl.pane.view !== 'markdown'"
               :key="'mm-' + pl.pane.id + ':' + pl.pane.fileId"
               :ref="el => registerEditor(pl.pane.id, el)"
               :data="tabFor(pl.pane.fileId).data"
               :file-id="pl.pane.fileId"
-              :visible="pl.pane.view !== 'outline' && pl.pane.view !== 'graph'"
+              :visible="pl.pane.view !== 'outline' && pl.pane.view !== 'graph' && pl.pane.view !== 'markdown'"
               :fullscreen="pl.pane.fullscreen"
               @data-change="onDataChange"
               @node-active="(node, list) => onNodeActive(pl.pane, node, list)"
@@ -264,7 +295,7 @@
             />
             <!-- 固定工具条：放在激活 pane 内部，相对 pane 定位，避免分屏时遮挡其他窗格标题栏 -->
             <FixedToolbar
-              v-if="pl.pane.id === activePaneId && pl.pane.fileType === 'mindmap' && pl.pane.view !== 'outline' && pl.pane.view !== 'graph' && !pl.pane.fullscreen"
+              v-if="pl.pane.id === activePaneId && pl.pane.fileType === 'mindmap' && pl.pane.view !== 'outline' && pl.pane.view !== 'graph' && pl.pane.view !== 'markdown' && !pl.pane.fullscreen"
               :mindMap="activeMindMapInstance"
               :activeNodes="activePaneNodes"
               :split-mode="isMultiPane"
@@ -297,6 +328,18 @@
               :mindMap="mindMapInstances[pl.pane.id] || null"
               :mindMapData="tabFor(pl.pane.fileId).data"
               @locate-node="onGraphLocateNode"
+            />
+            <MarkdownEditor
+              v-if="pl.pane.fileType === 'mindmap' && pl.pane.view === 'markdown'"
+              :key="'md-' + pl.pane.id + ':' + pl.pane.fileId"
+              :ref="el => registerMarkdownView(pl.pane.id, el)"
+              :mindMap="mindMapInstances[pl.pane.id] || null"
+              :mindMapData="tabFor(pl.pane.fileId).data"
+              :fileId="pl.pane.fileId"
+              :visible="true"
+              :fullscreen="pl.pane.fullscreen"
+              @apply="handleMarkdownApply"
+              @fullscreen-change="v => onPaneFullscreenChange(pl.pane, v, 'mindmap')"
             />
             <DocViewer
               v-if="pl.pane.fileType === 'doc'"
@@ -423,20 +466,20 @@
       <div class="status-right">
         <span class="status-text">{{ nodeCount }} 个节点</span>
         <span class="status-separator">|</span>
-        <span class="status-text">{{ viewMode === 'mindmap' ? '思维导图视图' : viewMode === 'outline' ? '大纲视图' : viewMode === 'graph' ? '关联图视图' : viewMode === 'tag' ? '标签模式' : '复习模式' }}</span>
+        <span class="status-text">{{ viewMode === 'mindmap' ? '思维导图视图' : viewMode === 'outline' ? '大纲视图' : viewMode === 'graph' ? '关联图视图' : viewMode === 'markdown' ? 'Markdown 模式' : viewMode === 'tag' ? '标签模式' : '复习模式' }}</span>
       </div>
     </footer>
 
     <!-- ============ 右下角全局按钮组（思维导图/大纲/关联图/全屏，四个固定按钮） ============ -->
     <div
-      v-if="hasFile && activePane && activePane.fileType === 'mindmap' && (viewMode === 'mindmap' || viewMode === 'outline' || viewMode === 'graph')"
+      v-if="hasFile && activePane && activePane.fileType === 'mindmap' && (viewMode === 'mindmap' || viewMode === 'outline' || viewMode === 'graph' || viewMode === 'markdown')"
       class="global-bottom-right-actions"
       :class="{ 'in-fullscreen': activePane.fullscreen }"
       :style="{ right: globalActionsRight }"
     >
       <button
         class="global-action-btn"
-        :class="{ active: (viewMode === 'mindmap' || viewMode === 'outline') && activePane.view !== 'outline' }"
+        :class="{ active: activePane.view !== 'outline' && activePane.view !== 'graph' && activePane.view !== 'markdown' }"
         title="思维导图模式"
         @click="switchToMindMapView"
       >
@@ -450,7 +493,7 @@
       </button>
       <button
         class="global-action-btn"
-        :class="{ active: (viewMode === 'mindmap' || viewMode === 'outline') && activePane.view === 'outline' }"
+        :class="{ active: activePane.view === 'outline' }"
         title="大纲模式"
         @click="switchToOutlineView"
       >
@@ -469,6 +512,16 @@
           <circle cx="19" cy="6" r="2.5" />
           <circle cx="12" cy="18" r="2.5" />
           <path d="M7 7.5l3.5 8.5M17 7.5l-3.5 8.5" />
+        </svg>
+      </button>
+      <button
+        class="global-action-btn"
+        :class="{ active: activePane.view === 'markdown' }"
+        title="Markdown 模式"
+        @click="switchToMarkdownView"
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 4h14M5 4v16M19 4v16M9 8h6M9 12h6M9 16h4" />
         </svg>
       </button>
       <button
@@ -623,7 +676,7 @@
 </template>
 
 <script setup>
-import { ref, computed, shallowReactive, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ref, computed, shallowReactive, onMounted, onBeforeUnmount, nextTick, watch, onErrorCaptured } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, FolderOpened, Document } from '@element-plus/icons-vue'
 import MindMapEditor from './components/MindMapEditor.vue'
@@ -639,6 +692,7 @@ import DocViewer from './components/DocViewer.vue'
 import OcrScreenshot from './components/OcrScreenshot.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import GraphView from './components/GraphView.vue'
+import MarkdownEditor from './components/MarkdownEditor.vue'
 import LogPanel from './components/LogPanel.vue'
 import ToolCallIndicator from './components/ToolCallIndicator.vue'
 import SettingsView from './components/SettingsView.vue'
@@ -663,8 +717,18 @@ import {
   highlightColorShortcuts
 } from './utils/textStyle'
 
-// 视图模式：outline | mindmap | tag | review
+// 视图模式：outline | mindmap | graph | markdown | tag | review
 const viewMode = ref('mindmap')
+
+// 渲染异常隔离：某个 pane/组件抛错时不拖垮整个应用。
+onErrorCaptured((error, instance, info) => {
+  console.error('[App][ErrorCaptured]', error, info)
+  try {
+    ElMessage.error(`界面组件发生异常，已隔离：${error?.message || '未知错误'}`)
+  } catch { /* 忽略 */ }
+  // 返回 false 阻止错误继续向上传播。
+  return false
+})
 
 // 视图模式索引（用于 segmented control 指示器位置）：文件目录 / 标签 / 复习 三段
 const viewModeIndex = computed(() => {
@@ -774,6 +838,7 @@ let splitSeq = 0
 const mindMapInstances = shallowReactive({})
 const outlineViewRefs = shallowReactive({})
 const docViewerRefs = shallowReactive({})
+const markdownViewRefs = shallowReactive({})
 // 每个 pane 的激活节点列表（供全局 FixedToolbar 使用）
 const paneActiveNodes = shallowReactive({})
 
@@ -816,6 +881,14 @@ const activePane = computed(() => findPaneById(layoutRoot.value, activePaneId.va
 // 是否多分屏模式（大于 1 个 pane 时显示边框/标题栏）
 const isMultiPane = computed(() => collectPanes(layoutRoot.value).length > 1)
 
+// 多屏组合标签：合并显示所有 pane 的名称（前两字 + 省略号，蓝色竖杠分隔）
+const combinedPanes = computed(() => collectPanes(layoutRoot.value))
+const shortPaneTitle = (title) => {
+  const name = String(title || '').replace(/\.[^.]+$/, '').trim() || '未命名'
+  return name.length > 3 ? name.slice(0, 3) + '…' : name
+}
+const combinedTabTitle = computed(() => combinedPanes.value.map(p => p.title || '未命名').join(' / '))
+
 // 当前激活 pane 的 mindMap 实例（供全局 FixedToolbar / 全屏按钮使用）
 const activeMindMapInstance = computed(() => {
   const p = activePane.value
@@ -841,6 +914,10 @@ const activePaneNodes = computed(() => {
 const outlineViewRef = computed(() => {
   const p = activePane.value
   return (p && p.fileType === 'mindmap' && p.view === 'outline' && outlineViewRefs[p.id]) || null
+})
+const markdownViewRef = computed(() => {
+  const p = activePane.value
+  return (p && p.fileType === 'mindmap' && p.view === 'markdown' && markdownViewRefs[p.id]) || null
 })
 // 当前聚焦的文档窗口的 DocViewer 组件（标签跳转 jumpTo 用）
 const docViewerRef = computed(() => {
@@ -875,6 +952,12 @@ const focusPane = (paneId) => {
     showDocViewer.value = true
     currentFilePath.value = pane.filePath // 同步目录树选中该文档
   } else {
+    if (pane.empty) {
+      activeFileId.value = ''
+      hasFile.value = false
+      showDocViewer.value = false
+      return
+    }
     const tab = tabs.value.find(t => t.fileId === pane.fileId)
     activeFileId.value = pane.fileId
     if (tab) {
@@ -885,8 +968,8 @@ const focusPane = (paneId) => {
     hasFile.value = true
     showDocViewer.value = false
     // 仅在导图/大纲/关联图视图间切换 viewMode；复习/标签侧栏模式保持不变
-    if (viewMode.value === 'mindmap' || viewMode.value === 'outline' || viewMode.value === 'graph') {
-      viewMode.value = pane.view === 'outline' ? 'outline' : pane.view === 'graph' ? 'graph' : 'mindmap'
+    if (viewMode.value === 'mindmap' || viewMode.value === 'outline' || viewMode.value === 'graph' || viewMode.value === 'markdown') {
+      viewMode.value = pane.view === 'outline' ? 'outline' : pane.view === 'graph' ? 'graph' : pane.view === 'markdown' ? 'markdown' : 'mindmap'
     }
   }
 }
@@ -924,7 +1007,12 @@ const openFileToPane = (fileType, fileId, filePath, title) => {
 const splitPane = (targetPaneId, direction, fileType, fileId, filePath, title) => {
   const key = fileType === 'doc' ? filePath : fileId
   if (!key) return null
-  // 拖拽分屏始终新建 pane（允许同一文件出现在多个 pane，Obsidian 行为），不再去重聚焦
+  // 同一文件标签只保留一个 pane：若已存在，聚焦已有窗口，避免重复分屏导致串文件。
+  const existing = findPaneByFile(layoutRoot.value, fileType, key)
+  if (existing) {
+    focusPane(existing.id)
+    return existing
+  }
   const targetPane = findPaneById(layoutRoot.value, targetPaneId)
   if (!targetPane) return null
   const newPane = makePane(fileType, { fileId, filePath, title })
@@ -1035,9 +1123,25 @@ const reorientSplit = (srcPaneId, targetPaneId, edge) => {
 const closePane = async (paneId) => {
   const pane = findPaneById(layoutRoot.value, paneId)
   if (!pane) return
-  if (pane.fileType === 'mindmap' && dirtyFiles.has(pane.fileId)) {
+  if (pane.fileType === 'mindmap' && !pane.empty && dirtyFiles.has(pane.fileId)) {
     const ok = await saveFileById(pane.fileId).catch(() => false)
-    if (!ok) ElMessage.error('关闭前保存失败，该窗口的修改可能已丢失')
+    if (!ok) {
+      try {
+        await ElMessageBox.confirm(
+          '关闭前保存失败，如果继续关闭，这个窗口的修改可能会丢失。是否仍要关闭？',
+          '保存失败',
+          {
+            confirmButtonText: '仍要关闭',
+            cancelButtonText: '取消关闭',
+            type: 'warning',
+            closeOnClickModal: false,
+            closeOnPressEscape: false
+          }
+        )
+      } catch {
+        return
+      }
+    }
   }
   dirtyFiles.delete(pane.fileId)
   const remove = (node) => {
@@ -1051,7 +1155,7 @@ const closePane = async (paneId) => {
   }
   layoutRoot.value = remove(layoutRoot.value)
 
-  if (pane.fileType === 'mindmap') {
+  if (pane.fileType === 'mindmap' && !pane.empty) {
     if (!findPaneByFile(layoutRoot.value, 'mindmap', pane.fileId)) {
       const idx = tabs.value.findIndex(t => t.fileId === pane.fileId)
       if (idx >= 0) tabs.value.splice(idx, 1)
@@ -1106,6 +1210,10 @@ const registerOutlineView = (paneId, el) => {
   if (el) outlineViewRefs[paneId] = el
   else delete outlineViewRefs[paneId]
 }
+const registerMarkdownView = (paneId, el) => {
+  if (el) markdownViewRefs[paneId] = el
+  else delete markdownViewRefs[paneId]
+}
 
 /* ============ 分屏布局计算（百分比盒 + 分割条） ============ */
 const paneLayouts = ref([])
@@ -1139,8 +1247,26 @@ const recomputeLayouts = () => {
   splitterLayouts.value = splitters
 }
 
-watch(layoutRoot, () => recomputeLayouts(), { deep: true, immediate: true })
-watch(layoutRoot, () => persistLastLayout(), { deep: true })
+let recomputeLayoutRaf = null
+const scheduleRecomputeLayouts = () => {
+  if (recomputeLayoutRaf) return
+  recomputeLayoutRaf = requestAnimationFrame(() => {
+    recomputeLayoutRaf = null
+    recomputeLayouts()
+  })
+}
+
+let persistLayoutTimer = null
+const schedulePersistLayout = () => {
+  if (persistLayoutTimer) clearTimeout(persistLayoutTimer)
+  persistLayoutTimer = setTimeout(() => {
+    persistLayoutTimer = null
+    persistLastLayout()
+  }, 300)
+}
+
+watch(layoutRoot, scheduleRecomputeLayouts, { deep: true, immediate: true })
+watch(layoutRoot, schedulePersistLayout, { deep: true })
 
 const updateSplitSizes = (splitId, ratio) => {
   const findSplit = (node) => {
@@ -1658,9 +1784,45 @@ const initMindMapInstance = () => {
   })
 }
 
-// 视图切换：大纲/思维导图/关联图 = 切换当前 pane 视图；标签/复习 = 侧边栏模式
-const switchView = (mode) => {
-  if (mode === 'mindmap' || mode === 'outline' || mode === 'graph') {
+// 离开 Markdown 模式前，若有未同步编辑，先询问用户：同步并切换 / 放弃修改 / 取消切换。
+const confirmLeaveMarkdown = async () => {
+  const editor = markdownViewRef.value
+  if (!editor || typeof editor.isDirty !== 'function' || !editor.isDirty()) return true
+  try {
+    const action = await ElMessageBox.confirm(
+      'Markdown 内容尚未同步到导图。是否先同步后再切换？',
+      '未同步的 Markdown 修改',
+      {
+        confirmButtonText: '同步并切换',
+        cancelButtonText: '放弃修改并切换',
+        distinguishCancelAndClose: true,
+        closeOnClickModal: false,
+        closeOnPressEscape: false,
+        type: 'warning'
+      }
+    )
+    if (action === 'confirm') {
+      editor.apply(true)
+      return true
+    }
+    if (action === 'cancel') {
+      editor.discard()
+      return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+// 视图切换：大纲/思维导图/关联图/Markdown = 切换当前 pane 视图；标签/复习 = 侧边栏模式
+const switchView = async (mode) => {
+  // 离开 Markdown 模式时先处理未同步内容；仍留在 Markdown 或切换失败则直接返回。
+  if (mode !== 'markdown' && activePane.value?.fileType === 'mindmap' && activePane.value.view === 'markdown') {
+    const ok = await confirmLeaveMarkdown()
+    if (!ok) return
+  }
+  if (mode === 'mindmap' || mode === 'outline' || mode === 'graph' || mode === 'markdown') {
     let pane = activePane.value
     if (!pane || pane.fileType !== 'mindmap') {
       if (!activeFileId.value) {
@@ -1671,7 +1833,7 @@ const switchView = (mode) => {
       pane = activePane.value
     }
     if (pane && pane.fileType === 'mindmap') {
-      pane.view = mode === 'outline' ? 'outline' : (mode === 'graph' ? 'graph' : 'map')
+      pane.view = mode === 'outline' ? 'outline' : mode === 'graph' ? 'graph' : mode === 'markdown' ? 'markdown' : 'map'
     }
     viewMode.value = mode
     if (mode === 'outline') {
@@ -1694,10 +1856,10 @@ const switchView = (mode) => {
 
 // 回到「文件目录」视图（显示目录树）：从标签/复习模式切回，不强制要求已打开思维导图文件
 const switchToFileTree = () => {
-  if (viewMode.value === 'mindmap' || viewMode.value === 'outline' || viewMode.value === 'graph') return
+  if (viewMode.value === 'mindmap' || viewMode.value === 'outline' || viewMode.value === 'graph' || viewMode.value === 'markdown') return
   const pane = activePane.value
   if (pane && pane.fileType === 'mindmap') {
-    viewMode.value = pane.view === 'outline' ? 'outline' : pane.view === 'graph' ? 'graph' : 'mindmap'
+    viewMode.value = pane.view === 'outline' ? 'outline' : pane.view === 'graph' ? 'graph' : pane.view === 'markdown' ? 'markdown' : 'mindmap'
   } else {
     viewMode.value = 'mindmap'
   }
@@ -1776,6 +1938,11 @@ const switchToOutlineView = () => {
   switchView('outline')
 }
 
+// 切换到 Markdown 模式
+const switchToMarkdownView = () => {
+  switchView('markdown')
+}
+
 // 切换关联图视图
 const toggleGraphView = () => {
   const p = activePane.value
@@ -1815,6 +1982,24 @@ const onDataChange = (data, fileId) => {
     if (tab) tab.data = cleanData
   }
   scheduleAutoSave(fid)
+}
+
+// Markdown 模式同步回导图：把 Markdown 解析后的树同时写进当前 pane 的 mindMap 实例和 tab 数据。
+const handleMarkdownApply = ({ tree, fileId }) => {
+  if (!tree) return
+  const fid = fileId || activeFileId.value
+  const pane = findPaneByFile(layoutRoot.value, 'mindmap', fid) || activePane.value
+  const editor = pane && editorRefs[pane.id]
+  try {
+    if (editor && typeof editor.setData === 'function') {
+      editor.setData(tree)
+    } else if (pane && mindMapInstances[pane.id] && typeof mindMapInstances[pane.id].setData === 'function') {
+      mindMapInstances[pane.id].setData(tree)
+    }
+  } catch (error) {
+    console.warn('[MarkdownEditor] mindMap 实例同步失败，仍更新 tab 数据:', error)
+  }
+  onDataChange(tree, fid)
 }
 
 // 节点激活回调（分屏模式下区分不同 pane）
@@ -1884,6 +2069,19 @@ const onFileCreated = (filePath, fileName) => {
       }
     })
   }
+}
+
+// 后台任务/第三方面板点击本地文件路径：统一转交文件树打开。
+const onOpenLocalFileFromPanel = (event) => {
+  const filePath = event?.detail?.path
+  if (!filePath) return
+  try {
+    if (fileTreeRef.value && typeof fileTreeRef.value.openFileByPath === 'function') {
+      fileTreeRef.value.openFileByPath(filePath)
+      return
+    }
+  } catch { /* 忽略 */ }
+  currentFilePath.value = filePath
 }
 
 // AI 生成了独立文件（AI出题/导出等），画布内容未切换：
@@ -4220,6 +4418,9 @@ onMounted(() => {
     })
   }
 
+  // 第三方消息面板/后台任务结果里点击本地文件路径时，在应用内打开，不跳出资源管理器。
+  window.addEventListener('open-local-file', onOpenLocalFileFromPanel)
+
   // 注册定时任务触发监听器
   // 当 Windows Task Scheduler 在指定时间启动应用时，main.js 发送 task:scheduledTrigger 事件
   // 此处直接在 App 层监听，确保即使 TaskSchedulerPanel 未打开也能接收触发
@@ -4308,6 +4509,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onGlobalMouseMove)
   window.removeEventListener('mouseup', onGlobalMouseUp)
   window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('open-local-file', onOpenLocalFileFromPanel)
   if (autoSaveTimer) {
     clearTimeout(autoSaveTimer)
     autoSaveTimer = null
@@ -4319,6 +4521,14 @@ onBeforeUnmount(() => {
   if (reviewReminderTimer) {
     clearInterval(reviewReminderTimer)
     reviewReminderTimer = null
+  }
+  if (recomputeLayoutRaf) {
+    cancelAnimationFrame(recomputeLayoutRaf)
+    recomputeLayoutRaf = null
+  }
+  if (persistLayoutTimer) {
+    clearTimeout(persistLayoutTimer)
+    persistLayoutTimer = null
   }
 })
 </script>
@@ -4385,6 +4595,24 @@ onBeforeUnmount(() => {
 .tab-item.active { background-color: var(--active-bg, rgba(0,122,255,0.10)); color: var(--text-primary, #1d1d1f); font-weight: 600; }
 .tab-item.drag-over { border-left: 2px solid var(--apple-blue, #007aff); }
 .tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-tab { max-width: 320px; }
+.multi-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.multi-prefix { color: var(--text-secondary, #6e6e73); font-weight: 500; flex-shrink: 0; }
+.multi-item { color: var(--text-primary, #1d1d1f); }
+.multi-sep {
+  color: #0a84ff;
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 1;
+  margin: 0 1px;
+  flex-shrink: 0;
+}
 .tab-close {
   display: flex; align-items: center; justify-content: center;
   width: 16px; height: 16px; border-radius: 4px;
@@ -4777,6 +5005,35 @@ onBeforeUnmount(() => {
   font-size: 13px;
   color: var(--text-tertiary);
   margin-top: 16px;
+}
+
+.pane-welcome {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background-color: var(--main-bg);
+  user-select: none;
+}
+
+.pane-welcome .welcome-logo {
+  margin-bottom: 8px;
+}
+
+.pane-welcome .welcome-title {
+  font-size: 22px;
+}
+
+.pane-welcome .welcome-subtitle {
+  font-size: 13px;
+}
+
+.pane-welcome .welcome-hint {
+  font-size: 11px;
+  margin-top: 10px;
 }
 
 .mind-map-view {

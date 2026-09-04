@@ -112,11 +112,19 @@ function extractAllText(node, results = []) {
   if (!node) return results
   const text = node.data?.text || node.text || ''
   const plainText = text.replace(/<[^>]+>/g, '').trim()
+  const uid = node.data?.uid || ''
   if (plainText) {
     results.push({
-      uid: node.data?.uid || '',
+      uid,
       text: plainText
     })
+  }
+  // 概要节点同样是用户记忆内容，原逻辑只索引节点正文会导致“搜索概要内容搜不到”。
+  const rawGen = node.data?.generalization
+  const gens = Array.isArray(rawGen) ? rawGen : (rawGen ? [rawGen] : [])
+  for (const g of gens) {
+    const summaryText = String(g?.text || '').replace(/<[^>]+>/g, '').trim()
+    if (summaryText) results.push({ uid, text: summaryText })
   }
   const children = node.children || node.data?.children || []
   if (Array.isArray(children)) {

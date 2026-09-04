@@ -98,10 +98,22 @@ function parseLines(lines, indentUnit) {
     const line = lines[i]
     if (!line.trim()) continue
 
-    // 代码块（跳过内容，不解析为节点）
+    // 代码块：保留为只读代码块节点，Markdown 往返时不丢失。
     if (line.trim().startsWith('```')) {
+      const fence = line.trim()
+      const codeLines = [fence]
       i++
-      while (i < lines.length && !lines[i].trim().startsWith('```')) i++
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        codeLines.push(lines[i])
+        i++
+      }
+      if (i < lines.length) codeLines.push(lines[i].trim())
+      nodes.push({
+        depth: currentHeadingDepth + 1,
+        text: '💻 代码块',
+        codeBlock: true,
+        markdownCode: codeLines.join('\n')
+      })
       continue
     }
 
@@ -145,9 +157,20 @@ function parseLines(lines, indentUnit) {
       continue
     }
 
-    // Markdown 表格：连续的 | ... | 行拆成“每行一个节点”，列名作为前缀写入同一节点。
-    // 不再把 <table> 塞进节点文本：simple-mind-map 的富文本编辑基于 Quill，无法编辑/还原
-    // <table>，双击编辑后会卡住，退出后表格还会被剥成纯文本。多行节点仍可正常双击编辑。
+    // 图片语法：![alt](url) 作为独立图片节点，方便导图/大纲直接显示。
+    const imageMatch = line.match(/^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)\s*$/)
+    if (imageMatch) {
+      nodes.push({
+        depth: currentHeadingDepth + 1,
+        text: imageMatch[1].trim() || '图片',
+        image: imageMatch[2].trim(),
+        imageTitle: imageMatch[1].trim() || '图片'
+      })
+      continue
+    }
+
+    // Markdown 表格：保留为单个表格节点，原 Markdown 表格源码存进 markdownTable，
+    // 富文本 HTML 存进 tableHtml。这样 Markdown / 思维导图 / 大纲往返时不会丢表格。
     if (/^\s*\|.*\|\s*$/.test(line)) {
       const tableLines = []
       let j = i
@@ -160,26 +183,33 @@ function parseLines(lines, indentUnit) {
           break
         }
       }
-      // 去掉分隔行（|---|:--| 等）
+      const markdownTable = tableLines.join('\n')
       const dataRows = tableLines.filter(l => !/^\|[\s:|-]+\|$/.test(l))
       if (dataRows.length) {
-        const rows = dataRows.map(r => r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim()))
-        const header = rows[0] || []
-        const body = rows.slice(1)
-        const baseDepth = currentHeadingDepth + 1
-        if (body.length) {
-          body.forEach(row => {
-            const parts = row.map((cell, idx) => {
-              const label = header[idx] ? `【${header[idx]}】` : ''
-              return cell ? `${label}${cell}` : ''
-            }).filter(Boolean)
-            if (parts.length) {
-              nodes.push({ depth: baseDepth, text: parts.join('\n') })
-            }
+        const parseRow = (r) => r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim())
+        const header = parseRow(dataRows[0])
+        const body = dataRows.slice(1)
+        let tableHtml = '<table class="mm-md-table"><thead><tr>'
+        header.forEach(h => {
+          tableHtml += `<th>${escapeHtml(h)}</th>`
+        })
+        tableHtml += '</tr></thead><tbody>'
+        body.forEach(row => {
+          tableHtml += '<tr>'
+          const cells = parseRow(row)
+          while (cells.length < header.length) cells.push('')
+          cells.slice(0, header.length).forEach(cell => {
+            tableHtml += `<td>${escapeHtml(cell)}</td>`
           })
-        } else if (header.length) {
-          nodes.push({ depth: baseDepth, text: header.filter(Boolean).join('、') })
-        }
+          tableHtml += '</tr>'
+        })
+        tableHtml += '</tbody></table>'
+        nodes.push({
+          depth: currentHeadingDepth + 1,
+          text: tableHtml,
+          tableHtml,
+          markdownTable
+        })
       }
       i = j - 1
       continue
@@ -204,6 +234,12 @@ function buildTree(nodes) {
   for (const item of nodes) {
     const newNode = { data: { text: item.text, uid: createUid(), richText: true }, children: [] }
     if (item.tableHtml) newNode.data.tableHtml = item.tableHtml
+    if (item.markdownTable) newNode.data.markdownTable = item.markdownTable
+    if (item.markdownCode) newNode.data.markdownCode = item.markdownCode
+    if (item.image) {
+      newNode.data.image = item.image
+      newNode.data.imageTitle = item.imageTitle || item.text
+    }
     if (item.quote) newNode.data.quote = true
 
     // 弹出栈中深度 >= 当前的节点，找到父节点
@@ -241,6 +277,14 @@ function inlineMarkdownToHtml(escapedText) {
   out = out.replace(/`([^`]+)`/g, '<code>$1</code>')
   // 斜体 *...*（单个星号，避免与 ** 冲突）
   out = out.replace(/(^|[^*])\*([^*\s][^*]*?)\*(?!\*)/g, '$1<em>$2</em>')
+  // 链接 [文本](url)：兼容普通 URL 与 mindmap-file / mindmap-node 等本程序引用协议。
+  // 前置 [^!] 是为了避免把图片语法 ![alt](url) 误转成链接。
+  // 引用协议需带上 smm-ref class，使导图/大纲的 Quill 引用原子块能正确还原（否则会退化成普通文本）。
+  out = out.replace(/(^|[^!])\[([^\]]+)\]\(([^)\s]+)\)/g, (m, p1, text, href) => {
+    const isRef = href.startsWith('mindmap-file:') || href.startsWith('mindmap-node:')
+    const cls = isRef ? ' class="smm-ref"' : ''
+    return `${p1}<a href="${href}"${cls} target="_blank" rel="noopener noreferrer">${text}</a>`
+  })
   return out
 }
 
@@ -272,7 +316,22 @@ function normalizeTree(node) {
  */
 export function treeToMarkdown(node, depth = 1) {
   if (!node || !node.data) return ''
-  let md = '#'.repeat(depth) + ' ' + richTextToMarkdownInline(node.data.text) + '\n'
+  let md = ''
+  if (node.data.markdownTable) {
+    // 表格节点保留原始 Markdown 表格源码，避免切换后变成异常文本。
+    md = String(node.data.markdownTable).trim() + '\n'
+  } else if (node.data.markdownCode) {
+    md = String(node.data.markdownCode).trim() + '\n'
+  } else if (node.data.quote) {
+    // 引用节点：往返时保留 > 前缀，避免切换后变成普通标题/段落。
+    const quoteText = richTextToMarkdownInline(node.data.text)
+    md = String(quoteText).split('\n').map(l => (l.trim() ? `> ${l.trim()}` : '>')).join('\n') + '\n'
+  } else if (node.data.image) {
+    const alt = String(node.data.imageTitle || '图片').replace(/[\[\]]/g, '')
+    md = `![${alt}](${node.data.image})\n`
+  } else {
+    md = '#'.repeat(depth) + ' ' + richTextToMarkdownInline(node.data.text) + '\n'
+  }
   if (node.children) {
     node.children.forEach(child => {
       md += treeToMarkdown(child, depth + 1)
@@ -293,6 +352,7 @@ function richTextToMarkdownInline(html) {
     .replace(/<del>(.*?)<\/del>/g, '~~$1~~')
     .replace(/<strike>(.*?)<\/strike>/g, '~~$1~~')
     .replace(/<code>(.*?)<\/code>/g, '`$1`')
+    .replace(/<a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g, '[$2]($1)')
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')

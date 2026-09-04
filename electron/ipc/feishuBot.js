@@ -5,6 +5,7 @@
  */
 const { ipcMain, BrowserWindow } = require('electron')
 const store = require('../utils/store')
+const { decryptFields } = require('../utils/secureStore')
 
 let wsClient = null
 let larkClient = null
@@ -20,11 +21,13 @@ const PROCESSED_ID_TTL = 5 * 60 * 1000 // 5分钟后清理
 
 const FEISHU_CONFIG_KEY = 'feishu_config'
 const AI_CONFIG_KEY = 'aiConfig'
+// 与 electron/ipc/feishu.js 保持一致：appSecret 以 safeStorage 密文落盘
+const FEISHU_SENSITIVE_FIELDS = ['appSecret']
 // 长连接期望状态持久化：true = 上次用户启动了长连接，应用重启后自动恢复
 const BOT_AUTO_START_KEY = 'feishu_bot_auto_start'
 
 function getFeishuConfig() {
-  return store.get(FEISHU_CONFIG_KEY) || {}
+  return decryptFields(store.get(FEISHU_CONFIG_KEY) || {}, FEISHU_SENSITIVE_FIELDS)
 }
 
 function getAIConfig() {
