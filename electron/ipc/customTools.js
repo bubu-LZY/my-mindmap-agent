@@ -198,24 +198,29 @@ const executeTool = async (id, args = {}, meta = {}) => {
     allowShell: item.manifest.powershell === true
   }
 
-  return await new Promise((resolve, reject) => {
+  return await new Promise((resolve) => {
     let settled = false
     let child = null
     let timer = null
-    const finish = (fn, val) => {
+    const finish = (val) => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
       try { child?.kill() } catch (e) {}
       cleanup()
-      fn(val)
+      resolve(val)
     }
-    timer = setTimeout(() => finish(reject, new Error(`自定义工具执行超时（${timeoutMs}ms）`)), timeoutMs)
+    timer = setTimeout(() => finish({ success: false, message: `自定义工具执行超时（${timeoutMs}ms）` }), timeoutMs)
 
     try {
-      child = fork(tmpWorkerFile, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+      // Electron 主进程里 fork 会把子进程用 Electron 二进制拉起，必须显式置
+      // ELECTRON_RUN_AS_NODE=1 让其以纯 Node 运行（否则子进程拿不到 process.send）。
+      child = fork(tmpWorkerFile, [], {
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+      })
     } catch (e) {
-      finish(reject, e)
+      finish({ success: false, message: e?.message || String(e) })
       return
     }
 
@@ -229,17 +234,17 @@ const executeTool = async (id, args = {}, meta = {}) => {
         if (msg.ok) {
           let result = null
           try { result = JSON.parse(msg.payload) } catch (e) { result = msg.payload }
-          if (typeof result === 'string') finish(resolve, { success: true, message: result })
-          else if (result && typeof result === 'object') finish(resolve, result)
-          else finish(resolve, { success: true, message: '工具执行完成', data: result })
+          if (typeof result === 'string') finish({ success: true, message: result })
+          else if (result && typeof result === 'object') finish(result)
+          else finish({ success: true, message: '工具执行完成', data: result })
         } else {
-          finish(reject, new Error(msg.error || '自定义工具执行失败'))
+          finish({ success: false, message: msg.error || '自定义工具执行失败' })
         }
       }
     })
-    child.on('error', (err) => finish(reject, err))
+    child.on('error', (err) => finish({ success: false, message: err?.message || String(err) }))
     child.on('exit', (code) => {
-      if (!settled) finish(reject, new Error(`自定义工具进程异常退出（code=${code}）`))
+      if (!settled) finish({ success: false, message: `自定义工具进程异常退出（code=${code}）` })
     })
 
     child.send({ type: 'run', args, contextMeta, tmpFile: tmpToolFile })
