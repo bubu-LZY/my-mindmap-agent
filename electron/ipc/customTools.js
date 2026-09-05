@@ -2,13 +2,22 @@ const { ipcMain, app, shell } = require('electron')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { execFile } = require('child_process')
-const { pathToFileURL } = require('url')
+const { execFile, fork } = require('child_process')
 const store = require('../utils/store')
 
 const TOOL_DIR_NAME = 'custom-tools'
 const SPEC_FILE_NAME = 'skills-mcp-tools.md'
 const OVERRIDE_KEY = 'customToolsOverrides'
+
+// 子进程执行器源码：打包进 asar 后，主进程可直接读；运行前再写入临时目录并 fork，
+// 避免 child_process 直接 fork asar 内脚本的兼容性问题。
+const WORKER_SOURCE = (() => {
+  try {
+    return fs.readFileSync(path.join(__dirname, 'customToolWorker.cjs'), 'utf8')
+  } catch (e) {
+    return ''
+  }
+})()
 
 let toolCache = new Map() // id -> { manifest, dir }
 
@@ -108,27 +117,51 @@ const getTool = (id) => {
   return toolCache.get(String(id)) || null
 }
 
+// 子进程 RPC：文件读写 / PowerShell 仍回到主进程执行，并在这里做路径白名单校验。
+const handleToolRpc = async (method, params, { assertAllowedFile }) => {
+  if (method === 'file.writeText') {
+    assertAllowedFile(params?.filePath)
+    await fs.promises.writeFile(String(params.filePath), String(params?.content ?? ''), 'utf8')
+    return { success: true, filePath: params.filePath }
+  }
+  if (method === 'file.readText') {
+    assertAllowedFile(params?.filePath)
+    return await fs.promises.readFile(String(params.filePath), 'utf8')
+  }
+  if (method === 'file.exists') {
+    try {
+      assertAllowedFile(params?.filePath)
+      await fs.promises.access(String(params.filePath))
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (method === 'shell.powerShell') {
+    const timeoutMs = Math.min(Math.max(Number(params?.options?.timeoutMs) || 30000, 1000), 120000)
+    return await new Promise((resolve, reject) => {
+      execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', String(params?.script || '')], {
+        timeout: timeoutMs,
+        windowsHide: true
+      }, (error, stdout, stderr) => {
+        if (error) reject(new Error(stderr || error.message))
+        else resolve({ success: true, stdout: String(stdout || ''), stderr: String(stderr || '') })
+      })
+    })
+  }
+  throw new Error('未知 RPC 方法：' + method)
+}
+
 const executeTool = async (id, args = {}, meta = {}) => {
   const item = getTool(id)
   if (!item) throw new Error(`未找到自定义工具：${id}`)
-  // 安全审计：自定义工具在主进程执行任意 JS，记录执行来源便于事后审计
+  // 安全审计：自定义工具在独立子进程执行，记录执行来源便于事后审计
   console.log(`[自定义工具审计] 执行工具: ${id}`)
   const scriptPath = path.join(item.dir, 'tool.js')
   if (!fs.existsSync(scriptPath)) throw new Error('工具缺少 tool.js')
   const source = fs.readFileSync(scriptPath, 'utf8')
-  // 自定义工具规范使用 ESM；Electron/Node 对 .js 文件默认按 CommonJS 解析，
-  // 直接 import 会遇到 "Unexpected token 'export'"。复制为 .mjs 后动态导入即可兼容 ESM。
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mmct-'))
-  const tmpFile = path.join(tmpDir, 'tool.mjs')
-  fs.writeFileSync(tmpFile, source, 'utf8')
-  let mod
-  try {
-    mod = await import(`${pathToFileURL(tmpFile).href}?v=${Date.now()}`)
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (e) {}
-  }
-  const execute = mod.execute || mod.default?.execute || mod.default
-  if (typeof execute !== 'function') throw new Error('tool.js 必须导出 execute 函数')
+  if (!WORKER_SOURCE) throw new Error('自定义工具执行器缺失，无法启动隔离子进程')
+
   const allowedRoots = [
     app.getPath('userData'),
     app.getPath('temp'),
@@ -148,71 +181,69 @@ const executeTool = async (id, args = {}, meta = {}) => {
       throw new Error('自定义工具只能访问用户数据目录、临时目录、常用文档目录或当前文件所在目录')
     }
   }
-  const context = {
-    app: {
-      version: app.getVersion(),
-      userDataDir: app.getPath('userData')
-    },
-    file: {
-      currentFilePath: String(meta.currentFilePath || ''),
-      currentFileName: String(meta.currentFileName || ''),
-      writeText: async (filePath, content) => {
-        assertAllowedFile(filePath)
-        await fs.promises.writeFile(filePath, String(content ?? ''), 'utf8')
-        return { success: true, filePath }
-      },
-      readText: async (filePath) => {
-        assertAllowedFile(filePath)
-        return await fs.promises.readFile(filePath, 'utf8')
-      },
-      exists: async (filePath) => {
-        try {
-          assertAllowedFile(filePath)
-          await fs.promises.access(filePath)
-          return true
-        } catch {
-          return false
+
+  const timeoutMs = Math.min(Math.max(Number(item.manifest.timeoutMs) || 30000, 1000), 120000)
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mmct-'))
+  const tmpToolFile = path.join(tmpDir, 'tool.mjs')
+  const tmpWorkerFile = path.join(tmpDir, 'worker.cjs')
+  fs.writeFileSync(tmpToolFile, source, 'utf8')
+  fs.writeFileSync(tmpWorkerFile, WORKER_SOURCE, 'utf8')
+  const cleanup = () => { try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (e) {} }
+
+  const contextMeta = {
+    appVersion: app.getVersion(),
+    userDataDir: app.getPath('userData'),
+    currentFilePath: String(meta.currentFilePath || ''),
+    currentFileName: String(meta.currentFileName || ''),
+    allowShell: item.manifest.powershell === true
+  }
+
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    let child = null
+    let timer = null
+    const finish = (fn, val) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      try { child?.kill() } catch (e) {}
+      cleanup()
+      fn(val)
+    }
+    timer = setTimeout(() => finish(reject, new Error(`自定义工具执行超时（${timeoutMs}ms）`)), timeoutMs)
+
+    try {
+      child = fork(tmpWorkerFile, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+    } catch (e) {
+      finish(reject, e)
+      return
+    }
+
+    child.on('message', (msg) => {
+      if (!msg || typeof msg !== 'object') return
+      if (msg.type === 'rpc') {
+        handleToolRpc(msg.method, msg.params, { assertAllowedFile })
+          .then((result) => { try { child.send({ type: 'rpc-result', id: msg.id, ok: true, result }) } catch (e) {} })
+          .catch((e) => { try { child.send({ type: 'rpc-result', id: msg.id, ok: false, error: (e && e.message) || String(e) }) } catch (e2) {} })
+      } else if (msg.type === 'result') {
+        if (msg.ok) {
+          let result = null
+          try { result = JSON.parse(msg.payload) } catch (e) { result = msg.payload }
+          if (typeof result === 'string') finish(resolve, { success: true, message: result })
+          else if (result && typeof result === 'object') finish(resolve, result)
+          else finish(resolve, { success: true, message: '工具执行完成', data: result })
+        } else {
+          finish(reject, new Error(msg.error || '自定义工具执行失败'))
         }
       }
-    },
-    shell: item.manifest.powershell === true
-      ? {
-          powerShell: (script, options = {}) => new Promise((resolve, reject) => {
-            const timeoutMs = Math.min(Math.max(Number(options.timeoutMs) || 30000, 1000), 120000)
-            execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', String(script || '')], {
-              timeout: timeoutMs,
-              windowsHide: true
-            }, (error, stdout, stderr) => {
-              if (error) {
-                reject(new Error(stderr || error.message))
-              } else {
-                resolve({ success: true, stdout: String(stdout || ''), stderr: String(stderr || '') })
-              }
-            })
-          })
-        }
-      : null,
-    http: {
-      fetch: globalThis.fetch
-    }
-  }
-  // 超时保护：避免异常/挂起的自定义工具长期占用主进程。
-  // 注意：对同步死循环无效，只能隔离异步永不 resolve 的情况；真正的同步阻塞仍需进程隔离。
-  const timeoutMs = Math.min(Math.max(Number(item.manifest.timeoutMs) || 30000, 1000), 120000)
-  let timer
-  const timeoutGuard = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`自定义工具执行超时（${timeoutMs}ms）`)), timeoutMs)
+    })
+    child.on('error', (err) => finish(reject, err))
+    child.on('exit', (code) => {
+      if (!settled) finish(reject, new Error(`自定义工具进程异常退出（code=${code}）`))
+    })
+
+    child.send({ type: 'run', args, contextMeta, tmpFile: tmpToolFile })
   })
-  try {
-    const result = await Promise.race([execute(args || {}, context), timeoutGuard])
-    if (typeof result === 'string') return { success: true, message: result }
-    if (result && typeof result === 'object') return result
-    return { success: true, message: '工具执行完成', data: result }
-  } catch (e) {
-    return { success: false, message: e?.message || String(e) }
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
 }
 
 const getSpecPath = () => {

@@ -2,6 +2,13 @@
 
 记录项目的所有重要变更。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [4.8.2] - 2026-09-05
+
+### 安全（Security）
+
+- **自定义工具独立子进程沙箱**：`tool.js` 不再在主进程内 `import()` 执行，改为写入临时目录后由独立子进程（`child_process.fork`）执行。工具代码即使直接 `import('fs')` / `import('child_process')`，也只能操作子进程自己的 Node，无法触碰主进程、渲染进程、localStorage 或应用其它资源。
+- 工具与主进程之间仅保留最小 RPC：文件读写（主进程继续做路径白名单校验）、PowerShell（仅 `manifest.powershell===true` 时开放）、`http.fetch`（子进程原生 fetch）。执行结果经 JSON 序列化回传，主进程继续统一做超时保护（默认 30s / 上限 120s）。
+
 ## [4.8.1] - 2026-09-05
 
 本批主要围绕「Markdown 与多视图统一、渲染性能、多分屏体验、后台 AI、安全加固」进行修复。
