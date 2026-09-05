@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>my-mindmap agent · AI 思维导图智能体</title>
+<style>
+  :root {
+    --bg: #f6f7fb;
+    --surface: #ffffff;
+    --text-primary: #1c1c1e;
+    --text-secondary: #5d6079;
+    --brand: #7c3aed;
+    --brand-light: rgba(124, 58, 237, 0.08);
+    --border: #e6e8f1;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text-primary);
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+  .hero {
+    text-align: center;
+    padding: 40px 0 24px;
+  }
+  .hero h1 {
+    font-size: 38px;
+    margin: 0 0 8px;
+    letter-spacing: -0.5px;
+  }
+  .hero h1 .accent { color: var(--brand); }
+  .hero p.tagline {
+    font-size: 16px;
+    color: var(--text-secondary);
+    margin: 0;
+  }
+  .badges {
+    margin: 18px 0 0;
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .badge {
+    display: inline-block;
+    padding: 4px 10px;
+    background: var(--brand-light);
+    color: var(--brand);
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .cta {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin: 32px 0;
+    flex-wrap: wrap;
+  }
+  .btn {
+    display: inline-block;
+    padding: 12px 22px;
+    border-radius: 10px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 14px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .btn-primary {
+    background: var(--brand);
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(124, 58, 237, 0.25);
+  }
+  .btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(124, 58, 237, 0.35);
+  }
+  .btn-ghost {
+    background: var(--surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+  }
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px 28px;
+    margin-bottom: 20px;
+  }
+  .section h2 {
+    margin: 0 0 12px;
+    font-size: 20px;
+  }
+  .section p {
+    margin: 0 0 12px;
+    color: var(--text-secondary);
+  }
+  .features {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin-top: 8px;
+  }
+  .feature {
+    padding: 14px 16px;
+    background: var(--bg);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  .feature h3 {
+    margin: 0 0 6px;
+    font-size: 14px;
+    color: var(--text-primary);
+  }
+  .feature p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .feature .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    background: var(--brand);
+    color: #fff;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .download-box {
+    background: linear-gradient(135deg, var(--brand-light), rgba(124, 58, 237, 0.04));
+    border: 1px solid rgba(124, 58, 237, 0.2);
+  }
+  .download-box h2 { color: var(--brand); }
+  .download-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .download-row a {
+    flex: 1;
+    min-width: 200px;
+    text-align: center;
+  }
+  .meta {
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 13px;
+    margin-top: 32px;
+  }
+  .meta a { color: var(--brand); text-decoration: none; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <h1><span class="accent">my-mindmap</span> agent</h1>
+      <p class="tagline">基于思维导图和大纲的 AI 智能体 · 把思考变成可视化结构</p>
+      <div class="badges">
+        <span class="badge">Electron</span>
+        <span class="badge">Vue 3</span>
+        <span class="badge">AI Agent</span>
+        <span class="badge">本地优先</span>
+      </div>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/bubu-LZY/my-mindmap-agent/releases/latest">立即下载</a>
+        <a class="btn btn-ghost" href="https://github.com/bubu-LZY/my-mindmap-agent">查看源码</a>
+      </div>
+    </header>
+
+    <section class="section download-box">
+      <h2>下载</h2>
+      <p id="download-desc">点击下载最新版本（v4.8.9 · Windows 64 位）</p>
+      <div class="download-row">
+        <a id="dl-exe" class="btn btn-primary" href="#">Windows 安装程序 (.exe)</a>
+        <a id="dl-zip" class="btn btn-ghost" href="#">源码包 (.zip)</a>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>核心功能</h2>
+      <div class="features">
+        <div class="feature">
+          <h3><span class="tag">AI</span>智能挖空</h3>
+          <p>三步流程：机器挖 → AI 补 → AI 复查，可选仅规则或 AI 介入。</p>
+        </div>
+        <div class="feature">
+          <h3><span class="tag">多视图</span>四视图联动</h3>
+          <p>思维导图 / 大纲 / 关联图 / Markdown 实时同步。</p>
+        </div>
+        <div class="feature">
+          <h3><span class="tag">云</span>云盘同步</h3>
+          <p>rclone WebDAV 镜像同步，保存即自动备份到网盘。</p>
+        </div>
+        <div class="feature">
+          <h3><span class="tag">复</span>艾宾浩斯复习</h3>
+          <p>1/3/7/15/31 天复习曲线，支持桌面日历双向同步。</p>
+        </div>
+        <div class="feature">
+          <h3><span class="tag">问</span>知识问答</h3>
+          <p>本地知识库 BM25 + 向量检索，跨文件回答。</p>
+        </div>
+        <div class="feature">
+          <h3><span class="tag">扩</span>Skills / MCP</h3>
+          <p>支持自定义工具、MCP 服务端、定时任务。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>项目特点</h2>
+      <p>• 完全本地优先，文件存储在你的电脑上（默认 C:\我的mindmap）。</p>
+      <p>• 支持飞书、微信、定时任务等多种消息源自动自动触发 AI 任务。</p>
+      <p>• AI 智能体可读取 PDF / Word / Excel / PPT / 图片 OCR，自动转思维导图。</p>
+      <p>• 多分屏、拖拽标签、独立窗口组合，像 Obsidian 一样灵活。</p>
+    </section>
+
+    <p class="meta">
+      了解更多请访问
+      <a href="https://github.com/bubu-LZY/my-mindmap-agent">GitHub 仓库</a>
+      · 反馈 2995136355@qq.com
+    </p>
+  </div>
+
+  <script>
+    // 自动用 GitHub API 拿最新 release 链接，确保下载按钮永远指向最新版
+    fetch('https://api.github.com/repos/bubu-LZY/my-mindmap-agent/releases/latest')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data || !data.assets) return
+        const exeAsset = data.assets.find(a => /\.exe($|\?)/i.test(a.name))
+        const zipAsset = data.assets.find(a => /\.zip($|\?)/i.test(a.name))
+        if (exeAsset) {
+          document.getElementById('dl-exe').href = exeAsset.browser_download_url
+          document.getElementById('download-desc').textContent =
+            '点击下载最新版本（v' + data.tag_name.replace(/^v/, '') + ' · Windows 64 位）'
+        }
+        if (zipAsset) document.getElementById('dl-zip').href = zipAsset.browser_download_url
+      })
+      .catch(() => {})
+  </script>
+</body>
+</html>
