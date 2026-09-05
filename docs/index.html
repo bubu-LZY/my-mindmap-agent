@@ -1,0 +1,1111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>my-mindmap agent · 在线演示</title>
+<style>
+/* ================================================================
+ * 设计令牌（与 App.vue 顶部 navbar 配色一致：苹果蓝 #007aff）
+ * ================================================================ */
+:root {
+  --apple-blue: #007aff;
+  --apple-blue-hover: #0a84ff;
+  --apple-blue-soft: rgba(0, 122, 255, 0.08);
+  --ai-purple: #af52de;
+  --ai-purple-soft: rgba(175, 82, 222, 0.12);
+  --bg-base: #f5f5f7;
+  --bg-elevated: rgba(255, 255, 255, 0.88);
+  --bg-sidebar: #f6f6f8;
+  --bg-toolbar: rgba(255, 255, 255, 0.95);
+  --bg-canvas: #fcfcfd;
+  --bg-hover: rgba(0, 0, 0, 0.04);
+  --bg-active: rgba(0, 122, 255, 0.12);
+  --text-primary: #1d1d1f;
+  --text-secondary: #515154;
+  --text-tertiary: #86868b;
+  --border-light: rgba(0, 0, 0, 0.08);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 28px rgba(0, 0, 0, 0.14);
+}
+* { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ================================================================
+ * 顶部 hero 入口
+ * ================================================================ */
+.hero-page {
+  position: fixed; inset: 0; z-index: 200;
+  background: linear-gradient(180deg, #fbfbfd 0%, #f5f5f7 100%);
+  display: flex; align-items: center; justify-content: center; flex-direction: column;
+  text-align: center; padding: 32px;
+  transition: opacity .35s ease, transform .35s ease;
+}
+.hero-page.hide { opacity: 0; transform: scale(1.02); pointer-events: none; }
+.hero-page .badge {
+  display: inline-block; font-size: 11px; color: var(--apple-blue);
+  background: var(--apple-blue-soft); padding: 5px 14px; border-radius: 999px;
+  margin-bottom: 18px; font-weight: 500;
+}
+.hero-page h1 { font-size: 52px; margin: 0 0 12px; letter-spacing: -1.5px; font-weight: 700;
+  background: linear-gradient(135deg, #1d1d1f, #434348);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.hero-page h1 .accent {
+  background: linear-gradient(135deg, var(--apple-blue), var(--ai-purple));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.hero-page p.sub { font-size: 18px; color: var(--text-secondary); margin: 0 0 28px; max-width: 600px; }
+.hero-tags { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-bottom: 28px; }
+.hero-tag { padding: 8px 16px; background: var(--bg-elevated); backdrop-filter: blur(20px);
+  border: 1px solid var(--border-light); border-radius: 999px; font-size: 12.5px; color: var(--text-secondary);
+  box-shadow: var(--shadow-sm); }
+.hero-tag .n { color: var(--apple-blue); font-weight: 600; margin-right: 4px; }
+.hero-cta { display: flex; gap: 12px; }
+.hero-btn { padding: 13px 26px; border-radius: 999px; font-size: 14.5px; font-weight: 500;
+  border: none; cursor: pointer; transition: transform .2s ease, box-shadow .2s ease; text-decoration: none; }
+.hero-btn.primary { background: var(--apple-blue); color: #fff; box-shadow: 0 4px 14px rgba(0,122,255,.3); }
+.hero-btn.primary:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,122,255,.4); }
+.hero-btn.secondary { background: var(--bg-elevated); color: var(--text-primary); border: 1px solid var(--border-strong); }
+.hero-btn.secondary:hover { transform: translateY(-2px); }
+
+/* ================================================================
+ * 应用主界面：与 App.vue 真实布局一致
+ *   - top-navbar（标题 + 工具按钮）
+ *   - tab-bar（标签栏）
+ *   - 左侧文件树 + 主区 + 右侧 AI 对话
+ * ================================================================ */
+.app {
+  display: grid;
+  grid-template-rows: 44px 36px 1fr 24px;
+  grid-template-columns: 240px 1fr 360px;
+  grid-template-areas:
+    "topbar topbar topbar"
+    "tabbar tabbar tabbar"
+    "sidebar main chat"
+    "status status status";
+  height: 100vh;
+  background: var(--bg-base);
+}
+
+/* --- 顶部 navbar（按 App.vue 实际类名复制） --- */
+.top-navbar {
+  grid-area: topbar;
+  background: var(--bg-elevated);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  gap: 12px;
+}
+.app-title { font-size: 13px; font-weight: 600; }
+.title-refresh-btn { width: 28px; height: 28px; border-radius: 6px; color: var(--text-secondary);
+  display: flex; align-items: center; justify-content: center; transition: background .15s; }
+.title-refresh-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.navbar-actions { display: flex; gap: 4px; margin-left: auto; }
+.nav-btn { padding: 5px 10px; border-radius: 6px; color: var(--text-secondary); font-size: 12px;
+  display: flex; align-items: center; gap: 4px; transition: background .15s, color .15s; border: none; background: transparent; cursor: pointer; }
+.nav-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.nav-btn.active { background: var(--bg-active); color: var(--apple-blue); }
+.nav-btn svg { flex-shrink: 0; }
+
+/* --- Tab 标签栏 --- */
+.tab-bar {
+  grid-area: tabbar;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-light);
+  display: flex; align-items: center; padding: 0 12px; gap: 6px; overflow-x: auto;
+}
+.tab-item { padding: 6px 14px; border-radius: 6px 6px 0 0; font-size: 12.5px; color: var(--text-secondary);
+  border-bottom: 2px solid transparent; cursor: pointer; display: flex; align-items: center; gap: 6px;
+  transition: color .15s, border-color .15s; white-space: nowrap; }
+.tab-item.active { color: var(--apple-blue); border-bottom-color: var(--apple-blue); font-weight: 500; }
+.tab-item .close-x { font-size: 10px; opacity: 0; transition: opacity .15s; padding: 2px 4px; }
+.tab-item:hover .close-x { opacity: 0.6; }
+.tab-add { width: 24px; height: 24px; border-radius: 6px; color: var(--text-tertiary); font-size: 14px;
+  display: flex; align-items: center; justify-content: center; margin-left: auto; cursor: pointer; }
+.tab-add:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* --- 左侧文件树（按 FileTree.vue 实际类名复制） --- */
+.sidebar {
+  grid-area: sidebar;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-light);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.tree-toolbar { display: flex; align-items: center; gap: 4px; padding: 8px 12px;
+  border-bottom: 1px solid var(--border-light); }
+.tree-btn { width: 26px; height: 26px; border-radius: 6px; color: var(--text-secondary);
+  display: flex; align-items: center; justify-content: center; transition: background .15s; border: none; background: transparent; cursor: pointer; }
+.tree-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.recent-files-title, .tree-section-title { font-size: 11px; font-weight: 600;
+  color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 10px 12px 4px; }
+.recent-files-list { display: flex; flex-direction: column; gap: 1px; padding: 0 4px; }
+.recent-file-item { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px;
+  color: var(--text-secondary); font-size: 12px; cursor: pointer; transition: background .15s;
+  border: none; background: transparent; text-align: left; width: 100%; }
+.recent-file-item:hover { background: var(--bg-hover); }
+.recent-file-item.active { background: var(--apple-blue-soft); color: var(--apple-blue); font-weight: 500; }
+.recent-file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-body { flex: 1; overflow-y: auto; padding: 4px; }
+.tree-node { display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 12.5px; color: var(--text-secondary); }
+.tree-node:hover { background: var(--bg-hover); }
+.tree-node .node-name.active { color: var(--apple-blue); font-weight: 500; }
+.tree-node .node-icon { width: 14px; display: flex; justify-content: center; }
+.tree-node .node-actions { display: flex; gap: 2px; margin-left: auto; }
+.tree-node .action-icon { width: 18px; height: 18px; border-radius: 4px; display: flex; align-items: center; justify-content: center;
+  color: var(--text-tertiary); opacity: 0; transition: opacity .15s, background .15s; }
+.tree-node:hover .action-icon { opacity: 1; }
+.tree-node .action-icon:hover { background: var(--bg-hover); color: var(--apple-blue); }
+
+/* --- 主区（视图切换 + 思维导图画布 + FixedToolbar） --- */
+.main {
+  grid-area: main;
+  background: var(--bg-canvas);
+  position: relative;
+  overflow: hidden;
+}
+.view-tabs { display: flex; gap: 4px; padding: 8px 16px 0;
+  border-bottom: 1px solid var(--border-light); background: var(--bg-elevated); }
+.view-tab { padding: 6px 14px; border-radius: 6px 6px 0 0; font-size: 12.5px;
+  color: var(--text-secondary); border-bottom: 2px solid transparent;
+  transition: color .15s, border-color .15s; border-top: none; border-left: none; border-right: none;
+  background: transparent; cursor: pointer; }
+.view-tab.active { color: var(--apple-blue); border-bottom-color: var(--apple-blue); font-weight: 500; }
+.view-area { flex: 1; position: relative; overflow: hidden; }
+
+/* FixedToolbar（按 FixedToolbar.vue 实际类名复制） */
+.fixed-toolbar {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 100; display: flex; align-items: center; gap: 0; padding: 2px 4px;
+  background: var(--bg-toolbar); backdrop-filter: blur(8px);
+  border: 1px solid var(--border-light); border-radius: 8px;
+  box-shadow: var(--shadow-md); user-select: none;
+}
+.toolbar-drag-handle { display: inline-flex; align-items: center; justify-content: center;
+  width: 10px; height: 24px; margin: 0 1px 0 -1px; color: #9a9aa2; font-size: 14px; cursor: grab; opacity: 0.65; }
+.ft-group { position: relative; display: flex; }
+.ft-btn { display: flex; align-items: center; justify-content: center; gap: 2px;
+  min-width: 21px; height: 22px; padding: 0 3px; border: none; border-radius: 6px;
+  background: transparent; color: #444; font-size: 12px; cursor: pointer;
+  transition: background .12s, color .12s; white-space: nowrap; flex-shrink: 0; }
+.ft-btn:hover { background: rgba(0,0,0,.06); color: #111; }
+.ft-btn.active { background: rgba(0,122,255,.12); color: var(--apple-blue); }
+.ft-btn.disabled { opacity: 0.32; cursor: not-allowed; }
+.ft-text-btn.bold { font-weight: 700; font-family: Georgia, serif; }
+.ft-text-btn.underline { text-decoration: underline; font-family: Georgia, serif; }
+.ft-brace { font-family: Georgia, 'Times New Roman', serif; font-weight: 700; font-size: 17px; line-height: 1; }
+.ft-icon-color { font-weight: 600; font-size: 13px; font-family: Georgia, serif;
+  background: linear-gradient(135deg, #e74c3c, #2980b9); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.ft-node-bg-icon { width: 11px; height: 11px; border-radius: 3px; border: 1px solid rgba(0,0,0,.18); background: #fff; }
+.ft-node-border-icon { width: 11px; height: 11px; border-radius: 3px; border: 1.5px solid currentColor; background: transparent; }
+.ft-glyph-hl { font-weight: 600; font-size: 13px; font-family: Georgia, serif;
+  background: linear-gradient(transparent 55%, #ffe066 55%); padding: 0 1px; }
+.ft-font-btn { font-size: 11px; padding: 0 3px; }
+.ft-size-preview { min-width: 22px; text-align: center; }
+.ft-caret { width: 0; height: 0; border-left: 3px solid transparent; border-right: 3px solid transparent;
+  border-top: 3.5px solid currentColor; opacity: 0.6; margin-left: 2px; }
+.ft-divider { width: 1px; height: 12px; margin: 0 2px; background: rgba(0,0,0,.1); flex-shrink: 0; }
+.ft-panel { position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  padding: 6px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.15); white-space: nowrap; z-index: 110; }
+.ft-panel-grid { display: flex; align-items: center; gap: 5px; }
+.ft-swatch { width: 17px; height: 17px; border: none; border-radius: 50%; cursor: pointer;
+  transition: transform .12s, box-shadow .12s; box-shadow: inset 0 0 0 1px rgba(0,0,0,.12); }
+.ft-swatch:hover { transform: scale(1.18); }
+.ft-list-item { display: flex; align-items: center; justify-content: space-between;
+  min-width: 110px; padding: 4px 10px; border: none; border-radius: 6px;
+  background: transparent; color: #333; font-size: 12.5px; text-align: left;
+  cursor: pointer; transition: background .1s; }
+.ft-list-item:hover { background: var(--apple-blue-soft); color: var(--apple-blue); }
+.ft-panel-list { display: flex; flex-direction: column; gap: 1px; max-height: 260px; overflow-y: auto; min-width: 120px; }
+
+/* 思维导图画布（自定义 SVG，节点样式与 simple-mind-map 一致） */
+.mindmap-canvas { width: 100%; height: 100%; position: relative; overflow: auto;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(0,0,0,.06) 1px, transparent 0) 0 0 / 24px 24px,
+    var(--bg-canvas); }
+.mm-svg { width: 100%; height: 100%; min-height: 500px; }
+.mm-node { cursor: pointer; transition: filter .15s ease; }
+.mm-node:hover { filter: drop-shadow(0 4px 8px rgba(0,122,255,.18)); }
+.mm-node.selected .mm-rect { stroke: var(--apple-blue); stroke-width: 2.5; }
+.mm-node rect.mm-rect { fill: #fff; stroke: var(--border-light); stroke-width: 1; }
+.mm-node.root rect.mm-rect { fill: url(#mmRootGrad); stroke: transparent; }
+.mm-node text { font-family: inherit; fill: var(--text-primary); }
+.mm-cloze { background: rgba(124,58,237,.18); border-bottom: 2px solid var(--ai-purple); padding: 0 2px; border-radius: 2px; }
+.mm-cloze-hidden { background: rgba(124,58,237,.18); border-bottom: 2px solid var(--ai-purple); padding: 0 2px; border-radius: 2px; color: transparent; user-select: none; }
+.mm-node-text { cursor: pointer; }
+
+/* 大纲视图 */
+.outline-view { padding: 16px 24px; height: 100%; overflow: auto; font-size: 13.5px; }
+.outline-item { padding: 4px 8px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px;
+  transition: background .12s; line-height: 1.7; border: none; background: transparent; text-align: left; width: 100%; color: var(--text-primary); }
+.outline-item:hover { background: var(--bg-hover); }
+.outline-item.selected { background: var(--apple-blue-soft); color: var(--apple-blue); font-weight: 500; }
+.outline-item .bullet { color: var(--text-tertiary); width: 14px; text-align: center; }
+.outline-item .lvl { font-size: 10px; padding: 1px 5px; background: var(--bg-hover); border-radius: 4px; color: var(--text-tertiary); }
+
+/* Markdown 视图 */
+.markdown-view { padding: 24px 48px; max-width: 860px; margin: 0 auto; height: 100%; overflow: auto; }
+.markdown-view h1 { font-size: 28px; margin: 0 0 12px; }
+.markdown-view h2 { font-size: 20px; margin: 24px 0 8px; border-bottom: 1px solid var(--border-light); padding-bottom: 6px; }
+.markdown-view h3 { font-size: 16px; margin: 18px 0 6px; }
+.markdown-view p, .markdown-view li { color: var(--text-secondary); }
+.markdown-view code { background: var(--bg-hover); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; }
+.markdown-view ul { padding-left: 20px; }
+
+/* 关联图视图 */
+.graph-view { height: 100%; overflow: auto; padding: 24px; }
+.graph-svg { width: 100%; min-height: 460px; }
+.graph-node { fill: #fff; stroke: var(--border-light); stroke-width: 1.5; cursor: pointer; transition: filter .15s; }
+.graph-node:hover { filter: drop-shadow(0 4px 8px rgba(0,122,255,.18)); fill: var(--apple-blue-soft); }
+.graph-node.root { fill: var(--apple-blue); stroke: transparent; }
+.graph-link { stroke: var(--ai-purple); stroke-width: 1.5; opacity: 0.6; }
+.graph-link-label { fill: var(--ai-purple); font-size: 10px; }
+
+/* --- 右侧 AI 对话（按 ChatPanel.vue 真实类名复制） --- */
+.chat-panel { grid-area: chat; background: var(--bg-elevated); backdrop-filter: blur(20px);
+  border-left: 1px solid var(--border-light); display: flex; flex-direction: column; overflow: hidden; }
+.chat-header { padding: 10px 14px; border-bottom: 1px solid var(--border-light); display: flex; align-items: center; gap: 8px; }
+.chat-header .title { font-weight: 600; font-size: 13px; flex: 1; }
+.chat-header .status { font-size: 11px; color: var(--success); display: flex; align-items: center; gap: 4px; }
+.chat-header .status::before { content: ""; width: 6px; height: 6px; background: var(--success); border-radius: 50%; }
+.chat-messages { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.chat-msg { max-width: 92%; padding: 9px 12px; border-radius: 12px; font-size: 12.5px; line-height: 1.5; word-break: break-word; }
+.chat-msg.user { align-self: flex-end; background: var(--apple-blue); color: #fff; border-bottom-right-radius: 4px; }
+.chat-msg.assistant { align-self: flex-start; background: var(--bg-base); color: var(--text-primary); border-bottom-left-radius: 4px; }
+.chat-msg.tool { align-self: flex-start; background: var(--ai-purple-soft); color: var(--ai-purple); font-size: 11.5px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+.chat-msg .tool-status { display: inline-block; margin-right: 6px; font-weight: 600; }
+.chat-msg .tool-status.done { color: var(--success); }
+.chat-msg .tool-status.running { color: #fa8c16; }
+.chat-msg ul { margin: 4px 0; padding-left: 18px; }
+.chat-msg code { background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 4px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11.5px; }
+.chat-msg.assistant code { background: rgba(0,0,0,.05); }
+.chat-msg.user code { background: rgba(255,255,255,.18); }
+.chat-typing { align-self: flex-start; padding: 10px 14px; background: var(--bg-base); border-radius: 12px; display: flex; gap: 4px; }
+.chat-typing .dot { width: 6px; height: 6px; background: var(--text-tertiary); border-radius: 50%;
+  animation: typing 1.4s infinite ease-in-out; }
+.chat-typing .dot:nth-child(2) { animation-delay: .2s; }
+.chat-typing .dot:nth-child(3) { animation-delay: .4s; }
+@keyframes typing { 0%, 60%, 100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-4px); opacity: 1; } }
+.chat-toolbar { display: flex; gap: 4px; padding: 6px 12px; border-top: 1px solid var(--border-light); background: var(--bg-elevated); }
+.toolbar-btn { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 6px;
+  color: var(--text-secondary); font-size: 12px; border: none; background: transparent; cursor: pointer; }
+.toolbar-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.chat-input-area { padding: 8px 12px 12px; display: flex; gap: 8px; align-items: flex-end; }
+.chat-input { flex: 1; border: 1px solid var(--border-strong); border-radius: 10px; padding: 8px 10px;
+  font-size: 13px; resize: none; height: 38px; max-height: 100px; background: var(--bg-base);
+  outline: none; font-family: inherit; transition: border-color .15s; }
+.chat-input:focus { border-color: var(--apple-blue); }
+.chat-send { width: 36px; height: 36px; border-radius: 50%; background: var(--apple-blue); color: #fff;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: none; cursor: pointer; }
+.chat-send:hover { background: var(--apple-blue-hover); }
+.chat-suggestions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 8px; }
+.chat-suggestion { font-size: 11.5px; padding: 4px 10px; border-radius: 999px;
+  background: var(--bg-hover); color: var(--text-secondary); border: 1px solid var(--border-light);
+  cursor: pointer; transition: background .15s; }
+.chat-suggestion:hover { background: var(--apple-blue-soft); color: var(--apple-blue); border-color: var(--apple-blue); }
+
+/* --- 底部状态栏 --- */
+.status-bar { grid-area: status; background: var(--bg-elevated); border-top: 1px solid var(--border-light);
+  display: flex; align-items: center; padding: 0 12px; gap: 14px; font-size: 11px; color: var(--text-tertiary); }
+.status-bar .ok { color: var(--success); }
+
+/* ================================================================
+ * 右键菜单（按 Contextmenu.vue 实际类名与结构复制）
+ * ================================================================ */
+.ctx-menu {
+  position: fixed; z-index: 9999; min-width: 240px; max-width: 340px;
+  background: rgba(255,255,255,.92); backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--border-light); border-radius: 12px;
+  box-shadow: var(--shadow-lg); padding: 4px; font-size: 12.5px;
+}
+.ctx-item { display: flex; align-items: center; width: 100%; height: 30px;
+  padding: 0 10px; border-radius: 7px; cursor: pointer; color: var(--text-primary);
+  transition: background .12s, color .12s; border: none; background: transparent; text-align: left; }
+.ctx-item:hover { background: var(--bg-active); color: var(--apple-blue); }
+.ctx-item.danger { color: #ff3b30; }
+.ctx-item.danger:hover { background: rgba(255,59,48,.1); color: #ff3b30; }
+.ctx-item .badge { display: inline-block; padding: 2px 8px; border-radius: 5px;
+  background: var(--apple-blue); color: #fff; font-size: 11px; font-weight: 500;
+  margin-right: 8px; min-width: 34px; text-align: center; }
+.ctx-item .ai-dot { width: 6px; height: 6px;
+  background: linear-gradient(135deg, var(--ai-purple), var(--apple-blue)); border-radius: 50%;
+  margin-right: 8px; box-shadow: 0 0 0 2px var(--ai-purple-soft); }
+.ctx-item .placeholder { display: inline-block; width: 6px; margin-right: 8px; }
+.ctx-item .label { flex: 1; }
+.ctx-item .shortcut { font-size: 11px; color: var(--text-tertiary); }
+.ctx-sep { height: 1px; background: var(--border-light); margin: 4px 10px; }
+
+/* 弹窗（挖空模式选择） */
+.modal-mask { position: fixed; inset: 0; z-index: 9998; background: rgba(0,0,0,.35);
+  backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center;
+  opacity: 0; pointer-events: none; transition: opacity .2s; }
+.modal-mask.show { opacity: 1; pointer-events: auto; }
+.modal { background: var(--bg-elevated); backdrop-filter: blur(40px) saturate(180%);
+  border-radius: 14px; box-shadow: var(--shadow-lg); padding: 22px 24px;
+  max-width: 420px; width: 92%; transform: scale(.96); transition: transform .2s; }
+.modal-mask.show .modal { transform: scale(1); }
+.modal h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
+.modal p { margin: 0 0 16px; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.modal-btn { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
+  border: none; cursor: pointer; transition: background .15s; }
+.modal-btn.primary { background: var(--apple-blue); color: #fff; }
+.modal-btn.primary:hover { background: var(--apple-blue-hover); }
+.modal-btn.secondary { background: var(--bg-hover); color: var(--text-primary); }
+
+/* ================================================================
+ * 数据：与真实程序示例文件结构保持一致
+ * ================================================================ */
+const SAMPLE_FILES = {
+  'computer-network': {
+    fileName: '计算机网络基础.smm',
+    nodes: [
+      { id:'r', text:'计算机网络基础', level:0, isRoot:true, type:'concept' },
+      { id:'1', text:'OSI 七层模型', level:1, type:'concept' },
+      { id:'1.1', text:'物理层', level:2, type:'concept' },
+      { id:'1.1.1', text:'比特流传输', level:3, type:'detail' },
+      { id:'1.1.2', text:'电气特性', level:3, type:'detail' },
+      { id:'1.2', text:'数据链路层', level:2, type:'concept' },
+      { id:'1.2.1', text:'帧封装与差错控制', level:3, type:'detail' },
+      { id:'1.3', text:'网络层', level:2, type:'concept' },
+      { id:'1.3.1', text:'IP 路由与分组转发', level:3, type:'detail' },
+      { id:'1.4', text:'传输层', level:2, type:'concept' },
+      { id:'1.4.1', text:'TCP 可靠传输', level:3, type:'detail' },
+      { id:'1.4.2', text:'UDP 无连接', level:3, type:'detail' },
+      { id:'2', text:'TCP/IP 协议簇', level:1, type:'concept' },
+      { id:'2.1', text:'三次握手建立连接', level:2, type:'detail' },
+      { id:'2.2', text:'四次挥手释放连接', level:2, type:'detail' },
+      { id:'2.3', text:'滑动窗口流量控制', level:2, type:'detail' },
+      { id:'3', text:'应用层协议', level:1, type:'concept' },
+      { id:'3.1', text:'HTTP/HTTPS', level:2, type:'detail' },
+      { id:'3.2', text:'DNS 域名解析', level:2, type:'detail' }
+    ],
+    associations: [
+      { from:'1.4.1', to:'2.1', label:'建立' }, { from:'1.4.1', to:'2.2', label:'释放' },
+      { from:'1.4.1', to:'2.3', label:'控制' }, { from:'3.1', to:'1.4.1', label:'基于' }, { from:'3.2', to:'1.3.1', label:'依赖' }
+    ],
+    markdown: '# 计算机网络基础\n\n## OSI 七层模型\n\nOSI 模型把网络通信分为 7 层：\n\n- **物理层**：比特流传输\n- **数据链路层**：帧封装与差错控制\n- **网络层**：IP 路由与分组转发\n- **传输层**：TCP 可靠传输 / UDP 无连接\n- **会话层**\n- **表示层**\n- **应用层**：HTTP/HTTPS、DNS\n\n## TCP/IP 协议簇\n\n### 三次握手建立连接\n\n1. 客户端发送 SYN\n2. 服务端回应 SYN + ACK\n3. 客户端发送 ACK\n\n### 四次挥手释放连接\n\n略。\n\n## 应用层协议\n\n- **HTTP/HTTPS**：网页传输\n- **DNS**：域名 → IP 解析'
+  },
+  'operating-system': {
+    fileName: '操作系统原理.smm',
+    nodes: [
+      { id:'r', text:'操作系统原理', level:0, isRoot:true, type:'concept' },
+      { id:'1', text:'进程管理', level:1, type:'concept' },
+      { id:'1.1', text:'进程与线程', level:2, type:'concept' },
+      { id:'1.1.1', text:'PCB 进程控制块', level:3, type:'detail' },
+      { id:'1.2', text:'进程调度算法', level:2, type:'concept' },
+      { id:'1.2.1', text:'先来先服务 FCFS', level:3, type:'detail' },
+      { id:'1.2.2', text:'时间片轮转 RR', level:3, type:'detail' },
+      { id:'1.2.3', text:'多级反馈队列', level:3, type:'detail' },
+      { id:'1.3', text:'进程同步与互斥', level:2, type:'concept' },
+      { id:'1.3.1', text:'信号量 PV 操作', level:3, type:'detail' },
+      { id:'2', text:'内存管理', level:1, type:'concept' },
+      { id:'2.1', text:'分页存储管理', level:2, type:'concept' },
+      { id:'2.1.1', text:'页表与快表 TLB', level:3, type:'detail' },
+      { id:'2.2', text:'虚拟内存', level:2, type:'concept' },
+      { id:'3', text:'文件系统', level:1, type:'concept' },
+      { id:'3.1', text:'文件存储结构', level:2, type:'concept' },
+      { id:'3.2', text:'磁盘调度算法', level:2, type:'concept' }
+    ],
+    associations: [{ from:'1.3', to:'2.1', label:'依赖' }],
+    markdown: '# 操作系统原理\n\n## 进程管理\n\n### 进程与线程\n\nPCB（Process Control Block）是进程存在的唯一标志。\n\n### 调度算法\n\n- **FCFS**：先来先服务\n- **RR**：时间片轮转\n- **多级反馈队列**：综合 FCFS + RR\n\n### 信号量\n\nP 操作申请资源，V 操作释放资源。\n\n## 内存管理\n\n### 分页存储\n\n页表 + TLB（快表）加速地址转换。'
+  },
+  'reading-notes': {
+    fileName: '深度工作.smm',
+    nodes: [
+      { id:'r', text:'《深度工作》读书笔记', level:0, isRoot:true, type:'concept' },
+      { id:'1', text:'核心观点', level:1, type:'concept' },
+      { id:'1.1', text:'深度工作 = 高质量产出', level:2, type:'detail' },
+      { id:'1.2', text:'浮浅工作 = 低价值消耗', level:2, type:'detail' },
+      { id:'2', text:'实践方法', level:1, type:'concept' },
+      { id:'2.1', text:'专注时间排程', level:2, type:'method' },
+      { id:'2.2', text:'远离社交媒体', level:2, type:'method' },
+      { id:'2.3', text:'拒绝无效会议', level:2, type:'method' },
+      { id:'3', text:'个人启发', level:1, type:'concept' },
+      { id:'3.1', text:'用 AI 把杂事自动化', level:2, type:'idea' },
+      { id:'3.2', text:'留大块时间给深度工作', level:2, type:'idea' }
+    ],
+    associations: [{ from:'2.1', to:'1.1', label:'支撑' }, { from:'3.1', to:'2.2', label:'改进' }],
+    markdown: '# 《深度工作》读书笔记\n\n## 核心观点\n\n深度工作才能产生高质量产出；浮浅工作只是低价值的时间消耗。\n\n## 实践方法\n\n- 专注时间排程\n- 远离社交媒体\n- 拒绝无效会议\n\n## 个人启发\n\n- 用 AI 把杂事自动化\n- 留大块时间给深度工作'
+  }
+};
+
+/* 模拟 AI 对话场景（按 ChatPanel.vue 真实交互流） */
+const CHAT_SCENARIOS = {
+  default: [
+    { type:'user', text:'帮我把这份导图的核心脉络梳理一下' },
+    { type:'tool', name:'get_mindmap_content', status:'done', text:'已读取当前导图 19 个节点、3 层' },
+    { type:'tool', name:'ai_thinking', status:'done', text:'AI 正在分析结构…' },
+    { type:'assistant', text:'这份《计算机网络基础》导图整体结构很清晰，我帮你梳理出三条主脉络：\n\n1. **OSI 七层模型**：从物理层 → 数据链路层 → 网络层 → 传输层，自下而上分层。\n2. **TCP/IP 协议簇**：重点是连接管理（3 次握手 / 4 次挥手）和流量控制（滑动窗口）。\n3. **应用层协议**：HTTP/DNS 等都跑在传输层之上。\n\n要不要我帮你用 AI 背诵改写一下"传输层"那块的文字？' }
+  ],
+  cloze: [
+    { type:'user', text:'对【传输层】右键 → AI 智能挖空' },
+    { type:'tool', name:'ai_cloze', status:'running', text:'【传输层】' },
+    { type:'tool', name:'ai_cloze', status:'done', text:'✅ 已挖空：TCP 可靠传输、UDP 无连接（机器+AI 联合，2 个关键词）' },
+    { type:'assistant', text:'挖空完成。你可以让 AI 自动把这部分加入复习计划（艾宾浩斯 1/3/7/15/31 天），也可以选择"仅规则挖空"模式不调用 AI。' },
+    { type:'user', text:'加入复习计划' },
+    { type:'tool', name:'add_to_review', status:'done', text:'✅ 已加入复习计划：1 天 / 3 天 / 7 天 / 15 天 / 31 天' }
+  ],
+  recite: [
+    { type:'user', text:'帮我背诵改写【三次握手建立连接】' },
+    { type:'tool', name:'ai_recite_rewrite', status:'running', text:'【三次握手建立连接】' },
+    { type:'tool', name:'ai_recite_rewrite', status:'done', text:'✅ 已应用谐音 + 摘要' },
+    { type:'assistant', text:'改写完成：\n\n**【记忆简写】**\n- 客 SYN → 服务 SYN+ACK → 客 ACK（谐音：客人【先】送，服务员【先答应了】，客人【安心了】）\n\n**【摘要】**\nTCP 三次握手用于建立可靠连接，确保双方收发能力同步。\n\n原文本已自动保存到备注，可一键还原。' }
+  ]
+};
+
+/* ================================================================
+ * 状态
+ * ================================================================ */
+let currentFile = 'computer-network';
+let currentView = 'mindmap';
+let currentChat = 'default';
+let selectedNodeId = null;
+let clozeHiddenGlobal = false;
+let toolbarHasSelection = false;
+
+/* ================================================================
+ * 入口
+ * ================================================================ */
+function enterApp() { document.getElementById('heroPage').classList.add('hide'); }
+
+/* ================================================================
+ * 文件切换（左侧文件树）
+ * ================================================================ */
+function switchFile(key) {
+  if (!SAMPLE_FILES[key]) return;
+  currentFile = key;
+  selectedNodeId = null;
+  document.getElementById('currentFileName').textContent = SAMPLE_FILES[key].fileName;
+  document.querySelectorAll('.recent-file-item, .tree-node[data-file]').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll(`[data-file="${key}"]`).forEach(el => el.classList.add('active'));
+  renderMindmap();
+  renderOutline();
+  renderGraph();
+  renderMarkdown();
+}
+
+/* 视图切换 */
+function switchView(view) {
+  currentView = view;
+  document.querySelectorAll('.view-tab').forEach(el => el.classList.toggle('active', el.dataset.view === view));
+  document.querySelectorAll('.view-content').forEach(el => el.classList.toggle('active', el.dataset.view === view));
+}
+function showView(view) { switchView(view); }
+
+/* AI 对话场景切换 */
+function switchChat(key) {
+  currentChat = key;
+  renderChat();
+}
+
+/* ================================================================
+ * 渲染思维导图（自定义 SVG，严格还原 simple-mind-map 视觉）
+ * ================================================================ */
+function renderMindmap() {
+  const nodes = SAMPLE_FILES[currentFile].nodes;
+  const svg = document.getElementById('mmSvg');
+  const nodesG = document.getElementById('mmNodes');
+  const linksG = document.getElementById('mmLinks');
+
+  const levelWidths = [180, 160, 140, 120];
+  const rowHeight = 38;
+  const xLeft = 30;
+  const xGap = levelWidths[1] + 40;
+  const positions = {};
+  const levelHeights = [0, 0, 0, 0];
+  nodes.forEach(n => {
+    const lvl = n.level;
+    const y = 40 + levelHeights[lvl] * rowHeight;
+    positions[n.id] = { x: xLeft + lvl * xGap, y, w: levelWidths[lvl], h: 30 };
+    levelHeights[lvl]++;
+  });
+
+  // 父节点映射（按缩进结构找最近父节点）
+  const parentMap = {};
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].level > 0) {
+      for (let j = i - 1; j >= 0; j--) {
+        if (nodes[j].level === nodes[i].level - 1) { parentMap[nodes[i].id] = nodes[j].id; break; }
+      }
+    }
+  }
+  let linksSvg = '';
+  Object.entries(parentMap).forEach(([cid, pid]) => {
+    const p = positions[pid], c = positions[cid];
+    const x1 = p.x + p.w, y1 = p.y + p.h / 2, x2 = c.x, y2 = c.y + c.h / 2;
+    const midX = (x1 + x2) / 2;
+    linksSvg += `<path d="M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}" stroke="#d4d4d8" stroke-width="1.5" fill="none"/>`;
+  });
+  linksG.innerHTML = linksSvg;
+
+  // 节点
+  let nodesSvg = '';
+  nodes.forEach(n => {
+    const p = positions[n.id];
+    const isSelected = selectedNodeId === n.id;
+    const isRoot = n.isRoot;
+    const fill = isRoot ? 'url(#mmRootGrad)' : '#fff';
+    const stroke = isSelected ? '#007aff' : (isRoot ? 'transparent' : '#d4d4d8');
+    const textColor = isRoot ? '#fff' : '#1d1d1f';
+    nodesSvg += `<g class="mm-node ${isSelected ? 'selected' : ''}" data-id="${n.id}" onclick="selectNode('${n.id}', event)" oncontextmenu="openContextMenu(event, '${n.id}')">`;
+    nodesSvg += `<rect class="mm-rect" x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="${isRoot ? 14 : 6}" fill="${fill}" stroke="${stroke}" stroke-width="${isSelected ? 2.5 : (isRoot ? 0 : 1)}"/>`;
+    if (n.level >= 3) {
+      nodesSvg += `<circle cx="${p.x + 12}" cy="${p.y + p.h/2}" r="2.5" fill="#8e8e93"/>`;
+    }
+    const textX = n.level >= 3 ? p.x + 22 : p.x + p.w / 2;
+    const textAnchor = n.level >= 3 ? 'start' : 'middle';
+    // 演示用：对部分文本加 cloze span 还原挖空样式
+    let displayText = escapeXml(n.text);
+    if (currentFile === 'computer-network' && n.id === '1.4') {
+      displayText = `传输层（<span class="${clozeHiddenGlobal ? 'mm-cloze-hidden' : 'mm-cloze'}">TCP 可靠传输</span> / <span class="${clozeHiddenGlobal ? 'mm-cloze-hidden' : 'mm-cloze'}">UDP 无连接</span>）`;
+    }
+    nodesSvg += `<text class="mm-node-text" x="${textX}" y="${p.y + p.h/2 + 4}" text-anchor="${textAnchor}" font-size="13" fill="${textColor}" font-weight="${isRoot ? '600' : '400'}">${displayText}</text>`;
+    nodesSvg += '</g>';
+  });
+  nodesG.innerHTML = nodesSvg;
+
+  const maxX = Math.max(...Object.values(positions).map(p => p.x + p.w)) + 30;
+  const maxY = Math.max(...Object.values(positions).map(p => p.y + p.h)) + 30;
+  svg.setAttribute('viewBox', `0 0 ${maxX} ${maxY}`);
+}
+function escapeXml(s) {
+  return String(s).replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','\'':'&apos;','"':'&quot;'}[c]));
+}
+
+/* 大纲 */
+function renderOutline() {
+  const nodes = SAMPLE_FILES[currentFile].nodes;
+  document.getElementById('outlineList').innerHTML = nodes.map(n => {
+    const indent = n.level * 22;
+    const isSelected = selectedNodeId === n.id;
+    return `<button class="outline-item ${isSelected ? 'selected' : ''}" onclick="selectNode('${n.id}', event)" oncontextmenu="openContextMenu(event, '${n.id}')" style="padding-left:${indent + 8}px">${
+      n.level >= 3 ? '<span class="bullet">•</span>' : '<span class="bullet" style="opacity:0"></span>'
+    }<span class="lvl">L${n.level}</span><span>${escapeXml(n.text)}</span></button>`;
+  }).join('');
+}
+
+/* 关联图 */
+function renderGraph() {
+  const file = SAMPLE_FILES[currentFile];
+  const nodes = file.nodes;
+  const associations = file.associations || [];
+  const cx = 300, cy = 220, r = 140;
+  const positions = {};
+  nodes.forEach((n, i) => {
+ const angle = (i / nodes.length) * Math.PI * 2;
+ positions[n.id] = { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r };
+ });
+  let svg = '';
+  associations.forEach(a => {
+    const p = positions[a.from], t = positions[a.to];
+    if (!p || !t) return;
+    svg += `<line class="graph-link" x1="${p.x}" y1="${p.y}" x2="${t.x}" y2="${t.y}"/>`;
+    svg += `<text class="graph-link-label" x="${(p.x+t.x)/2}" y="${(p.y+t.y)/2 - 4}" text-anchor="middle">${escapeXml(a.label || '')}</text>`;
+  });
+  nodes.forEach(n => {
+    const p = positions[n.id];
+    const isRoot = n.isRoot;
+    svg += `<circle class="graph-node ${isRoot ? 'root' : ''}" cx="${p.x}" cy="${p.y}" r="${isRoot ? 28 : 22}" onclick="selectNode('${n.id}', event)" oncontextmenu="openContextMenu(event, '${n.id}')"/>`;
+    svg += `<text x="${p.x}" y="${p.y + 4}" text-anchor="middle" font-size="11" fill="${isRoot ? '#fff' : '#1d1d1f'}" font-weight="${isRoot ? '600' : '400'}" style="pointer-events:none;">${escapeXml(n.text.slice(0, 6))}</text>`;
+  });
+  document.getElementById('graphSvg').innerHTML = svg;
+}
+
+/* Markdown */
+function renderMarkdown() {
+  const md = SAMPLE_FILES[currentFile].markdown || '';
+  document.getElementById('markdownContent').innerHTML = md
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^- (.+ (?:|.|\n)*?)(?=\n[^-\n]|\n*$)/gm, '<li>$1</li>')
+    .replace(/((?:<li>.*<\/li>\n?)+)/g, m => `<ul>${m}</ul>`)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n\n/g, '</p><p>')
+    .replace(/^/, '<p>')
+    .replace(/$/, '</p>');
+}
+
+/* ================================================================
+ * 节点选中
+ * ================================================================ */
+function selectNode(id, evt) {
+  if (evt) evt.stopPropagation();
+  selectedNodeId = id;
+  renderMindmap();
+  renderOutline();
+  toolbarHasSelection = true;
+  document.querySelectorAll('.ft-btn[data-needs-selection]').forEach(b => b.classList.remove('disabled'));
+}
+function clearSelection() {
+  selectedNodeId = null;
+  toolbarHasSelection = false;
+  renderMindmap();
+  renderOutline();
+  document.querySelectorAll('.ft-btn[data-needs-selection]').forEach(b => b.classList.add('disabled'));
+}
+
+/* ================================================================
+ * 右键菜单（严格按 Contextmenu.vue 节点菜单生成）
+ * ================================================================ */
+function openContextMenu(evt, nodeId) {
+  evt.preventDefault();
+  evt.stopPropagation();
+  closeContextMenu();
+  selectNode(nodeId, null);
+  const node = SAMPLE_FILES[currentFile].nodes.find(n => n.id === nodeId);
+  if (!node) return;
+  const items = buildNodeMenu(node);
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  menu.id = 'ctxMenu';
+  items.forEach(it => {
+    if (it.sep) {
+      const sep = document.createElement('div'); sep.className = 'ctx-sep'; menu.appendChild(sep); return;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'ctx-item' + (it.danger ? ' danger' : '');
+    let prefix = '';
+    if (it.badge) prefix = `<span class="badge">${it.badge}</span>`;
+    else if (it.ai) prefix = '<span class="ai-dot"></span>';
+    else prefix = '<span class="placeholder"></span>';
+    btn.innerHTML = `${prefix}<span class="label">${escapeXml(it.label)}</span>${it.shortcut ? `<span class="shortcut">${it.shortcut}</span>` : ''}`;
+    btn.onclick = () => onCtxAction(it.key, nodeId);
+    menu.appendChild(btn);
+  });
+  document.body.appendChild(menu);
+  // 自适应位置
+  const r = menu.getBoundingClientRect();
+  const margin = 8;
+  const l = (evt.clientX + r.width + margin > window.innerWidth)
+    ? Math.max(margin, window.innerWidth - r.width - margin) : evt.clientX;
+  const t = (evt.clientY + r.height + margin > window.innerHeight)
+    ? Math.max(margin, window.innerHeight - r.height - margin) : evt.clientY;
+  menu.style.left = l + 'px';
+  menu.style.top = t + 'px';
+}
+function buildNodeMenu(node) {
+  // 严格对应 Contextmenu.vue 的 nodeMenuItems
+  return [
+    { key:'NOTE', label: '添加备注' },
+    { key:'IMAGE', label: '插入图片' },
+    { sep: true },
+    { key:'DELETE', label: '删除节点', shortcut:'Delete', danger:true },
+    { sep: true },
+    { key:'AI_CONTINUE', label: `AI 续写「${node.text}」`, ai: true },
+    { key:'AI_ADD_CHILD', label: 'AI 新增子节点', ai: true },
+    { key:'AI_REWRITE', label: 'AI 背诵改写此节点', badge:'改写', ai: true },
+    { key:'AI_CLOZE', label: 'AI 智能挖空', badge:'挖空', ai: true },
+    { key:'AI_QUIZ', label: 'AI 出题', badge:'出题', ai: true },
+    { key:'AI_ADD_TO_CHAT', label: '将节点添加到 AI 对话', badge:'对话', ai: true },
+    { sep: true },
+    { key:'ADD_REVIEW', label: '添加复习计划', shortcut:'Ctrl+R' },
+    { key:'ADD_TAG', label: '添加标签' }
+  ];
+}
+function onCtxAction(key, nodeId) {
+  closeContextMenu();
+  if (key === 'AI_CLOZE') {
+    showModal({
+      title:'选择挖空方式',
+      content:'「仅兜底挖空」直接命中内置正则/结构规则，速度快、不调用 AI；<br>「AI 介入挖空」会在规则基础上用 AI 补充和精修，更全面但较慢。',
+      buttons:[
+        { text:'AI 介入挖空', primary:true, onClick: ()=>{ hideModal(); simulateCloze(nodeId, true); } },
+        { text:'仅兜底挖空', onClick: ()=>{ hideModal(); simulateCloze(nodeId, false); } },
+        { text:'取消', secondary:true, onClick: hideModal }
+      ]
+    });
+    return;
+  }
+  const text = SAMPLE_FILES[currentFile].nodes.find(n => n.id === nodeId).text;
+  if (key === 'AI_CONTINUE') {
+    addChatMsg({ type:'user', text:`AI 续写【${text}】` });
+    simulateTool('ai_continue_children', '续写子节点中…', () => {
+      addChatMsg({ type:'assistant', text:`已为「${text}」生成 2 个子节点：\n\n- 子节点 1（基于内容衍生）\n- 子节点 2（应用复习计划）` });
+    });
+  } else if (key === 'AI_ADD_TO_CHAT') {
+    addChatMsg({ type:'user', text:`把节点【${text}】添加到对话` });
+    addChatMsg({ type:'assistant', text:`已收到节点内容：\n\n> ${text}\n\n你想对它做什么？` });
+  } else if (key === 'ADD_REVIEW') {
+    addChatMsg({ type:'tool', name:'add_to_review', status:'done', text:`✅ 已加入复习计划：1 天 / 3 天 / 7 天 / 15 天 / 31 天（${text}）` });
+  } else if (key === 'AI_REWRITE') {
+    addChatMsg({ type:'user', text:`AI 背诵改写【${text}】` });
+    simulateTool('ai_recite_rewrite', '应用谐音 + 摘要…', () => {
+      addChatMsg({ type:'assistant', text:`已为「${text}」生成【记忆简写】+ 摘要。\n\n原文本已自动保存到备注，可一键还原。` });
+    });
+  } else if (key === 'AI_QUIZ') {
+    addChatMsg({ type:'user', text:`AI 出题【${text}】` });
+    simulateTool('ai_quiz', '生成单选 / 多选 / 填空…', () => {
+      addChatMsg({ type:'assistant', text:`已为「${text}」生成 2 道单选 + 1 道填空题。` });
+    });
+  } else if (key === 'ADD_TAG') {
+    addChatMsg({ type:'assistant', text:`标签已添加（演示版）。` });
+  } else if (key === 'DELETE') {
+    addChatMsg({ type:'assistant', text:`节点「${text}」删除已记录（演示版未真实删除）。` });
+  } else if (key === 'NOTE') {
+    addChatMsg({ type:'assistant', text:`已为「${text}」打开备注输入框（演示版）。` });
+  } else if (key === 'IMAGE') {
+    addChatMsg({ type:'assistant', text:`图片选择对话框已打开（演示版）。` });
+  }
+}
+function closeContextMenu() {
+  const m = document.getElementById('ctxMenu');
+  if (m) m.remove();
+}
+
+/* ================================================================
+ * 模拟 AI 工具调用与回复
+ * ================================================================ */
+function simulateTool(name, runningText, onDone) {
+  addChatMsg({ type:'tool', name, status:'running', text: runningText });
+  setTimeout(() => {
+    const msgs = document.getElementById('chatMessages').children;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].classList.contains('tool')) {
+        msgs[i].querySelector('.tool-status').className = 'tool-status done';
+        msgs[i].querySelector('.tool-status').textContent = '✓ 完成';
+        return;
+      }
+    }
+    if (onDone) onDone();
+  }, 1100);
+}
+function simulateCloze(nodeId, withAi) {
+  const text = SAMPLE_FILES[currentFile].nodes.find(n => n.id === nodeId).text;
+  if (withAi) {
+    simulateTool('ai_cloze', '【机器挖】+【AI 补】+【AI 复查】三步流程中…', () => {
+      addChatMsg({ type:'assistant', text:`已完成「${text}」挖空：\n\n- 步骤1（机器）：识别 1 个关键词\n- 步骤2（AI 补）：补充 1 个关键词\n- 步骤3（AI 复查）：保留 2 个、移除 0 个\n\n挖空内容已隐藏（演示版显示效果）。` });
+    });
+  } else {
+    addChatMsg({ type:'assistant', text:`已完成「${text}」规则挖空：\n\n- 仅命中内置正则，识别 1 个关键词\n- 未调用 AI，速度快` });
+  }
+}
+
+/* ================================================================
+ * 弹窗
+ * ================================================================ */
+function showModal({ title, content, buttons }) {
+  const m = document.getElementById('modalContent');
+  m.innerHTML = `<h3>${title}</h3><p>${content}</p><div class="modal-actions">${
+    buttons.map((b, i) => `<button class="modal-btn ${b.primary ? 'primary' : ''} ${b.secondary ? 'secondary' : ''}" data-i="${i}">${escapeXml(b.text)}</button>`).join('')
+  }</div>`;
+  document.getElementById('modalMask').classList.add('show');
+  buttons.forEach((b, i) => { m.querySelector(`[data-i="${i}"]`).onclick = b.onClick; });
+}
+function hideModal() { document.getElementById('modalMask').classList.remove('show'); }
+
+/* ================================================================
+ * AI 对话
+ * ================================================================ */
+function renderChat() {
+  const msgs = CHAT_SCENARIOS[currentChat] || [];
+  document.getElementById('chatMessages').innerHTML = '';
+  msgs.forEach(addChatMsg);
+  const sug = {
+    default: ['帮我做一份 AI 复习计划', '把这份导图导出为 PDF', 'AI 出几道复习题'],
+    cloze: ['加入复习计划', '改成"仅兜底挖空"模式', '查看挖空关键字列表'],
+    recite: ['把这个改回原文', '应用到所有子节点', '导出背诵卡片']
+  }[(currentChat)] || [];
+  document.getElementById('chatSuggestions').innerHTML = sug.map(s => `<button class="chat-suggestion" onclick="useSuggestion('${escapeXml(s)}')">${escapeXml(s)}</button>`).join('');
+}
+function useSuggestion(t) { document.getElementById('chatInput').value = t; sendChat(); }
+function addChatMsg(msg) {
+  const div = document.createElement('div');
+  if (msg.type === 'tool') {
+    div.className = 'chat-msg tool';
+    div.innerHTML = `<span class="tool-status ${msg.status === 'done' ? 'done' : 'running'}">${msg.status === 'done' ? '✓ 完成' : '⏳ 进行中'}</span> <strong>${msg.name}</strong>: ${escapeXml(msg.text)}`;
+  } else {
+    div.className = `chat-msg ${msg.type}`;
+    let html = escapeXml(msg.text)
+      .replace(/```(.+?)```/gs, '<pre><code>$1</code></pre>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/- (.+)/g, '<li>$1</li>')
+      .replace(/(<li>.+<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
+    div.innerHTML = html;
+  }
+  document.getElementById('chatMessages').appendChild(div);
+  document.getElementById('chatMessages').scrollTop = 1e9;
+}
+function sendChat() {
+  const input = document.getElementById('chatInput');
+  const t = input.value.trim();
+  if (!t) return;
+  input.value = '';
+  addChatMsg({ type:'user', text: t });
+  const ty = document.createElement('div');
+  ty.className = 'chat-typing';
+  ty.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+  document.getElementById('chatMessages').appendChild(ty);
+  document.getElementById('chatMessages').scrollTop = 1e9;
+  setTimeout(() => {
+    ty.remove();
+    addChatMsg({ type:'assistant', text:`已收到："${t}"。\n\n（演示版为静态展示，未连接真实 AI；安装包内可使用完整 AI 能力。）` });
+  }, 1200);
+}
+
+/* FixedToolbar 内部联动 */
+function toggleClozeGlobal() {
+  clozeHiddenGlobal = !clozeHiddenGlobal;
+  renderMindmap();
+  const btn = document.getElementById('ftClozeToggle');
+  if (btn) btn.classList.toggle('active', clozeHiddenGlobal);
+}
+
+/* 启动 */
+switchFile('computer-network');
+renderChat();
+
+/* 点击空白处关闭右键菜单 */
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.ctx-menu')) closeContextMenu();
+  if (e.target === document.getElementById('mainCanvas') ||
+      (e.target.classList && e.target.classList.contains('mm-node-text'))) {
+    // 不做处理，让节点点击事件触发
+  }
+});
+document.addEventListener('contextmenu', (e) => {
+  if (!e.target.closest('.mm-node')) {
+    e.preventDefault();
+    // 画布右键（演示版空操作）
+  }
+});
+
+/* 拉取最新版本号（永远不写固定版本号） */
+fetch('https://api.github.com/repos/bubu-LZY/my-mindmap-agent/releases/latest')
+  .then(r => r.ok ? r.json() : null)
+  .then(d => {
+    if (!d || !d.tag_name) return;
+    const v = d.tag_name.replace(/^v/, '');
+    const e = document.getElementById('latestVer');
+    if (e) e.textContent = 'v' + v;
+  })
+  .catch(() => {});
+</script>
+</head>
+<body>
+
+<!-- ============================================================
+ * Hero 入口
+ * ============================================================ -->
+<div class="hero-page" id="heroPage">
+  <span class="badge" id="latestVer">最新版 · Windows · Electron</span>
+  <h1><span class="accent">my-mindmap</span> agent</h1>
+  <p class="sub">基于思维导图和大纲的 AI 智能体桌面程序<br>四视图联动 · AI 智能体 · 本地知识库 · 云盘同步</p>
+  <div class="hero-tags">
+    <div class="hero-tag"><span class="n">100+</span>个 AI 工具</div>
+    <div class="hero-tag"><span class="n">3</span>步挖空流程</div>
+    <div class="hero-tag"><span class="n">4</span>种视图</div>
+    <div class="hero-tag"><span class="n">12</span>大亮点</div>
+    <div class="hero-tag"><span class="n">∞</span>本地优先</div>
+  </div>
+  <div class="hero-cta">
+    <button class="hero-btn primary" onclick="enterApp()">进入在线演示 →</button>
+    <a id="heroDownloadBtn" class="hero-btn secondary" href="https://github.com/bubu-LZY/my-mindmap-agent/releases/latest">下载 Windows 安装包</a>
+  </div>
+</div>
+
+<!-- ============================================================
+ * 应用主界面（按 App.vue 真实结构生成 HTML，类名保持一致）
+ * ============================================================ -->
+<div class="app">
+
+  <!-- 顶部 navbar -->
+  <header class="top-navbar">
+    <button class="title-refresh-btn" title="保存并刷新界面">
+      <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M13.5 8a5.5 5.5 0 11-1.62-3.9M13.8 1.6v3h-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="app-title" id="currentFileName">计算机网络基础.smm</div>
+    <div class="navbar-actions">
+      <button class="nav-btn"><svg viewBox="0 0 16 16" fill="none" width="14" height="14"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 6h7M4.5 8.5h7M4.5 11h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>消息中心</button>
+      <button class="nav-btn"><svg viewBox="0 0 16 16" fill="none" width="14" height="14"><rect x="2.5" y="2.5" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 6h5M5.5 8.5h5M5.5 11h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>记事本</button>
+      <button class="nav-btn">浏览器</button>
+      <button class="nav-btn">快捷键</button>
+      <button class="nav-btn">定时任务</button>
+      <button class="nav-btn">布局</button>
+      <button class="nav-btn" onclick="alert('设置（演示版）')">设置</button>
+    </div>
+  </header>
+
+  <!-- Tab 标签栏 -->
+  <nav class="tab-bar">
+    <div class="tab-item active">计算机网络基础.smm <span class="close-x">×</span></div>
+    <div class="tab-item">操作系统原理.smm <span class="close-x">×</span></div>
+    <div class="tab-item">深度工作.smm <span class="close-x">×</span></div>
+    <button class="tab-add" title="新增标签">+</button>
+  </nav>
+
+  <!-- 左侧文件树（按 FileTree.vue 真实结构） -->
+  <aside class="sidebar">
+    <div class="tree-toolbar">
+      <button class="tree-btn" title="导入文件"><svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M8 2v9M5 8l3 3 3-3M3 13h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button class="tree-btn" title="新建文件夹"><svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M2 4h5l2 2h5v8H2z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg></button>
+      <button class="tree-btn" title="刷新"><svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M13.5 8a5.5 5.5 0 11-1.62-3.9M13.8 1.6v3h-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    </div>
+    <div class="recent-files">
+      <div class="recent-files-title">最近打开</div>
+      <div class="recent-files-list">
+        <button class="recent-file-item active" data-file="computer-network" onclick="switchFile('computer-network')">
+          <span class="recent-file-name">计算机网络基础</span>
+        </button>
+        <button class="recent-file-item" data-file="operating-system" onclick="switchFile('operating-system')">
+          <span class="recent-file-name">操作系统原理</span>
+        </button>
+        <button class="recent-file-item" data-file="reading-notes" onclick="switchFile('reading-notes')">
+          <span class="recent-file-name">深度工作</span>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 主区 -->
+  <main class="main">
+    <div class="view-tabs">
+      <button class="view-tab active" data-view="mindmap" onclick="switchView('mindmap')">思维导图</button>
+      <button class="view-tab" data-view="outline" onclick="switchView('outline')">大纲</button>
+      <button class="view-tab" data-view="graph" onclick="switchView('graph')">关联图</button>
+      <button class="view-tab" data-view="markdown" onclick="switchView('markdown')">Markdown</button>
+    </div>
+
+    <!-- 思维导图视图（含 FixedToolbar） -->
+    <div class="view-content active" data-view="mindmap">
+      <!-- FixedToolbar（按 FixedToolbar.vue 真实类名与按钮顺序复制） -->
+      <div class="fixed-toolbar">
+        <span class="toolbar-drag-handle" title="拖动工具条">⠿</span>
+        <button class="ft-btn" title="抓手工具">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 11V6.5a1.5 1.5 0 0 1 3 0V11M11.5 11V5.5a1.5 1.5 0 0 1 3 0V11M14.5 11V7.5a1.5 1.5 0 0 1 3 0V14M8.5 11c-2.2 0-4 1.3-4 3.8 0 2.4 2.1 4.2 4.6 4.2h3.6c2.3 0 4.1-1.2 4.9-3l1.6-3.2c.4-.8-.1-1.8-1-1.8h-3.4c0-1.1-.2-3-.8-4.1a1.5 1.5 0 0 0-2.7.5"/></svg>
+        </button>
+        <span class="ft-divider"></span>
+        <div class="ft-group">
+          <button class="ft-btn disabled" data-needs-selection title="文字颜色"><span class="ft-icon-color">A</span><span class="ft-caret"></span></button>
+        </div>
+        <div class="ft-group">
+          <button class="ft-btn disabled" data-needs-selection title="高亮背景"><span class="ft-glyph-hl">H</span><span class="ft-caret"></span></button>
+        </div>
+        <div class="ft-group">
+          <button class="ft-btn disabled" data-needs-selection title="节点背景色"><span class="ft-node-bg-icon"></span><span class="ft-caret"></span></button>
+        </div>
+        <div class="ft-group">
+          <button class="ft-btn disabled" data-needs-selection title="节点边框线"><span class="ft-node-border-icon"></span><span class="ft-caret"></span></button>
+        </div>
+        <span class="ft-divider"></span>
+        <button class="ft-btn ft-text-btn bold disabled" data-needs-selection title="加粗">B</button>
+        <button class="ft-btn ft-text-btn underline disabled" data-needs-selection title="下划线">U</button>
+        <span class="ft-divider"></span>
+        <div class="ft-group">
+          <button class="ft-btn ft-font-btn disabled" data-needs-selection title="字体"><span>字体</span><span class="ft-caret"></span></button>
+        </div>
+        <div class="ft-group">
+          <button class="ft-btn ft-font-btn disabled" data-needs-selection title="字号"><span class="ft-size-preview">字号</span><span class="ft-caret"></span></button>
+        </div>
+        <span class="ft-divider"></span>
+        <button class="ft-btn disabled" data-needs-selection title="关联线">
+          <svg viewBox="0 0 24 24" width="13" height="13"><path d="M9 15l6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="3 2"/><circle cx="6" cy="18" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="6" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+        </button>
+        <button class="ft-btn" title="格式刷">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.37 2.63 14 7l-1.59-1.59a2 2 0 0 0-2.82 0L8 7l9 9 1.59-1.59a2 2 0 0 0 0-2.82L17 10l4.37-4.37a2.12 2.12 0 1 0-3-3Z"/><path d="M9 8c-2 3-4 3.5-7 4l8 10c2-1 6-5 6-7"/><path d="M14.5 17.5 4.5 15"/></svg>
+        </button>
+        <button class="ft-btn disabled" data-needs-selection title="外框">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="M8 3v18M3 8h18" stroke-width="1.2" opacity="0.5"/></svg>
+        </button>
+        <button class="ft-btn disabled" data-needs-selection title="概要"><span class="ft-brace">}</span></button>
+        <button class="ft-btn disabled" data-needs-selection title="备注">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v13H9l-5 4V4z"/><path d="M8 9h8M8 12.5h5" stroke-width="1.4"/></svg>
+        </button>
+        <button class="ft-btn" id="ftClozeToggle" title="挖空显隐" onclick="toggleClozeGlobal()">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none"><path d="M3 13.5c2 1.8 4.5 3 9 3s7-1.2 9-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="14" r="2.6" fill="currentColor"/><path d="M5.5 10.5L4 9M12 8.5V6.5M18.5 10.5L20 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <span class="ft-divider"></span>
+        <div class="ft-group">
+          <button class="ft-btn ft-font-btn" title="主题样式"><span>主题</span><span class="ft-caret"></span></button>
+        </div>
+        <div class="ft-group">
+          <button class="ft-btn ft-font-btn" title="布局结构"><span>布局</span><span class="ft-caret"></span></button>
+        </div>
+        <div class="ft-group">
+          <button class="ft-btn" title="导出">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none"><path d="M12 15V4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M7.5 8.5L12 4l4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 16v3c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <span class="ft-caret"></span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 思维导图画布 -->
+      <div class="mindmap-canvas" id="mainCanvas" onclick="if(event.target.id==='mainCanvas')clearSelection()">
+        <svg class="mm-svg" id="mmSvg" viewBox="0 0 760 480" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="mmRootGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#007aff"/><stop offset="100%" stop-color="#af52de"/></linearGradient>
+          </defs>
+          <g id="mmLinks"></g>
+          <g id="mmNodes"></g>
+        </svg>
+      </div>
+    </div>
+
+    <!-- 大纲视图 -->
+    <div class="view-content" data-view="outline">
+      <div class="outline-view" id="outlineList"></div>
+    </div>
+
+    <!-- 关联图视图 -->
+    <div class="view-content" data-view="graph">
+      <div class="graph-view">
+        <svg class="graph-svg" id="graphSvg" viewBox="0 0 600 460" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+    </div>
+
+    <!-- Markdown 视图 -->
+    <div class="view-content" data-view="markdown">
+      <div class="markdown-view" id="markdownContent"></div>
+    </div>
+  </main>
+
+  <!-- 右侧 AI 对话（按 ChatPanel.vue 真实结构） -->
+  <aside class="chat-panel">
+    <div class="chat-header">
+      <span class="title">AI 助手</span>
+      <span class="status">在线</span>
+    </div>
+    <div class="chat-suggestions" id="chatSuggestions"></div>
+    <div class="chat-messages" id="chatMessages"></div>
+    <div class="chat-input-area">
+      <textarea class="chat-input" id="chatInput" placeholder="问点什么..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+      <button class="chat-send" onclick="sendChat()">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><path d="M2 8l12-6-5 6 5 6z" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- 底部状态栏 -->
+  <div class="status-bar">
+    <span id="statusFileName">计算机网络基础.smm</span>
+    <span id="statusNodes">19 节点 · 4 层</span>
+    <span id="statusView">视图：思维导图</span>
+    <div style="flex:1"></div>
+    <span class="ok">● 已自动保存</span>
+    <span id="statusVersion" style="color: var(--apple-blue);">最新版</span>
+  </div>
+</div>
+
+<!-- 弹窗 -->
+<div class="modal-mask" id="modalMask"><div class="modal" id="modalContent"></div></div>
+
+</body>
+</html>
