@@ -374,7 +374,18 @@ body {
 /* ================================================================
  * 数据：与真实程序示例文件结构保持一致
  * ================================================================ */
-<script src="app.js" defer></script>
+<script src="app.js" defer>
+  // 加载失败兜底：直接在页面提示，避免白屏看不到原因
+  window.addEventListener('error', function (e) {
+    if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
+      console.error('[demo] 资源加载失败:', e.target.src || e.target.href);
+      var banner = document.createElement('div');
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#ff3b30;color:#fff;padding:8px 16px;font:13px sans-serif;z-index:99999;';
+      banner.textContent = '脚本加载失败，请检查网络代理/翻译插件后刷新：' + (e.target.src || e.target.href);
+      document.body && document.body.appendChild(banner);
+    }
+  }, true);
+</script>
 
 </head>
 <body>
