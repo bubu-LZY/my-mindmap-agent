@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>my-mindmap agent · 在线演示</title>
 <style>
 /* ================================================================
@@ -634,8 +637,8 @@ function renderMarkdown() {
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^- (.+ (?:|.|\n)*?)(?=\n[^-\n]|\n*$)/gm, '<li>$1</li>')
-    .replace(/((?:<li>.*<\/li>\n?)+)/g, m => `<ul>${m}</ul>`)
+    .replace(/^- ([^\n]+)$/gm, '<li>$1</li>')
+    .replace(/((?:<li>[^<]+<\/li>\n?)+)/g, m => `<ul>${m}</ul>`)
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\n\n/g, '</p><p>')
