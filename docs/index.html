@@ -701,7 +701,7 @@
 
 <!-- 入口页 -->
 <div class="hero-page" id="heroPage">
-  <span class="badge">v4.8.9 · Windows · Electron</span>
+  <span class="badge" id="heroBadge">最新版 · Windows · Electron</span>
   <h1><span class="accent">my-mindmap</span> agent</h1>
   <p class="subtitle">基于思维导图和大纲的 AI 智能体桌面程序<br>四视图联动 · AI 智能体 · 本地知识库 · 云盘同步</p>
   <div class="hero-features">
@@ -1542,6 +1542,21 @@ document.addEventListener('click', (e) => {
  * ============================================================ */
 switchFile('computer-network');
 renderChat();
+
+// 启动时拉取最新版本号 + 下载链接，永远不写固定版本号
+fetch('https://api.github.com/repos/bubu-LZY/my-mindmap-agent/releases/latest')
+  .then(r => r.ok ? r.json() : null)
+  .then(data => {
+    if (!data || !data.tag_name) return;
+    const ver = data.tag_name.replace(/^v/, '');
+    const tagSpan = document.getElementById('topbarVersion');
+    const statSpan = document.getElementById('statusVersion');
+    const heroBadge = document.getElementById('heroBadge');
+    if (tagSpan) tagSpan.textContent = 'v' + ver;
+    if (statSpan) statSpan.textContent = 'v' + ver;
+    if (heroBadge) heroBadge.textContent = 'v' + ver + ' · Windows · Electron';
+  })
+  .catch(() => {});
 </script>
 
 </body>
