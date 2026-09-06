@@ -1,0 +1,22 @@
+{
+  "id": "example_hello",
+  "name": "示例问候工具",
+  "description": "当用户想测试自定义工具时，返回一句问候语。",
+  "category": "Custom",
+  "enabled": true,
+  "autoInvoke": true,
+  "readOnly": true,
+  "risk": "low",
+  "timeoutMs": 5000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "要问候的名字"
+      }
+    },
+    "required": ["name"]
+  },
+  "resultHint": "返回问候文本。"
+}

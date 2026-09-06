@@ -1,0 +1,422 @@
+const { ipcMain } = require('electron')
+const path = require('path')
+const fs = require('fs')
+const { resolveProfileForVision, isVisionEnabled } = require('./aiConfig')
+const { paddleRecognize, isPaddleOcrAvailable, getOcrEngineName } = require('./paddleOcr')
+
+// 当前使用的 OCR 引擎：paddle（默认，更强）| tesseract（兜底）
+let currentEngine = 'paddle'
+let paddleFailedOnce = false // PaddleOCR 失败过一次的标记，避免每次都重试浪费时间
+
+// ============================================================
+//  Tesseract.js 兜底引擎（保留，PaddleOCR 出问题时用）
+// ============================================================
+const workerCache = new Map()
+
+async function getWorker(lang = 'chi_sim+eng', event = null) {
+  const { createWorker } = require('tesseract.js')
+  const key = lang || 'chi_sim+eng'
+  if (workerCache.has(key)) return workerCache.get(key)
+  const worker = await createWorker(key, 1, {
+    logger: m => {
+      if (event && event.sender && !event.sender.isDestroyed()) {
+        event.sender.send('ocr-progress', { status: m.status, progress: m.progress })
+      }
+    }
+  })
+  workerCache.set(key, worker)
+  return worker
+}
+
+// OCR 串行锁：避免并发冲突
+let ocrQueue = Promise.resolve()
+function enqueueOCR(task) {
+  const run = ocrQueue.then(task, task)
+  ocrQueue = run.catch(() => {})
+  return run
+}
+
+async function doTesseractOCR(base64Data, lang, event) {
+  const worker = await getWorker(lang, event)
+  const buffer = Buffer.from(base64Data, 'base64')
+  const { data: { text } } = await enqueueOCR(() => worker.recognize(buffer))
+  return { success: true, text, engine: 'tesseract' }
+}
+
+// ============================================================
+//  统一 OCR 入口：优先 PaddleOCR，自动降级 Tesseract
+// ============================================================
+
+/**
+ * 智能 OCR 识别
+ *   - 优先使用 PaddleOCR（中文效果好、带排版分析）
+ *   - PaddleOCR 失败 → 自动降级到 tesseract.js
+ *   - 记录失败，下次直接用 tesseract（避免每次都浪费时间）
+ */
+async function doOCR(base64Data, lang, event) {
+  const buffer = Buffer.from(base64Data, 'base64')
+
+  // 如果 PaddleOCR 之前失败过，直接走 tesseract
+  if (paddleFailedOnce || currentEngine === 'tesseract') {
+    return doTesseractOCR(base64Data, lang, event)
+  }
+
+  // 尝试 PaddleOCR
+  try {
+    const result = await paddleRecognize(buffer, {
+      withLayout: true,
+      event
+    })
+
+    if (result.success && result.text) {
+      return {
+        success: true,
+        text: result.text,
+        engine: 'paddle',
+        layout: result.layout
+      }
+    }
+
+    // PaddleOCR 返回失败 → 降级
+    throw new Error(result.error || 'PaddleOCR 识别失败')
+  } catch (e) {
+    // 记录失败，下次直接走 tesseract
+    paddleFailedOnce = true
+    console.warn('[OCR] PaddleOCR 失败，降级到 tesseract.js:', e.message || e)
+
+    // 发送降级通知
+    if (event && event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('ocr-progress', {
+        status: `PaddleOCR 初始化失败，正在使用备用引擎...`,
+        progress: 0
+      })
+    }
+
+    // 降级到 tesseract
+    return doTesseractOCR(base64Data, lang, event)
+  }
+}
+
+/**
+ * 获取当前使用的 OCR 引擎名称
+ */
+function getCurrentEngine() {
+  if (paddleFailedOnce) return 'tesseract.js (兜底)'
+  return isPaddleOcrAvailable() ? 'PaddleOCR v6 (推荐)' : 'PaddleOCR v6 (待下载)'
+}
+
+/**
+ * 构建 chat completions API URL
+ */
+function buildChatURL(baseURL, autoComplete = true) {
+  if (!baseURL) return ''
+  let url = baseURL.trim().replace(/\/+$/, '')
+  // 自动补全关闭：地址原样使用，适配自带独立后缀的厂商
+  if (autoComplete === false) return url
+  // 自愈历史配置中的双重版本路径（如 /v4/v1/chat/completions → /v4/chat/completions）
+  url = url.replace(/(\/v\d+[a-z]*)(?:\/v\d+[a-z]*)+\/chat\/completions$/i, '$1/chat/completions')
+  if (/\/chat\/completions$/i.test(url)) return url
+  // 已带版本号（/v1、/v4、/compatible-mode/v1 等）→ 只补 /chat/completions，避免 /v4/v1/... 双重路径
+  if (/\/v\d+[a-z]*$/i.test(url)) return url + '/chat/completions'
+  return url + '/v1/chat/completions'
+}
+
+/**
+ * 根据 baseURL 域名识别厂商（与渲染进程 fileUploadService 保持一致）
+ */
+function detectVisionProvider(baseURL) {
+  const url = String(baseURL || '').toLowerCase()
+  if (url.includes('moonshot')) return 'kimi'
+  if (url.includes('bigmodel') || url.includes('zhipu')) return 'zhipu'
+  if (url.includes('volcengine') || url.includes('ark.cn') || url.includes('byteplus')) return 'volcengine'
+  if (url.includes('dashscope') || url.includes('aliyun')) return 'qwen'
+  if (url.includes('generativelanguage') || url.includes('googleapis')) return 'gemini'
+  if (url.includes('deepseek')) return 'deepseek'
+  return 'openai'
+}
+
+/**
+ * 上传图片到厂商 files API，返回消息 content part（失败返回 null → 调用方降级 base64 直发）
+ */
+async function uploadImageViaFilesAPI({ baseURL, apiKey, filesURL, base64 }) {
+  try {
+    const provider = detectVisionProvider(baseURL)
+    let uploadURL = filesURL ? String(filesURL).trim().replace(/\/+$/, '') : ''
+    if (!uploadURL) {
+      let base = String(baseURL || '').trim().replace(/\/+$/, '')
+      if (!base) return null
+      base = base.replace(/\/(chat\/completions|completions)$/i, '')
+      if (provider === 'gemini') {
+        uploadURL = /\/files$/.test(base) ? base : (/\/v1beta$/.test(base) ? base + '/files' : base + '/v1beta/files')
+      } else if (provider === 'deepseek') {
+        // DeepSeek files 端点是 {origin}/files，与路径（/v1、/v1/chat/completions）无关
+        const m = base.match(/^(https?:\/\/[^/]+)/i)
+        uploadURL = (m ? m[1] : base) + '/files'
+      } else {
+        uploadURL = /\/files$/.test(base) ? base : base + '/files'
+      }
+    }
+    const purpose = provider === 'openai' ? 'vision' : (provider === 'kimi' ? 'image' : (provider === 'deepseek' ? 'user_data' : 'file-extract'))
+    const buf = Buffer.from(base64, 'base64')
+    const form = new FormData()
+    form.append('file', new Blob([buf], { type: 'image/png' }), 'image.png')
+    if (purpose) form.append('purpose', purpose)
+    const headers = {}
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
+    const response = await fetch(uploadURL, { method: 'POST', headers, body: form })
+    if (!response.ok) return null
+    const data = await response.json().catch(() => null)
+    if (!data) return null
+    const fileId = data.id || data.file_id || data.fileId || ''
+    const fileUri = data.uri || data.fileUri || data.file_uri || ''
+    const url = data.url || data.file_url || data.download_url || ''
+    if (provider === 'gemini') {
+      return fileUri ? { type: 'file_data', file_data: { file_uri: fileUri, mime_type: 'image/png' } } : null
+    }
+    if (provider === 'qwen') {
+      return url ? { type: 'image_url', image_url: { url } } : null
+    }
+    // DeepSeek：chat completions 用 { type: 'file', file_id }（file_id 在顶层）
+    if (provider === 'deepseek') {
+      return fileId ? { type: 'file', file_id: fileId } : null
+    }
+    if (fileId) return { type: 'input_image', file_id: fileId }
+    if (url) return { type: 'image_url', image_url: { url } }
+    return null
+  } catch (e) {
+    return null
+  }
+}
+
+/**
+ * 尝试使用 AI 视觉模型识别图片
+ * 发送 base64 图片到 OpenAI 兼容的 chat completions API
+ * 返回 { success, text } 或 { success: false, error }
+ */
+async function tryAIVision(base64Data, event) {
+  try {
+    const vision = resolveProfileForVision()
+    if (!vision) {
+      return { success: false, error: '多模态识别未启用' }
+    }
+    const baseURL = vision.baseURL
+    const apiKey = vision.apiKey
+    const model = vision.model
+    if (!baseURL || !apiKey) {
+      return { success: false, error: '多模态配置档缺失（未填写 API 地址或 Key）' }
+    }
+    if (!model) {
+      return { success: false, error: '多模态配置档未填写模型名称' }
+    }
+
+    const chatURL = buildChatURL(baseURL, vision.autoComplete !== false)
+
+    // 确保 base64 数据格式正确（去除 data:image/... 前缀）
+    let imageBase64 = base64Data
+    if (imageBase64.startsWith('data:')) {
+      imageBase64 = imageBase64.split(',')[1]
+    }
+
+    // 优先走 files API 上传（按厂商自动选择），失败降级 base64 直发
+    let imagePart = { type: 'image_url', image_url: { url: `data:image/png;base64,${imageBase64}` } }
+    try {
+      const up = await uploadImageViaFilesAPI({
+        baseURL,
+        apiKey,
+        filesURL: vision.filesURL || '',
+        base64: imageBase64
+      })
+      if (up) imagePart = up
+    } catch (e) { /* files API 失败，降级 base64 直发 */ }
+
+    // 发送进度通知
+    if (event && event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('ocr-progress', {
+        status: 'AI 视觉模型识别中...',
+        progress: 0.3
+      })
+    }
+
+    const response = await fetch(chatURL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: '请识别并提取这张图片中的所有文字内容。只返回识别到的文字，保持原有格式和结构。不要添加任何解释或说明。'
+              },
+              imagePart
+            ]
+          }
+        ],
+        max_tokens: 4096,
+        temperature: 0
+      })
+    })
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => response.statusText)
+      return { success: false, error: `AI 视觉模型请求失败: ${response.status} ${errText}` }
+    }
+
+    const data = await response.json()
+    const text = data.choices?.[0]?.message?.content
+
+    if (!text || !text.trim()) {
+      return { success: false, error: 'AI 视觉模型未返回有效内容' }
+    }
+
+    // 发送进度通知
+    if (event && event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('ocr-progress', {
+        status: 'AI 视觉模型识别完成',
+        progress: 1.0
+      })
+    }
+
+    return { success: true, text: text.trim() }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+}
+
+// 识别图片文件（通过文件路径）
+ipcMain.handle('ocr-image', async (event, imagePath) => {
+  try {
+    if (!fs.existsSync(imagePath)) {
+      return { success: false, error: `文件不存在: ${imagePath}` }
+    }
+    const buffer = fs.readFileSync(imagePath)
+    const base64 = buffer.toString('base64')
+    const result = await doOCR(base64, 'chi_sim+eng', event)
+    return {
+      success: result.success,
+      text: result.text,
+      engine: result.engine
+    }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+// 识别 base64 图片数据（智能引擎：优先 PaddleOCR，失败降级 tesseract）
+ipcMain.handle('ocr-base64', async (event, base64Data, lang = 'chi_sim+eng') => {
+  try {
+    const result = await doOCR(base64Data, lang, event)
+    return {
+      success: result.success,
+      text: result.text,
+      engine: result.engine
+    }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+// 智能图片识别（降级方案）：
+// 1. 若已开启多模态识别（aiConfig.vision.enabled），先尝试 AI 视觉模型（多模态 URL/Key 缺省回退基础大模型）
+// 2. 多模态未开启/失败，自动降级为本地 OCR (tesseract.js)；失败时返回 fallback_from/fallback_reason 供上层提示用户
+// 返回 { success, text, source: 'ai_vision' | 'ocr', fallback_from?, fallback_reason? }
+ipcMain.handle('ocr-smart', async (event, base64Data, lang = 'chi_sim+eng') => {
+  try {
+    const vision = resolveProfileForVision()
+    const visionEnabled = !!vision
+
+    // 1. 开启多模态识别时，先尝试 AI 视觉模型
+    if (visionEnabled) {
+      const aiResult = await tryAIVision(base64Data, event)
+      if (aiResult.success) {
+        return {
+          success: true,
+          text: aiResult.text,
+          source: 'ai_vision'
+        }
+      }
+
+      // 视觉模型失败：记录原因，降级为本地 OCR
+      const visionError = aiResult.error || '多模态模型调用失败'
+      if (event && event.sender && !event.sender.isDestroyed()) {
+        event.sender.send('ocr-progress', {
+          status: `多模态识别失败（${visionError}），降级为本地 OCR...`,
+          progress: 0.5
+        })
+      }
+      // 降级到 OCR，带出失败原因
+      const ocrResult = await doOCR(base64Data, lang, event)
+      if (ocrResult.success) {
+        return {
+          success: true,
+          text: ocrResult.text,
+          source: 'ocr',
+          fallback_from: 'ai_vision',
+          fallback_reason: visionError
+        }
+      }
+      return { success: false, error: `多模态失败（${visionError}）且本地 OCR 也失败: ${ocrResult.error}` }
+    }
+
+    // 2. 未开启多模态，直接走本地 OCR
+    const ocrResult = await doOCR(base64Data, lang, event)
+    if (ocrResult.success) {
+      return {
+        success: true,
+        text: ocrResult.text,
+        source: 'ocr'
+      }
+    }
+
+    return { success: false, error: ocrResult.error }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+// 识别并直接生成思维导图（OCR + AI）
+// OCR 识别在主进程完成，AI 处理由渲染进程完成
+ipcMain.handle('ocr-to-mindmap', async (event, base64Data, lang = 'chi_sim+eng') => {
+  try {
+    // 多模态已启用且配置完整时，先尝试 AI 视觉模型
+    if (isVisionEnabled()) {
+      const aiResult = await tryAIVision(base64Data, event)
+      if (aiResult.success) {
+        return { success: true, text: aiResult.text, source: 'ai_vision' }
+      }
+    }
+
+    // 降级为本地 OCR
+    const ocrResult = await doOCR(base64Data, lang, event)
+    if (ocrResult.success) {
+      return { success: true, text: ocrResult.text, source: 'ocr' }
+    }
+
+    return { success: false, error: ocrResult.error }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+// 捕获主窗口当前画面（OCR 截图识别用，仅本程序窗口内）
+// 返回 { success, dataUrl, width, height }，dataUrl 为 PNG
+ipcMain.handle('ocr-capture-window', async (event) => {
+  try {
+    const { BrowserWindow } = require('electron')
+    const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed() && w.isVisible())
+    if (!win) return { success: false, error: '未找到可见窗口' }
+    if (win.isMinimized()) return { success: false, error: '窗口已最小化' }
+    const image = await win.webContents.capturePage()
+    if (!image || image.isEmpty()) return { success: false, error: '截图失败' }
+    const size = image.getSize()
+    const dataUrl = image.toDataURL()
+    return { success: true, dataUrl, width: size.width, height: size.height }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
+})

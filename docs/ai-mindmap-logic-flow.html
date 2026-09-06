@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>my-mindmap-agent · AI 右键菜单逻辑意识图</title>
+<style>
+  /* ============================================================
+   *  CSS 变量 / 主题 token
+   * ============================================================ */
+  :root {
+    --bg-page:        #f6f7fb;
+    --bg-card:        #ffffff;
+    --bg-soft:        #f1f2f8;
+    --bg-overlay:     rgba(255,255,255,0.74);
+
+    --text-primary:   #1c1d29;
+    --text-secondary: #5d6079;
+    --text-muted:     #8b8fa8;
+
+    --border-soft:    #e6e8f1;
+    --border-strong:  #d4d7e6;
+
+    /* 节点级 AI：紫色系 */
+    --node-a-border:  #c8b5ff;
+    --node-a-bg:      #f3eeff;
+    --node-a-accent:  #7858ff;
+    --node-a-glow:    rgba(120, 88, 255, 0.32);
+
+    /* 画布级 AI：蓝色系 */
+    --node-b-bg:      #e9f1ff;
+    --node-b-border:  #b7cdff;
+    --node-b-accent:  #2c6bff;
+    --node-b-glow:    rgba(44, 107, 255, 0.28);
+
+    /* AI 核心调度：青色系 */
+    --node-c-bg:      #e0f8f5;
+    --node-c-border:  #a6e4dc;
+    --node-c-accent:  #13a492;
+
+    /* 熔断 / 撤销 / 后台 */
+    --node-warn-bg:   #fff4e5;
+    --node-warn-border: #ffd9a8;
+    --node-warn-accent: #ff8a3d;
+
+    --node-ok-bg:     #e8f5ec;
+    --node-ok-border: #b8e0c5;
+    --node-ok-accent: #2ea64a;
+
+    --connector:      #aab1c8;
+    --connector-soft: #cfd3e3;
+
+    --shadow-card:    0 4px 18px rgba(20, 22, 50, 0.06);
+    --shadow-hover:   0 10px 28px rgba(20, 22, 50, 0.14);
+    --radius:         12px;
+    --radius-card:    16px;
+
+    --font-base: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+    --font-mono: "SF Mono", Consolas, "JetBrains Mono", monospace;
+  }
+
+  /* 深色主题 */
+  [data-theme="dark"] {
+    --bg-page:        #0f111a;
+    --bg-card:        #1a1d2a;
+    --bg-soft:        #232636;
+    --bg-overlay:     rgba(26, 29, 42, 0.78);
+
+    --text-primary:   #ecedf5;
+    --text-secondary: #b4b8cc;
+    --text-muted:     #7d83a0;
+
+    --border-soft:    #2b2f42;
+    --border-strong:  #393e57;
+
+    --node-a-border:  #5b4bbd;
+    --node-a-bg:      #2a2547;
+    --node-a-accent:  #a48bff;
+    --node-a-glow:    rgba(164, 139, 255, 0.4);
+
+    --node-b-bg:      #1d2945;
+    --node-b-border:  #2f4475;
+    --node-b-accent:  #6ea2ff;
+    --node-b-glow:    rgba(110, 162, 255, 0.4);
+
+    --node-c-bg:      #143834;
+    --node-c-border:  #1d584f;
+    --node-c-accent:  #3ed8c2;
+
+    --node-warn-bg:   #3a2a17;
+    --node-warn-border: #6a4a26;
+    --node-warn-accent: #ffac6d;
+
+    --node-ok-bg:     #143822;
+    --node-ok-border: #245a36;
+    --node-ok-accent: #5fd47b;
+
+    --connector:      #5a607a;
+    --connector-soft: #424759;
+    --shadow-card:    0 6px 22px rgba(0, 0, 0, 0.45);
+    --shadow-hover:   0 14px 36px rgba(0, 0, 0, 0.55);
+  }
+
+  /* ============================================================
+   *  基础排版
+   * ============================================================ */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: var(--font-base);
+    background: var(--bg-page);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.6;
+    font-size: 14px;
+    transition: background 0.4s ease, color 0.4s ease;
+  }
+
+  .page {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 36px 28px 80px;
+  }
+
+  /* ============================================================
+   *  顶部头部
+   * ============================================================ */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .header-title h1 {
+    margin: 0 0 6px;
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.2px;
+  }
+  .header-title p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    border: 1px solid var(--border-soft);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 13px;
+    box-shadow: var(--shadow-card);
+    transition: transform 0.18s ease, background 0.18s ease;
+  }
+  .theme-toggle:hover {
+    transform: translateY(-1px);
+  }
+  .theme-toggle .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--node-a-accent);
+    box-shadow: 0 0 0 3px var(--node-a-glow);
+  }
+
+  /* ============================================================
+   *  图例
+   * ============================================================ */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    padding: 14px 18px;
+    margin-bottom: 28px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-card);
+  }
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .legend-swatch {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+  }
+  .swatch-a  { background: var(--node-a-bg); border-color: var(--node-a-border); }
+  .swatch-b  { background: var(--node-b-bg); border-color: var(--node-b-border); }
+  .swatch-c  { background: var(--node-c-bg); border-color: var(--node-c-border); }
+  .swatch-w  { background: var(--node-warn-bg); border-color: var(--node-warn-border); }
+  .swatch-ok { background: var(--node-ok-bg); border-color: var(--node-ok-border); }
+  .swatch-connector {
+    width: 28px; height: 2px;
+    background: linear-gradient(to right, var(--connector) 50%, transparent 50%);
+    background-size: 8px 2px;
+    border-radius: 0;
+  }
+
+  /* ============================================================
+   *  卡片分区
+   * ============================================================ */
+  .section {
+    background: var(--bg-card);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-card);
+    padding: 22px 24px 28px;
+    margin-bottom: 28px;
+    box-shadow: var(--shadow-card);
+    transition: transform 0.18s ease, box-shadow 0.18s ease;
+    opacity: 0;
+    transform: translateY(16px);
+    animation: fadeUp 0.6s ease forwards;
+  }
+  .section:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-hover);
+  }
+  .section[data-index="1"] { animation-delay: 0.05s; }
+  .section[data-index="2"] { animation-delay: 0.15s; }
+  .section[data-index="3"] { animation-delay: 0.25s; }
+  .section[data-index="4"] { animation-delay: 0.35s; }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+  .section-tag {
+    font-size: 11px;
+    letter-spacing: 1px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-weight: 600;
+  }
+  .tag-a  { background: var(--node-a-bg); color: var(--node-a-accent); }
+  .tag-b  { background: var(--node-b-bg); color: var(--node-b-accent); }
+  .tag-c  { background: var(--node-c-bg); color: var(--node-c-accent); }
+
+  .section-title {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 0;
+  }
+  .section-sub {
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    margin: 6px 0 18px;
+  }
+
+  /* ============================================================
+   *  SVG 流程图
+   * ============================================================ */
+  .flow-wrap {
+    width: 100%;
+    overflow-x: auto;
+    padding-bottom: 6px;
+  }
+  .flow-wrap svg {
+    display: block;
+    min-width: 980px;
+    width: 100%;
+    height: auto;
+  }
+
+  .node-rect {
+    fill: var(--bg-card);
+    stroke-width: 1.5;
+    rx: 10; ry: 10;
+    transition: transform 0.2s ease, filter 0.2s ease;
+    cursor: default;
+  }
+  .node-group:hover .node-rect {
+    transform: translateY(-3px);
+    filter: drop-shadow(0 8px 18px rgba(20,22,50,0.14));
+  }
+  .node-rect.kind-a  { stroke: var(--node-a-border); fill: var(--node-a-bg); }
+  .node-rect.kind-b  { stroke: var(--node-b-border); fill: var(--node-b-bg); }
+  .node-rect.kind-c  { stroke: var(--node-c-border); fill: var(--node-c-bg); }
+  .node-rect.kind-w  { stroke: var(--node-warn-border); fill: var(--node-warn-bg); }
+  .node-rect.kind-ok { stroke: var(--node-ok-border); fill: var(--node-ok-bg); }
+  .node-rect.kind-ghost {
+    fill: var(--bg-soft);
+    stroke: var(--border-strong);
+    stroke-dasharray: 4 3;
+  }
+
+  .node-title {
+    font-family: var(--font-base);
+    font-weight: 600;
+    font-size: 13px;
+    fill: var(--text-primary);
+  }
+  .node-sub {
+    font-family: var(--font-base);
+    font-size: 11px;
+    fill: var(--text-secondary);
+  }
+  .node-tag-text {
+    font-family: var(--font-base);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+  }
+  .node-badge-bg.kind-a  { fill: var(--node-a-accent); }
+  .node-badge-bg.kind-b  { fill: var(--node-b-accent); }
+  .node-badge-bg.kind-c  { fill: var(--node-c-accent); }
+  .node-badge-bg.kind-w  { fill: var(--node-warn-accent); }
+  .node-badge-bg.kind-ok { fill: var(--node-ok-accent); }
+  .node-badge-text { fill: #ffffff; }
+
+  /* 连接线 */
+  .connector {
+    fill: none;
+    stroke: var(--connector);
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-dasharray: 6 5;
+    opacity: 0;
+    animation: dashIn 0.8s ease forwards;
+  }
+  .connector.solid {
+    stroke-dasharray: none;
+  }
+  .connector.main {
+    stroke: var(--node-a-accent);
+    stroke-width: 2;
+    filter: drop-shadow(0 0 4px var(--node-a-glow));
+  }
+  .connector.b-main {
+    stroke: var(--node-b-accent);
+    stroke-width: 2;
+    filter: drop-shadow(0 0 4px var(--node-b-glow));
+  }
+  .connector.feedback {
+    stroke: var(--node-ok-accent);
+    stroke-width: 1.8;
+  }
+  .connector.warn {
+    stroke: var(--node-warn-accent);
+    stroke-width: 1.8;
+  }
+
+  /* 流动小圆点 */
+  .flow-dot {
+    fill: var(--node-a-accent);
+    opacity: 0;
+    animation: dotMove 2.4s linear infinite;
+  }
+  .flow-dot.b {
+    fill: var(--node-b-accent);
+  }
+  .flow-dot.feedback {
+    fill: var(--node-ok-accent);
+  }
+
+  /* 节点入场 */
+  .node-group {
+    opacity: 0;
+    transform: translateY(8px);
+    animation: nodeIn 0.5s ease forwards;
+  }
+  .node-group[data-step="1"] { animation-delay: 0.10s; }
+  .node-group[data-step="2"] { animation-delay: 0.22s; }
+  .node-group[data-step="3"] { animation-delay: 0.34s; }
+  .node-group[data-step="4"] { animation-delay: 0.46s; }
+  .node-group[data-step="5"] { animation-delay: 0.58s; }
+  .node-group[data-step="6"] { animation-delay: 0.70s; }
+  .node-group[data-step="7"] { animation-delay: 0.82s; }
+  .node-group[data-step="8"] { animation-delay: 0.94s; }
+  .node-group[data-step="9"] { animation-delay: 1.06s; }
+
+  /* ============================================================
+   *  关键路径徽章
+   * ============================================================ */
+  .focal-ring {
+    fill: none;
+    stroke: var(--node-a-accent);
+    stroke-width: 2;
+    stroke-dasharray: 4 3;
+    opacity: 0;
+    animation: focalPulse 2.6s ease-in-out infinite, ringIn 0.5s ease 1.2s forwards;
+    rx: 14; ry: 14;
+  }
+  .focal-ring.b {
+    stroke: var(--node-b-accent);
+  }
+
+  /* ============================================================
+   *  关键节点闪烁的"AI 主调度"中心节点
+   * ============================================================ */
+  .core-node {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: corePulse 3.6s ease-in-out infinite;
+  }
+
+  /* ============================================================
+   *  动画
+   * ============================================================ */
+  @keyframes fadeUp {
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes nodeIn {
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes ringIn { to { opacity: 0.7; } }
+  @keyframes focalPulse {
+    0%, 100% { stroke-dashoffset: 0; }
+    50%      { stroke-dashoffset: -14; }
+  }
+  @keyframes corePulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.04); }
+  }
+  @keyframes dashIn {
+    from { stroke-dashoffset: 100; opacity: 0; }
+    to   { stroke-dashoffset: 0;   opacity: 1; }
+  }
+  @keyframes dotMove {
+    0%   { offset-distance: 0%;   opacity: 0; }
+    8%   { opacity: 1; }
+    92%  { opacity: 1; }
+    100% { offset-distance: 100%; opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* ============================================================
+   *  总结对比表
+   * ============================================================ */
+  .summary-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--bg-card);
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    box-shadow: var(--shadow-card);
+    margin-top: 8px;
+  }
+  .summary-table th, .summary-table td {
+    padding: 12px 14px;
+    text-align: left;
+    font-size: 12.5px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .summary-table thead th {
+    background: var(--bg-soft);
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+  }
+  .summary-table tbody tr:last-child td { border-bottom: none; }
+  .summary-table tbody tr {
+    transition: background 0.18s ease;
+  }
+  .summary-table tbody tr:hover { background: var(--bg-soft); }
+  .summary-table td .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-yes { background: var(--node-ok-bg); color: var(--node-ok-accent); }
+  .badge-no  { background: var(--node-warn-bg); color: var(--node-warn-accent); }
+
+  /* ============================================================
+   *  提示卡
+   * ============================================================ */
+  .tip {
+    margin-top: 16px;
+    padding: 14px 18px;
+    background: var(--bg-soft);
+    border-left: 3px solid var(--node-c-accent);
+    border-radius: 8px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+  }
+  .tip b { color: var(--text-primary); }
+
+  /* 进度条 */
+  .footer-note {
+    margin-top: 36px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <header class="header">
+    <div class="header-title">
+      <h1>my-mindmap-agent · AI 右键菜单逻辑意识图</h1>
+      <p>v4.8.3 · 8 个 AI 动作的数据流、产物与可撤销性全景</p>
+    </div>
+    <button class="theme-toggle" id="themeBtn" title="切换深色 / 浅色">
+      <span class="dot"></span>
+      <span id="themeLabel">切换主题</span>
+    </button>
+  </header>
+
+  <!-- 图例 -->
+  <div class="legend">
+    <span class="legend-item"><span class="legend-swatch swatch-a"></span>节点级 AI 动作</span>
+    <span class="legend-item"><span class="legend-swatch swatch-b"></span>画布级 AI 动作</span>
+    <span class="legend-item"><span class="legend-swatch swatch-c"></span>AI 主调度 / 通用</span>
+    <span class="legend-item"><span class="legend-swatch swatch-w"></span>熔断 / 撤销 / 提示</span>
+    <span class="legend-item"><span class="legend-swatch swatch-ok"></span>产物 / 结果</span>
+    <span class="legend-item"><span class="legend-swatch swatch-connector"></span>数据流动</span>
+  </div>
+
+  <!-- ============ 总览：AI 主调度 ============ -->
+  <section class="section" data-index="1">
+    <div class="section-header">
+      <span class="section-tag tag-c">总览</span>
+      <h2 class="section-title">AI 右键动作统一数据流</h2>
+    </div>
+    <p class="section-sub">所有 AI 动作都走同一根"主干道"：右键 → 事件桥 → AI 主调度 → 后台大模型 → 工具落图 → 历史栈</p>
+
+    <div class="flow-wrap">
+      <svg viewBox="0 0 1080 320" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--connector)"/>
+          </marker>
+          <marker id="arrow-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-a-accent)"/>
+          </marker>
+          <marker id="arrow-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-b-accent)"/>
+          </marker>
+          <marker id="arrow-ok" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-ok-accent)"/>
+          </marker>
+          <marker id="arrow-w" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-warn-accent)"/>
+          </marker>
+        </defs>
+
+        <!-- 连接线 -->
+        <path class="connector main" d="M180 100 L320 100" marker-end="url(#arrow-a)" style="animation-delay:0.4s"/>
+        <path class="connector main" d="M460 100 L600 100" marker-end="url(#arrow-a)" style="animation-delay:0.6s"/>
+        <path class="connector main" d="M740 100 L880 100" marker-end="url(#arrow-a)" style="animation-delay:0.8s"/>
+        <path class="connector feedback" d="M880 180 L740 180 L600 180 L460 180" marker-end="url(#arrow-ok)" style="animation-delay:1.0s"/>
+
+        <!-- 节点 1：右键菜单 -->
+        <g class="node-group" data-step="1">
+          <rect class="node-rect kind-a" x="20" y="60" width="160" height="80"/>
+          <rect class="node-badge-bg kind-a" x="20" y="60" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="38" y="73" text-anchor="middle">入口</text>
+          <text class="node-title" x="100" y="93" text-anchor="middle">右键菜单</text>
+          <text class="node-sub" x="100" y="112" text-anchor="middle">Contextmenu.vue</text>
+          <text class="node-sub" x="100" y="128" text-anchor="middle">6 节点级 + 2 画布级</text>
+        </g>
+
+        <!-- 节点 2：MindMapEditor 桥 -->
+        <g class="node-group" data-step="2">
+          <rect class="node-rect kind-c" x="320" y="60" width="140" height="80"/>
+          <rect class="node-badge-bg kind-c" x="320" y="60" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="338" y="73" text-anchor="middle">桥接</text>
+          <text class="node-title" x="390" y="93" text-anchor="middle">事件桥</text>
+          <text class="node-sub" x="390" y="112" text-anchor="middle">MindMapEditor.vue</text>
+          <text class="node-sub" x="390" y="128" text-anchor="middle">emit 透传到 App</text>
+        </g>
+
+        <!-- 节点 3：AI 主调度 -->
+        <g class="node-group" data-step="3">
+          <rect class="node-rect kind-c" x="600" y="40" width="140" height="120" rx="14"/>
+          <rect class="node-badge-bg kind-c" x="600" y="40" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="618" y="53" text-anchor="middle">核心</text>
+          <text class="node-title" x="670" y="78" text-anchor="middle">AI 主调度</text>
+          <text class="node-sub" x="670" y="96" text-anchor="middle">ChatPanel.vue</text>
+          <text class="node-sub" x="670" y="112" text-anchor="middle">aiContinue / aiQuiz</text>
+          <text class="node-sub" x="670" y="128" text-anchor="middle">aiReciteRewrite / aiCloze</text>
+          <text class="node-sub" x="670" y="144" text-anchor="middle">reorganize ...</text>
+          <rect class="focal-ring" x="592" y="32" width="156" height="136"/>
+        </g>
+
+        <!-- 节点 4：AI Service -->
+        <g class="node-group" data-step="4">
+          <rect class="node-rect kind-a" x="880" y="60" width="160" height="80"/>
+          <rect class="node-badge-bg kind-a" x="880" y="60" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="898" y="73" text-anchor="middle">流式</text>
+          <text class="node-title" x="960" y="93" text-anchor="middle">aiService</text>
+          <text class="node-sub" x="960" y="112" text-anchor="middle">后台大模型 API</text>
+          <text class="node-sub" x="960" y="128" text-anchor="middle">流式 / 中断 / 并发</text>
+        </g>
+
+        <!-- 节点 5：落图 -->
+        <g class="node-group" data-step="5">
+          <rect class="node-rect kind-ok" x="600" y="200" width="140" height="80"/>
+          <rect class="node-badge-bg kind-ok" x="600" y="200" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="618" y="213" text-anchor="middle">产物</text>
+          <text class="node-title" x="670" y="233" text-anchor="middle">工具落图</text>
+          <text class="node-sub" x="670" y="252" text-anchor="middle">batch_node_actions</text>
+          <text class="node-sub" x="670" y="268" text-anchor="middle">add_child_nodes / ...</text>
+        </g>
+
+        <!-- 节点 6：历史栈 -->
+        <g class="node-group" data-step="6">
+          <rect class="node-rect kind-w" x="320" y="200" width="140" height="80"/>
+          <rect class="node-badge-bg kind-w" x="320" y="200" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="338" y="213" text-anchor="middle">撤销</text>
+          <text class="node-title" x="390" y="233" text-anchor="middle">历史栈</text>
+          <text class="node-sub" x="390" y="252" text-anchor="middle">Ctrl+Z 撤销</text>
+          <text class="node-sub" x="390" y="268" text-anchor="middle">undoable 标记</text>
+        </g>
+
+        <!-- 节点 7：熔断 -->
+        <g class="node-group" data-step="7">
+          <rect class="node-rect kind-w" x="20" y="200" width="160" height="80"/>
+          <rect class="node-badge-bg kind-w" x="20" y="200" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="38" y="213" text-anchor="middle">守卫</text>
+          <text class="node-title" x="100" y="233" text-anchor="middle">熔断 + 校验</text>
+          <text class="node-sub" x="100" y="252" text-anchor="middle">连续失败 ≥ 2 停重试</text>
+          <text class="node-sub" x="100" y="268" text-anchor="middle">文本/节点范围预检</text>
+        </g>
+
+        <!-- 连接：核心到熔断 -->
+        <path class="connector warn" d="M600 70 L260 70 L260 200" marker-end="url(#arrow-w)" style="animation-delay:0.5s"/>
+        <!-- 连接：核心到落图 -->
+        <path class="connector feedback" d="M670 160 L670 200" marker-end="url(#arrow-ok)" style="animation-delay:0.8s"/>
+        <!-- 连接：落图到历史栈 -->
+        <path class="connector feedback" d="M600 240 L460 240" marker-end="url(#arrow-ok)" style="animation-delay:1.0s"/>
+        <!-- 连接：历史栈回到熔断 -->
+        <path class="connector warn" d="M320 240 L180 240" marker-end="url(#arrow-w)" style="animation-delay:1.2s"/>
+        <!-- 连接：核心回到入口 -->
+        <path class="connector" d="M180 130 L100 130 L100 140" marker-end="url(#arrow)" style="animation-delay:1.4s"/>
+
+        <!-- 流动小圆点：核心→AI Service -->
+        <circle class="flow-dot" r="3">
+          <animateMotion dur="2.6s" repeatCount="indefinite" path="M740 100 L880 100"/>
+        </circle>
+        <!-- 流动小圆点：核心→落图 -->
+        <circle class="flow-dot feedback" r="3">
+          <animateMotion dur="2.2s" repeatCount="indefinite" path="M670 160 L670 200"/>
+        </circle>
+        <!-- 流动小圆点：AI Service→核心（反馈）-->
+        <circle class="flow-dot feedback" r="3" style="animation-delay:0.5s">
+          <animateMotion dur="3s" repeatCount="indefinite" path="M880 130 L740 130"/>
+        </circle>
+      </svg>
+    </div>
+
+    <div class="tip">
+      <b>关键设计：</b>AI 主调度（ChatPanel）是所有 AI 动作的中枢，它决定"问什么、答什么、调哪个工具、能不能撤销"。其它组件都是薄薄一层桥。
+    </div>
+  </section>
+
+  <!-- ============ 节点级 AI 流程 ============ -->
+  <section class="section" data-index="2">
+    <div class="section-header">
+      <span class="section-tag tag-a">节点级</span>
+      <h2 class="section-title">AI 续写 / 新增子节点 / 背诵改写</h2>
+    </div>
+    <p class="section-sub">三个最常用的"原地加工"动作。共享熔断、共享问答环节，区别在于产物落点。</p>
+
+    <div class="flow-wrap">
+      <svg viewBox="0 0 1080 360" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--connector)"/>
+          </marker>
+          <marker id="arrow2-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-a-accent)"/>
+          </marker>
+          <marker id="arrow2-ok" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-ok-accent)"/>
+          </marker>
+          <marker id="arrow2-w" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-warn-accent)"/>
+          </marker>
+        </defs>
+
+        <!-- 横向主流程 -->
+        <path class="connector main" d="M180 100 L320 100" marker-end="url(#arrow2-a)" style="animation-delay:0.3s"/>
+        <path class="connector main" d="M460 100 L600 100" marker-end="url(#arrow2-a)" style="animation-delay:0.5s"/>
+        <path class="connector main" d="M740 100 L880 100" marker-end="url(#arrow2-a)" style="animation-delay:0.7s"/>
+
+        <!-- 节点 1：选节点 -->
+        <g class="node-group" data-step="1">
+          <rect class="node-rect kind-a" x="20" y="60" width="160" height="80"/>
+          <rect class="node-badge-bg kind-a" x="20" y="60" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="45" y="73" text-anchor="middle">输入</text>
+          <text class="node-title" x="100" y="93" text-anchor="middle">选中的节点</text>
+          <text class="node-sub" x="100" y="112" text-anchor="middle">多选 / 单选</text>
+          <text class="node-sub" x="100" y="128" text-anchor="middle">合并文本上下文</text>
+        </g>
+
+        <!-- 节点 2：提问 -->
+        <g class="node-group" data-step="2">
+          <rect class="node-rect kind-w" x="320" y="60" width="140" height="80"/>
+          <rect class="node-badge-bg kind-w" x="320" y="60" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="345" y="73" text-anchor="middle">问答</text>
+          <text class="node-title" x="390" y="93" text-anchor="middle">三连问</text>
+          <text class="node-sub" x="390" y="112" text-anchor="middle">参考资料？</text>
+          <text class="node-sub" x="390" y="128" text-anchor="middle">要求 / 层级？</text>
+        </g>
+
+        <!-- 节点 3：AI 调用 -->
+        <g class="node-group" data-step="3">
+          <rect class="node-rect kind-c" x="600" y="60" width="140" height="80"/>
+          <rect class="node-badge-bg kind-c" x="600" y="60" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="625" y="73" text-anchor="middle">推理</text>
+          <text class="node-title" x="670" y="93" text-anchor="middle">流式生成</text>
+          <text class="node-sub" x="670" y="112" text-anchor="middle">aiService.request()</text>
+          <text class="node-sub" x="670" y="128" text-anchor="middle">解析 JSON 子树</text>
+        </g>
+
+        <!-- 节点 4：落图 -->
+        <g class="node-group" data-step="4">
+          <rect class="node-rect kind-ok" x="880" y="60" width="160" height="80"/>
+          <rect class="node-badge-bg kind-ok" x="880" y="60" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="905" y="73" text-anchor="middle">产物</text>
+          <text class="node-title" x="960" y="93" text-anchor="middle">挂子节点 / 改文本</text>
+          <text class="node-sub" x="960" y="112" text-anchor="middle">batch_node_actions</text>
+          <text class="node-sub" x="960" y="128" text-anchor="middle">ai_recite_rewrite</text>
+        </g>
+
+        <!-- 分支：背诵改写 -->
+        <g class="node-group" data-step="5">
+          <rect class="node-rect kind-b" x="600" y="200" width="140" height="80"/>
+          <rect class="node-badge-bg kind-b" x="600" y="200" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="625" y="213" text-anchor="middle">改写</text>
+          <text class="node-title" x="670" y="233" text-anchor="middle">背诵改写</text>
+          <text class="node-sub" x="670" y="252" text-anchor="middle">【记忆简写】+summary</text>
+          <text class="node-sub" x="670" y="268" text-anchor="middle">支持谐音 / 终末节点</text>
+        </g>
+
+        <!-- 连接：核心→背诵改写 -->
+        <path class="connector b-main" d="M670 140 L670 200" marker-end="url(#arrow2-a)" style="animation-delay:0.9s"/>
+        <!-- 连接：背诵改写→落图 -->
+        <path class="connector feedback" d="M740 240 L880 240 L960 200" marker-end="url(#arrow2-ok)" style="animation-delay:1.1s"/>
+
+        <!-- 节点 5：撤销栈 -->
+        <g class="node-group" data-step="6">
+          <rect class="node-rect kind-w" x="320" y="200" width="140" height="80"/>
+          <rect class="node-badge-bg kind-w" x="320" y="200" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="345" y="213" text-anchor="middle">撤销</text>
+          <text class="node-title" x="390" y="233" text-anchor="middle">Ctrl+Z 栈</text>
+          <text class="node-sub" x="390" y="252" text-anchor="middle">undoable: true</text>
+          <text class="node-sub" x="390" y="268" text-anchor="middle">原文本保留</text>
+        </g>
+        <path class="connector feedback" d="M600 240 L460 240" marker-end="url(#arrow2-ok)" style="animation-delay:1.0s"/>
+
+        <!-- 节点 6：熔断 -->
+        <g class="node-group" data-step="7">
+          <rect class="node-rect kind-w" x="20" y="200" width="160" height="80"/>
+          <rect class="node-badge-bg kind-w" x="20" y="200" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="45" y="213" text-anchor="middle">守卫</text>
+          <text class="node-title" x="100" y="233" text-anchor="middle">熔断</text>
+          <text class="node-sub" x="100" y="252" text-anchor="middle">≥ 2 次失败停重试</text>
+          <text class="node-sub" x="100" y="268" text-anchor="middle">用户手动重置</text>
+        </g>
+        <path class="connector warn" d="M320 280 L180 280" marker-end="url(#arrow2-w)" style="animation-delay:1.2s"/>
+        <path class="connector warn" d="M180 140 L100 140 L100 200" marker-end="url(#arrow2-w)" style="animation-delay:0.7s"/>
+
+        <!-- 流动小圆点：核心→落图 -->
+        <circle class="flow-dot" r="3">
+          <animateMotion dur="2.6s" repeatCount="indefinite" path="M740 100 L880 100"/>
+        </circle>
+        <!-- 流动小圆点：核心→改写 -->
+        <circle class="flow-dot" r="3" style="animation-delay:0.4s">
+          <animateMotion dur="2.2s" repeatCount="indefinite" path="M670 140 L670 200"/>
+        </circle>
+      </svg>
+    </div>
+
+    <div class="tip">
+      <b>复用细节：</b>续写和新增子节点共用 <code>aiContinue(mode)</code>，仅靠 mode 区分；背诵改写独立走 <code>aiReciteRewrite</code>，产物是"文本替换 + summary"，其它都是"挂子树"。
+    </div>
+  </section>
+
+  <!-- ============ AI 智能挖空 / 全文挖空 ============ -->
+  <section class="section" data-index="3">
+    <div class="section-header">
+      <span class="section-tag tag-a">节点级 + 画布级</span>
+      <h2 class="section-title">AI 智能挖空 & AI 全文挖空（三步流程）</h2>
+    </div>
+    <p class="section-sub">"机器挖 → AI 补 → AI 复查"是 v4.6 大优化后的稳态流程，全文挖空在节点数大时自动并行多 Agent。</p>
+
+    <div class="flow-wrap">
+      <svg viewBox="0 0 1080 420" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--connector)"/>
+          </marker>
+          <marker id="arrow3-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-a-accent)"/>
+          </marker>
+          <marker id="arrow3-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-b-accent)"/>
+          </marker>
+          <marker id="arrow3-ok" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-ok-accent)"/>
+          </marker>
+        </defs>
+
+        <!-- 三步流程主线 -->
+        <path class="connector main" d="M180 100 L320 100" marker-end="url(#arrow3-a)" style="animation-delay:0.3s"/>
+        <path class="connector main" d="M460 100 L600 100" marker-end="url(#arrow3-a)" style="animation-delay:0.5s"/>
+        <path class="connector main" d="M740 100 L880 100" marker-end="url(#arrow3-a)" style="animation-delay:0.7s"/>
+
+        <!-- 第 1 步：机器挖空 -->
+        <g class="node-group" data-step="1">
+          <rect class="node-rect kind-c" x="20" y="60" width="160" height="80"/>
+          <rect class="node-badge-bg kind-c" x="20" y="60" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="38" y="73" text-anchor="middle">Step 1</text>
+          <text class="node-title" x="100" y="93" text-anchor="middle">机器挖空</text>
+          <text class="node-sub" x="100" y="112" text-anchor="middle">规则 / 正则捕获关键词</text>
+          <text class="node-sub" x="100" y="128" text-anchor="middle">保守 / 激进 / 全图</text>
+        </g>
+
+        <!-- 第 2 步：AI 补挖 -->
+        <g class="node-group" data-step="2">
+          <rect class="node-rect kind-a" x="320" y="60" width="140" height="80"/>
+          <rect class="node-badge-bg kind-a" x="320" y="60" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="338" y="73" text-anchor="middle">Step 2</text>
+          <text class="node-title" x="390" y="93" text-anchor="middle">AI 补挖</text>
+          <text class="node-sub" x="390" y="112" text-anchor="middle">上下文感知选词</text>
+          <text class="node-sub" x="390" y="128" text-anchor="middle">保留上下文线索</text>
+        </g>
+
+        <!-- 第 3 步：AI 快速过一遍 -->
+        <g class="node-group" data-step="3">
+          <rect class="node-rect kind-a" x="600" y="60" width="140" height="80"/>
+          <rect class="node-badge-bg kind-a" x="600" y="60" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="618" y="73" text-anchor="middle">Step 3</text>
+          <text class="node-title" x="670" y="93" text-anchor="middle">AI 快速复查</text>
+          <text class="node-sub" x="670" y="112" text-anchor="middle">质量把关</text>
+          <text class="node-sub" x="670" y="128" text-anchor="middle">降级兜底</text>
+        </g>
+
+        <!-- 产物：cloze 标记 -->
+        <g class="node-group" data-step="4">
+          <rect class="node-rect kind-ok" x="880" y="60" width="160" height="80"/>
+          <rect class="node-badge-bg kind-ok" x="880" y="60" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="898" y="73" text-anchor="middle">产物</text>
+          <text class="node-title" x="960" y="93" text-anchor="middle">节点加 cloze 标记</text>
+          <text class="node-sub" x="960" y="112" text-anchor="middle">答案隐藏 / 点击显示</text>
+          <text class="node-sub" x="960" y="128" text-anchor="middle">Ctrl+Z 可清</text>
+        </g>
+
+        <!-- 分支：全图并行 -->
+        <g class="node-group" data-step="5">
+          <rect class="node-rect kind-b" x="320" y="200" width="140" height="80"/>
+          <rect class="node-badge-bg kind-b" x="320" y="200" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="338" y="213" text-anchor="middle">全图</text>
+          <text class="node-title" x="390" y="233" text-anchor="middle">B2 全图开关</text>
+          <text class="node-sub" x="390" y="252" text-anchor="middle">忽略选中节点</text>
+          <text class="node-sub" x="390" y="268" text-anchor="middle">整图所有节点</text>
+        </g>
+
+        <!-- 并行 worker -->
+        <g class="node-group" data-step="6">
+          <rect class="node-rect kind-b" x="600" y="200" width="140" height="80"/>
+          <rect class="node-badge-bg kind-b" x="600" y="200" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="618" y="213" text-anchor="middle">并行</text>
+          <text class="node-title" x="670" y="233" text-anchor="middle">parallel_ai_workers</text>
+          <text class="node-sub" x="670" y="252" text-anchor="middle">N 路子 Agent</text>
+          <text class="node-sub" x="670" y="268" text-anchor="middle">后台离屏实例</text>
+        </g>
+
+        <!-- 结果聚合 -->
+        <g class="node-group" data-step="7">
+          <rect class="node-rect kind-ok" x="880" y="200" width="160" height="80"/>
+          <rect class="node-badge-bg kind-ok" x="880" y="200" width="36" height="18" rx="6"/>
+          <text class="node-badge-text" x="898" y="213" text-anchor="middle">聚合</text>
+          <text class="node-title" x="960" y="233" text-anchor="middle">结果聚合并写回</text>
+          <text class="node-sub" x="960" y="252" text-anchor="middle">applyClozeStyles</text>
+          <text class="node-sub" x="960" y="268" text-anchor="middle">"显示/隐藏全部"开关</text>
+        </g>
+
+        <!-- 后台离屏服务 -->
+        <g class="node-group" data-step="8">
+          <rect class="node-rect kind-c" x="20" y="320" width="220" height="80"/>
+          <rect class="node-badge-bg kind-c" x="20" y="320" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="45" y="333" text-anchor="middle">后台</text>
+          <text class="node-title" x="130" y="353" text-anchor="middle">backgroundMindMapService</text>
+          <text class="node-sub" x="130" y="372" text-anchor="middle">LRU 缓存后台导图实例</text>
+          <text class="node-sub" x="130" y="388" text-anchor="middle">不抢占前台 pane</text>
+        </g>
+
+        <!-- 连接线 -->
+        <path class="connector b-main" d="M460 140 L390 200" marker-end="url(#arrow3-b)" style="animation-delay:0.8s"/>
+        <path class="connector b-main" d="M460 240 L600 240" marker-end="url(#arrow3-b)" style="animation-delay:1.0s"/>
+        <path class="connector feedback" d="M740 240 L880 240" marker-end="url(#arrow3-ok)" style="animation-delay:1.2s"/>
+        <path class="connector" d="M240 360 L390 280" marker-end="url(#arrow3)" style="animation-delay:1.4s"/>
+
+        <!-- 流动小圆点 -->
+        <circle class="flow-dot" r="3">
+          <animateMotion dur="2.6s" repeatCount="indefinite" path="M180 100 L320 100"/>
+        </circle>
+        <circle class="flow-dot" r="3" style="animation-delay:0.4s">
+          <animateMotion dur="2.6s" repeatCount="indefinite" path="M460 100 L600 100"/>
+        </circle>
+        <circle class="flow-dot b" r="3">
+          <animateMotion dur="2.6s" repeatCount="indefinite" path="M740 100 L880 100"/>
+        </circle>
+      </svg>
+    </div>
+
+    <div class="tip">
+      <b>降级逻辑：</b>如果 AI 步骤异常会自动用规则降级（激进机器挖空兜底），保证用户总能看到效果。<b>全图并行：</b>节点数超过阈值时 <code>parallel_ai_workers</code> 自动拆成 N 路，每个 worker 走完整三步。
+    </div>
+  </section>
+
+  <!-- ============ AI 出题 / 添加到对话 / 一键整理 ============ -->
+  <section class="section" data-index="4">
+    <div class="section-header">
+      <span class="section-tag tag-b">节点级 + 画布级</span>
+      <h2 class="section-title">AI 出题 / 添加到对话 / 一键整理导图</h2>
+    </div>
+    <p class="section-sub">三个"出产物"的动作：出题有新文件/追加两种模式，"添加到对话"不落图只喂素材，"一键整理"严格保留原文只动结构。</p>
+
+    <div class="flow-wrap">
+      <svg viewBox="0 0 1080 360" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--connector)"/>
+          </marker>
+          <marker id="arrow4-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-a-accent)"/>
+          </marker>
+          <marker id="arrow4-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-b-accent)"/>
+          </marker>
+          <marker id="arrow4-ok" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1 1 L7 4 L1 7 Z" fill="var(--node-ok-accent)"/>
+          </marker>
+        </defs>
+
+        <!-- AI 主调度 -->
+        <g class="node-group" data-step="1">
+          <rect class="node-rect kind-c" x="20" y="60" width="160" height="80"/>
+          <rect class="node-badge-bg kind-c" x="20" y="60" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="45" y="73" text-anchor="middle">入口</text>
+          <text class="node-title" x="100" y="93" text-anchor="middle">AI 主调度</text>
+          <text class="node-sub" x="100" y="112" text-anchor="middle">aiQuiz / addToChat</text>
+          <text class="node-sub" x="100" y="128" text-anchor="middle">reorganize</text>
+        </g>
+
+        <!-- 分叉：三路 -->
+        <path class="connector" d="M180 100 L260 100" marker-end="url(#arrow4)" style="animation-delay:0.3s"/>
+        <path class="connector" d="M180 100 L260 100 L260 200" marker-end="url(#arrow4)" style="animation-delay:0.3s"/>
+        <path class="connector" d="M180 100 L260 100 L260 280" marker-end="url(#arrow4)" style="animation-delay:0.3s"/>
+
+        <!-- 出题 -->
+        <g class="node-group" data-step="2">
+          <rect class="node-rect kind-a" x="320" y="40" width="140" height="80"/>
+          <rect class="node-badge-bg kind-a" x="320" y="40" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="345" y="53" text-anchor="middle">出题</text>
+          <text class="node-title" x="390" y="73" text-anchor="middle">aiQuiz</text>
+          <text class="node-sub" x="390" y="92" text-anchor="middle">单选 / 多选 / 填空 / 简答</text>
+        </g>
+
+        <!-- 出题：两模式 -->
+        <g class="node-group" data-step="3">
+          <rect class="node-rect kind-ok" x="600" y="20" width="220" height="60"/>
+          <rect class="node-badge-bg kind-ok" x="600" y="20" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="625" y="33" text-anchor="middle">新文件</text>
+          <text class="node-title" x="710" y="53" text-anchor="middle">主题【AI出题】.smm</text>
+          <text class="node-sub" x="710" y="70" text-anchor="middle">原图不动 / 独立导图</text>
+        </g>
+
+        <g class="node-group" data-step="4">
+          <rect class="node-rect kind-ok" x="600" y="100" width="220" height="60"/>
+          <rect class="node-badge-bg kind-ok" x="600" y="100" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="625" y="113" text-anchor="middle">追加</text>
+          <text class="node-title" x="710" y="133" text-anchor="middle">ai_quiz_append</text>
+          <text class="node-sub" x="710" y="150" text-anchor="middle">当前文件挂 child / 可撤销</text>
+        </g>
+
+        <path class="connector main" d="M460 80 L600 50" marker-end="url(#arrow4-a)" style="animation-delay:0.5s"/>
+        <path class="connector main" d="M460 100 L600 130" marker-end="url(#arrow4-a)" style="animation-delay:0.7s"/>
+
+        <!-- 添加到对话 -->
+        <g class="node-group" data-step="5">
+          <rect class="node-rect kind-c" x="320" y="200" width="140" height="80"/>
+          <rect class="node-badge-bg kind-c" x="320" y="200" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="345" y="213" text-anchor="middle">喂素材</text>
+          <text class="node-title" x="390" y="233" text-anchor="middle">addToChat</text>
+          <text class="node-sub" x="390" y="252" text-anchor="middle">剥 HTML → 纯文本</text>
+          <text class="node-sub" x="390" y="268" text-anchor="middle">写到聊天输入框</text>
+        </g>
+
+        <g class="node-group" data-step="6">
+          <rect class="node-rect kind-ok" x="600" y="200" width="220" height="80"/>
+          <rect class="node-badge-bg kind-ok" x="600" y="200" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="625" y="213" text-anchor="middle">不落图</text>
+          <text class="node-title" x="710" y="233" text-anchor="middle">聊天输入区</text>
+          <text class="node-sub" x="710" y="252" text-anchor="middle">用户手动续写指令</text>
+          <text class="node-sub" x="710" y="268" text-anchor="middle">AI 看到原始节点文本</text>
+        </g>
+
+        <path class="connector feedback" d="M460 240 L600 240" marker-end="url(#arrow4-ok)" style="animation-delay:0.9s"/>
+
+        <!-- 一键整理 -->
+        <g class="node-group" data-step="7">
+          <rect class="node-rect kind-b" x="320" y="280" width="140" height="60"/>
+          <rect class="node-badge-bg kind-b" x="320" y="280" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="345" y="293" text-anchor="middle">画布级</text>
+          <text class="node-title" x="390" y="313" text-anchor="middle">reorganize</text>
+        </g>
+
+        <g class="node-group" data-step="8">
+          <rect class="node-rect kind-ok" x="600" y="280" width="220" height="60"/>
+          <rect class="node-badge-bg kind-ok" x="600" y="280" width="50" height="18" rx="6"/>
+          <text class="node-badge-text" x="625" y="293" text-anchor="middle">新文件</text>
+          <text class="node-title" x="710" y="313" text-anchor="middle">主题【整理】.smm</text>
+        </g>
+
+        <path class="connector b-main" d="M460 310 L600 310" marker-end="url(#arrow4-b)" style="animation-delay:1.1s"/>
+
+        <!-- 流动小圆点 -->
+        <circle class="flow-dot" r="3">
+          <animateMotion dur="2.6s" repeatCount="indefinite" path="M180 100 L260 100 L320 80"/>
+        </circle>
+        <circle class="flow-dot" r="3" style="animation-delay:0.5s">
+          <animateMotion dur="2.8s" repeatCount="indefinite" path="M180 100 L260 100 L260 240 L320 240"/>
+        </circle>
+        <circle class="flow-dot b" r="3">
+          <animateMotion dur="3s" repeatCount="indefinite" path="M180 100 L260 100 L260 310 L320 310"/>
+        </circle>
+      </svg>
+    </div>
+
+    <div class="tip">
+      <b>产物对比：</b>出题 → 新文件 vs 当前文件加 child（两种模式独立工具）；添加到对话 → 不落图只喂素材；一键整理 → <b>严格保留原文本</b>，只重组结构并写到新文件。
+    </div>
+  </section>
+
+  <!-- ============ 汇总对照表 ============ -->
+  <section class="section" data-index="5">
+    <div class="section-header">
+      <span class="section-tag tag-c">速查</span>
+      <h2 class="section-title">8 个 AI 动作产物 & 可撤销性对照</h2>
+    </div>
+    <table class="summary-table">
+      <thead>
+        <tr>
+          <th>动作</th>
+          <th>触发位置</th>
+          <th>产物落点</th>
+          <th>可撤销</th>
+          <th>原文件影响</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>AI 续写此节点</td><td>节点右键</td><td>原节点下挂子节点</td>
+          <td><span class="badge badge-yes">是</span></td><td>否（仅追加）</td>
+        </tr>
+        <tr>
+          <td>AI 新增子节点</td><td>节点右键</td><td>原节点下挂子节点</td>
+          <td><span class="badge badge-yes">是</span></td><td>否（仅追加）</td>
+        </tr>
+        <tr>
+          <td>AI 背诵改写</td><td>节点右键</td><td>节点文本替换 + summary</td>
+          <td><span class="badge badge-yes">是</span></td><td><span class="badge badge-no">是（修改）</span></td>
+        </tr>
+        <tr>
+          <td>AI 智能挖空</td><td>节点右键</td><td>加 cloze 标记</td>
+          <td><span class="badge badge-yes">是</span></td><td>否（标记可清）</td>
+        </tr>
+        <tr>
+          <td>AI 出题（新文件）</td><td>节点右键</td><td>独立新 .smm</td>
+          <td><span class="badge badge-no">—</span></td><td>否（新文件）</td>
+        </tr>
+        <tr>
+          <td>AI 出题（追加）</td><td>节点右键</td><td>当前文件加 child</td>
+          <td><span class="badge badge-yes">是</span></td><td>否（仅追加）</td>
+        </tr>
+        <tr>
+          <td>添加到 AI 对话</td><td>节点右键</td><td>聊天输入区</td>
+          <td><span class="badge badge-no">—</span></td><td>否</td>
+        </tr>
+        <tr>
+          <td>一键整理导图</td><td>画布右键</td><td>新 .smm 文件</td>
+          <td><span class="badge badge-no">—</span></td><td>否（新文件）</td>
+        </tr>
+        <tr>
+          <td>AI 全文挖空</td><td>画布右键</td><td>全图 cloze</td>
+          <td><span class="badge badge-yes">是</span></td><td>否（标记可清）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="tip">
+      <b>使用建议：</b>"原文件影响"列写"否（仅追加）"或"否（标记可清）"的动作都是<b>无损操作</b>，大胆试；只有"背诵改写"会真正修改原文本，记得提前心里有数或用 Ctrl+Z。
+    </div>
+  </section>
+
+  <div class="footer-note">
+    my-mindmap-agent v4.8.3 · AI 动作逻辑全景 · 由 dynamic-ui 生成
+  </div>
+
+</div>
+
+<script>
+  // 主题切换（持久化）
+  (function () {
+    const root = document.documentElement;
+    const saved = localStorage.getItem('mm-agent-theme');
+    if (saved === 'dark') root.setAttribute('data-theme', 'dark');
+
+    const btn = document.getElementById('themeBtn');
+    const label = document.getElementById('themeLabel');
+    const sync = () => {
+      label.textContent = root.getAttribute('data-theme') === 'dark' ? '切换浅色' : '切换深色';
+    };
+    sync();
+    btn.addEventListener('click', () => {
+      const next = root.getAttribute('data-theme') === 'dark' ? '' : 'dark';
+      if (next) root.setAttribute('data-theme', next);
+      else root.removeAttribute('data-theme');
+      localStorage.setItem('mm-agent-theme', next || 'light');
+      sync();
+    });
+  })();
+</script>
+</body>
+</html>

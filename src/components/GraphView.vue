@@ -1,0 +1,908 @@
+<template>
+  <div ref="containerRef" class="graph-view">
+    <div ref="graphDomRef" class="graph-canvas-wrap"></div>
+
+    <!-- 点击节点后的上下级悬浮预览（可拖动，不切回思维导图） -->
+    <div
+      v-if="previewNode"
+      class="graph-node-preview"
+      :style="{ left: previewPos.x + 'px', top: previewPos.y + 'px' }"
+      @mousedown.stop
+    >
+      <div class="gpreview-header" @mousedown.prevent="onPreviewDragStart">
+        <span class="gpreview-title">{{ previewNode.name || '节点预览' }}</span>
+        <button class="gpreview-close" @click="previewNode = null">×</button>
+      </div>
+      <div class="gpreview-body">
+        <div v-if="previewNode.fullName" class="gpreview-row gpreview-main">{{ previewNode.fullName }}</div>
+        <div v-if="previewNode.note" class="gpreview-row gpreview-note">备注：{{ previewNode.note }}</div>
+        <div v-if="previewNode.parent" class="gpreview-row">
+          <span class="gpreview-label">上级</span>{{ previewNode.parent.fullName || previewNode.parent.name || '—' }}
+        </div>
+        <div v-if="previewNode.children.length" class="gpreview-row">
+          <span class="gpreview-label">下级</span>
+          <span class="gpreview-children">{{ previewNode.children.map(c => c.fullName || c.name).join('、') }}</span>
+        </div>
+        <div v-if="!previewNode.parent && !previewNode.children.length" class="gpreview-row gpreview-empty">该节点没有上下级节点</div>
+      </div>
+    </div>
+
+    <!-- 空状态 -->
+    <div v-if="empty && !initError" class="graph-empty">
+      <svg viewBox="0 0 24 24" fill="none" width="28" height="28">
+        <circle cx="5" cy="5" r="2.2" stroke="currentColor" stroke-width="1.5" fill="none"/>
+        <circle cx="19" cy="5" r="2.2" stroke="currentColor" stroke-width="1.5" fill="none"/>
+        <circle cx="12" cy="19" r="2.2" stroke="currentColor" stroke-width="1.5" fill="none"/>
+        <path d="M6.8 6.2l3.4 10.4M17.2 6.2L13.8 16.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+      </svg>
+      <p>暂无导图数据，请先打开一个思维导图文件</p>
+    </div>
+
+    <!-- 初始化错误提示 -->
+    <div v-if="initError" class="graph-error">
+      <p class="err-title">关联图初始化失败</p>
+      <p class="err-msg">{{ initError }}</p>
+    </div>
+
+    <!-- 节点计数 -->
+    <div v-if="nodeCount > 0" class="graph-count">
+      {{ nodeCount }} 个节点 · {{ linkCount }} 条连线
+    </div>
+
+    <!-- 超大图降级提示 -->
+    <div v-if="truncated" class="graph-truncated">
+      <template v-if="prunedDepth >= 0">
+        节点过多，已隐藏第 {{ prunedDepth + 2 }} 层及以下节点（共 {{ nodeCount }} 个）
+      </template>
+      <template v-else>
+        节点过多，已简化渲染：仅显示 {{ renderedCount }} 个节点
+      </template>
+    </div>
+
+    <!-- 导出按钮 -->
+    <button v-if="nodeCount > 0" class="graph-export-btn" @click="onExport">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none">
+        <path d="M12 15V4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        <path d="M7.5 8.5L12 4l4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        <path d="M5 16v3c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+      </svg>
+      <span>导出关联图</span>
+    </button>
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ElMessage } from 'element-plus'
+import { downloadGraphHtml } from '../utils/graphExport'
+import { buildTriModeHtml } from '../utils/triModeExport'
+import { safeExportSvg } from '../utils/safeExportSvg'
+
+const props = defineProps({
+  // 导图实例（优先使用，可获取实时数据）
+  mindMap: {
+    type: Object,
+    default: null
+  },
+  // 原始导图数据（兜底，编辑器隐藏时也能用）
+  mindMapData: {
+    type: Object,
+    default: null
+  }
+})
+
+const emit = defineEmits(['locate-node'])
+
+const containerRef = ref(null)
+const graphDomRef = ref(null)
+const empty = ref(true)
+const initError = ref('')
+const nodeCount = ref(0)
+const linkCount = ref(0)
+const truncated = ref(false)
+const renderedCount = ref(0)
+// 层级剪枝后的最大渲染 depth：-1 = 未剪枝；>=0 = 已剪到该层（用于提示文案）
+const prunedDepth = ref(-1)
+
+let graph = null
+let resizeObserver = null
+let hoveredNode = null
+let ForceGraphModule = null
+let currentNodes = []
+let currentLinks = []
+let panCleanup = null
+
+// 关联图节点悬浮预览（点击节点后显示其上下级，不再立即切回思维导图）
+const previewNode = ref(null)
+const previewPos = ref({ x: 28, y: 28 })
+let previewDragOffset = null
+
+const nodeMapFromCurrent = () => {
+  const map = new Map()
+  for (const n of currentNodes) map.set(String(n.id), n)
+  return map
+}
+
+const buildNodePreview = (nodeId) => {
+  const id = String(nodeId || '')
+  const map = nodeMapFromCurrent()
+  const self = map.get(id)
+  if (!self) return null
+  const parentLink = currentLinks.find(l => l.type === 'tree' && String(l.target?.id ?? l.target) === id)
+  const parentId = parentLink ? String(parentLink.source?.id ?? parentLink.source) : ''
+  const childrenIds = currentLinks
+    .filter(l => l.type === 'tree' && String(l.source?.id ?? l.source) === id)
+    .map(l => String(l.target?.id ?? l.target))
+  return {
+    id,
+    name: self.name,
+    fullName: self.fullName,
+    note: self.note || '',
+    parent: parentId ? (map.get(parentId) || null) : null,
+    children: childrenIds.map(cid => map.get(cid)).filter(Boolean)
+  }
+}
+
+const onPreviewDragStart = (e) => {
+  const rect = e.currentTarget.closest('.graph-node-preview')?.getBoundingClientRect()
+  if (!rect) return
+  previewDragOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  const onMove = (ev) => {
+    if (!previewDragOffset) return
+    previewPos.value = {
+      x: Math.max(0, ev.clientX - previewDragOffset.x),
+      y: Math.max(0, ev.clientY - previewDragOffset.y)
+    }
+  }
+  const onUp = () => {
+    previewDragOffset = null
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
+// 富文本 HTML 转纯文本
+const htmlToText = (html) => {
+  if (!html) return ''
+  const div = document.createElement('div')
+  div.innerHTML = String(html)
+  return (div.textContent || '').replace(/\s+/g, ' ').trim()
+}
+
+// 按层级着色
+const DEPTH_COLORS = ['#0a84ff', '#30b0c7', '#34c759', '#ff9500', '#af52de', '#8e8e93', '#ff3b30']
+
+// 超大图保护：超过该数量触发降级（优先层级剪枝，再数量兜底）
+const MAX_RENDER_NODES = 1500
+// 层级剪枝：默认最多渲染 depth 0~2（即前 3 层，根为第 0 层）
+const MAX_RENDER_DEPTH = 2
+// 第 3 层（depth=2）节点数超过该阈值时，自动降级为只渲染前 2 层（depth 0~1）
+const LAST_LEVEL_LIMIT = 800
+// 节点数超过该阈值时不再逐字绘制文字，只绘制圆点，显著降低 Canvas 重绘开销
+const TEXT_RENDER_LIMIT = 700
+// 缩放到该倍率以下时不绘制文字，避免缩小后文字相对放大造成大量 overdraw
+const TEXT_ZOOM_MIN = 0.5
+
+// 从导图实例提取节点 + 关联线
+const buildFromInstance = (mindMap) => {
+  const nodes = []
+  const links = []
+  const root = mindMap?.renderer?.root
+  if (!root) return { nodes, links }
+
+  const truncate = (s, n = 16) => (s.length > n ? s.slice(0, n) + '…' : s)
+  const seenAssoc = new Set()
+
+  const walk = (node, parentUid, depth) => {
+    if (!node || node.isGeneralization) return
+    let uid = node.getData?.('uid') || node.uid
+    if (!uid) return
+    uid = String(uid)
+    const markdownTable = node.getData?.('markdownTable') || ''
+    const markdownCode = node.getData?.('markdownCode') || ''
+    const isTable = !!(node.getData?.('tableHtml') || markdownTable)
+    const isCode = !!markdownCode
+    let text = htmlToText(node.getData?.('text') || '') || '未命名'
+    if (isTable) {
+      const rows = String(markdownTable || '').split('\n').filter(l => /^\s*\|/.test(l))
+      const bodyRows = Math.max(0, rows.filter(l => !/^\|[\s:|-]+\|$/.test(l)).length - 1)
+      text = `📊 表格（${bodyRows} 行）`
+    } else if (isCode) {
+      text = '💻 代码块'
+    }
+    const note = node.getData?.('note') || ''
+    const image = node.getData?.('image')?.url || node.getData?.('image')?.src || ''
+    nodes.push({
+      id: uid,
+      name: truncate(text),
+      fullName: text,
+      depth,
+      hasNote: !!note,
+      note,
+      hasImage: !!image,
+      image
+    })
+    if (parentUid) {
+      links.push({ source: parentUid, target: uid, type: 'tree' })
+    }
+    const targets = node.getData?.('associativeLineTargets') || []
+    const textMap = node.getData?.('associativeLineText') || {}
+    for (const toUid of targets) {
+      const t = String(toUid)
+      const key = [uid, t].sort().join('|')
+      if (!seenAssoc.has(key)) {
+        seenAssoc.add(key)
+        links.push({ source: uid, target: t, type: 'assoc', label: textMap[toUid] || '' })
+      }
+    }
+    ;(node.children || []).forEach(c => walk(c, uid, depth + 1))
+  }
+  walk(root, null, 0)
+  return { nodes, links }
+}
+
+// 从原始数据提取节点 + 关联线（兜底方案）
+const buildFromRawData = (data) => {
+  const nodes = []
+  const links = []
+  if (!data) return { nodes, links }
+
+  const truncate = (s, n = 16) => (s.length > n ? s.slice(0, n) + '…' : s)
+  const seenAssoc = new Set()
+
+  const walk = (nodeData, parentUid, depth) => {
+    if (!nodeData || !nodeData.data) return
+    const d = nodeData.data
+    const uid = String(d.uid || '')
+    if (!uid) return
+    // 跳过概括节点
+    if (d.generalization && !d.text) return
+
+    const text = htmlToText(d.text || '') || '未命名'
+    const note = d.note || ''
+    const image = d.image?.url || d.image?.src || ''
+    nodes.push({
+      id: uid,
+      name: truncate(text),
+      fullName: text,
+      depth,
+      hasNote: !!note,
+      note,
+      hasImage: !!image,
+      image
+    })
+    if (parentUid) {
+      links.push({ source: parentUid, target: uid, type: 'tree' })
+    }
+    const targets = Array.isArray(d.associativeLineTargets) ? d.associativeLineTargets : []
+    const textMap = d.associativeLineText || {}
+    for (const toUid of targets) {
+      const t = String(toUid)
+      const key = [uid, t].sort().join('|')
+      if (!seenAssoc.has(key)) {
+        seenAssoc.add(key)
+        links.push({ source: uid, target: t, type: 'assoc', label: textMap[toUid] || '' })
+      }
+    }
+    if (Array.isArray(nodeData.children)) {
+      nodeData.children.forEach(c => walk(c, uid, depth + 1))
+    }
+  }
+  walk(data, null, 0)
+  return { nodes, links }
+}
+
+const buildGraphData = () => {
+  // 优先用实例，实例不可用时用原始数据兜底
+  if (props.mindMap?.renderer?.root) {
+    return buildFromInstance(props.mindMap)
+  }
+  if (props.mindMapData) {
+    return buildFromRawData(props.mindMapData)
+  }
+  return { nodes: [], links: [] }
+}
+
+// 计算放射状布局骨架坐标（根在中心，子节点按角度向四周发散，每层一个圆环）
+// 目的：让图打开即呈有序的放射状分布，父子连线呈放射、避免乱交叉
+const computeTreeLayout = (nodes, links) => {
+  if (!nodes.length) return
+  const children = new Map()
+  const hasParent = new Set()
+  for (const l of links) {
+    if (l.type !== 'tree') continue
+    const s = String(l.source?.id ?? l.source)
+    const t = String(l.target?.id ?? l.target)
+    if (!s || !t) continue
+    if (!children.has(s)) children.set(s, [])
+    children.get(s).push(t)
+    hasParent.add(t)
+  }
+  // 根节点：没有父节点的节点
+  const roots = nodes.filter(n => !hasParent.has(n.id)).map(n => n.id)
+  if (!roots.length) return
+
+  // 每个节点的子树叶子数（决定其占据的角度比例）
+  const weight = new Map()
+  const calcWeight = (id) => {
+    const kids = children.get(id) || []
+    if (!kids.length) { weight.set(id, 1); return 1 }
+    let sum = 0
+    for (const k of kids) sum += calcWeight(k)
+    weight.set(id, sum)
+    return sum
+  }
+  roots.forEach(calcWeight)
+
+  // 从根开始分配角度区间（按子树权重瓜分），半径按深度递增
+  const angle = new Map()
+  const radius = new Map()
+  const RADIUS_GAP = 88 // 每层半径间距（减小根与一级节点过远的问题，密度高时力导向会再分散）
+
+  const assignAngle = (id, start, end, depth) => {
+    const mid = (start + end) / 2
+    angle.set(id, mid)
+    radius.set(id, depth * RADIUS_GAP)
+    const kids = children.get(id) || []
+    const totalWeight = weight.get(id) || 1
+    let cur = start
+    for (const k of kids) {
+      const w = weight.get(k) || 1
+      const span = (end - start) * (w / totalWeight)
+      assignAngle(k, cur, cur + span, depth + 1)
+      cur += span
+    }
+  }
+  // 多根时均分圆周
+  roots.forEach((r, i) => {
+    const span = (Math.PI * 2) / roots.length
+    assignAngle(r, span * i, span * (i + 1), 0)
+  })
+
+  for (const n of nodes) {
+    const a = angle.get(n.id) ?? 0
+    const r = radius.get(n.id) ?? 0
+    n.layoutX = r * Math.cos(a)
+    n.layoutY = r * Math.sin(a)
+    // 初始位置直接用布局坐标，让图打开即有序、避免仿真初期乱飞
+    n.x = n.layoutX
+    n.y = n.layoutY
+  }
+}
+
+const render = () => {
+  if (!graph) return
+  try {
+    const built = buildGraphData()
+    let nodes = built.nodes
+    let links = built.links
+    const totalNodes = nodes.length
+
+    // 超大图降级：优先层级剪枝（保留前 MAX_RENDER_DEPTH 层，第 3 层过多自动降为前 2 层），
+    // 再数量兜底（极端情况下前几层仍超过上限才深度优先截断）。
+    prunedDepth.value = -1
+    if (totalNodes > MAX_RENDER_NODES) {
+      let depthLimit = MAX_RENDER_DEPTH
+      const lastLevel = nodes.filter(n => (n.depth || 0) === MAX_RENDER_DEPTH).length
+      if (lastLevel > LAST_LEVEL_LIMIT) {
+        depthLimit = MAX_RENDER_DEPTH - 1
+      }
+      const kept = new Set(nodes.filter(n => (n.depth || 0) <= depthLimit).map(n => String(n.id)))
+      nodes = nodes.filter(n => kept.has(String(n.id)))
+      links = links.filter(l => {
+        const s = String(l.source?.id ?? l.source)
+        const t = String(l.target?.id ?? l.target)
+        return kept.has(s) && kept.has(t)
+      })
+      prunedDepth.value = depthLimit
+      truncated.value = true
+    } else {
+      truncated.value = false
+    }
+
+    // 数量兜底：层级剪枝后仍超上限，再深度优先截断
+    if (nodes.length > MAX_RENDER_NODES) {
+      const kept = new Set(nodes.slice(0, MAX_RENDER_NODES).map(n => String(n.id)))
+      nodes = nodes.slice(0, MAX_RENDER_NODES)
+      links = links.filter(l => {
+        const s = String(l.source?.id ?? l.source)
+        const t = String(l.target?.id ?? l.target)
+        return kept.has(s) && kept.has(t)
+      })
+    }
+    renderedCount.value = nodes.length
+
+    currentNodes = nodes
+    currentLinks = links
+    computeTreeLayout(nodes, links)
+    empty.value = nodes.length === 0
+    nodeCount.value = totalNodes
+    linkCount.value = links.length
+    graph.graphData({ nodes, links })
+
+    // 根据节点规模动态调整力导向参数，节点越多越早冷却
+    try {
+      if (totalNodes > TEXT_RENDER_LIMIT) {
+        graph.d3AlphaDecay(0.03)
+        graph.cooldownTicks(80)
+        graph.d3Force('charge').strength(-80)
+      } else {
+        graph.d3AlphaDecay(0.02)
+        graph.cooldownTicks(120)
+        graph.d3Force('charge').strength(-120)
+      }
+    } catch (e) { /* 忽略 */ }
+
+    if (nodes.length) {
+      setTimeout(() => {
+        try { graph.zoomToFit(400, 40) } catch (e) { /* 忽略 */ }
+      }, 700)
+    }
+  } catch (e) {
+    console.error('[GraphView] render error:', e)
+  }
+}
+
+// 导出三模式 HTML（思维导图 + 大纲 + 关联图）
+const onExport = async () => {
+  try {
+    const rawData = props.mindMapData
+    if (!rawData) {
+      ElMessage.warning('没有可导出的数据')
+      return
+    }
+    // 从根节点取文件名
+    const getRootName = () => {
+      const root = rawData.data
+      const text = root?.text || ''
+      if (!text) return '思维导图'
+      return text.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() || '思维导图'
+    }
+    const name = getRootName()
+
+    // 安全导出 SVG（处理容器隐藏时尺寸异常的问题）
+    let svgDataUrl = null
+    if (props.mindMap) {
+      try {
+        svgDataUrl = await safeExportSvg(props.mindMap, name)
+      } catch (e) {
+        console.warn('[GraphView] SVG 导出失败:', e.message)
+      }
+    }
+
+    if (!svgDataUrl) {
+      ElMessage.warning('当前无法获取导图 SVG，请先切换到思维导图模式再导出')
+      return
+    }
+
+    const html = await buildTriModeHtml(svgDataUrl, rawData, name)
+    const fileName = `${name}-全视图模式`
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${fileName}.html`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    ElMessage.success(`三模式 HTML 已导出：${fileName}.html`)
+  } catch (e) {
+    console.error('[GraphView] 导出失败:', e)
+    ElMessage.error(`导出失败: ${e.message}`)
+  }
+}
+
+const initGraph = async () => {
+  const container = graphDomRef.value
+  if (!container) {
+    initError.value = '找不到画布容器元素'
+    return
+  }
+
+  const parent = containerRef.value
+  const cw = parent?.clientWidth || container.clientWidth || window.innerWidth * 0.6
+  const ch = parent?.clientHeight || container.clientHeight || window.innerHeight * 0.6
+
+  if (cw <= 0 || ch <= 0) {
+    initError.value = `容器尺寸异常：${cw} x ${ch}`
+    return
+  }
+
+  try {
+    if (!ForceGraphModule) {
+      const mod = await import('force-graph')
+      ForceGraphModule = mod.default || mod
+    }
+    const ForceGraph = ForceGraphModule
+
+    if (typeof ForceGraph !== 'function') {
+      initError.value = 'force-graph 模块导出格式异常：' + typeof ForceGraph
+      return
+    }
+
+    graph = ForceGraph()(container)
+      .width(cw)
+      .height(ch)
+      .backgroundColor('#fafafa')
+      .nodeId('id')
+      .linkSource('source')
+      .linkTarget('target')
+      .linkColor(link => (link.type === 'assoc' ? 'rgba(10, 132, 255, 0.55)' : 'rgba(0, 0, 0, 0.12)'))
+      .linkWidth(link => (link.type === 'assoc' ? 1.5 : 0.8))
+      .linkDirectionalArrowLength(link => (link.type === 'assoc' ? 4 : 0))
+      .linkDirectionalArrowRelPos(1)
+      .linkLabel(link => link.label || '')
+      .nodeLabel(node => node.fullName || node.name || '')
+      .nodeVal(6)
+      .enablePanInteraction(true)
+      .enableZoomInteraction(true)
+      .nodeCanvasObjectMode(() => 'replace')
+      .nodeCanvasObject((node, ctx, globalScale) => {
+        if (node.x == null || node.y == null) return
+        const r = 5
+        const color = DEPTH_COLORS[(node.depth || 0) % DEPTH_COLORS.length]
+        ctx.beginPath()
+        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false)
+        ctx.fillStyle = color
+        ctx.fill()
+        if (node === hoveredNode) {
+          ctx.beginPath()
+          ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI, false)
+          ctx.strokeStyle = 'rgba(10, 132, 255, 0.65)'
+          ctx.lineWidth = 2
+          ctx.stroke()
+        }
+        // 备注标识（右上角小黄点）
+        if (node.hasNote) {
+          ctx.beginPath()
+          ctx.arc(node.x + r - 1, node.y - r + 1, 2.2, 0, 2 * Math.PI, false)
+          ctx.fillStyle = '#ffcc00'
+          ctx.fill()
+          ctx.strokeStyle = '#fff'
+          ctx.lineWidth = 1
+          ctx.stroke()
+        }
+        // 图片标识（右下角小绿点）
+        if (node.hasImage) {
+          ctx.beginPath()
+          ctx.arc(node.x + r - 1, node.y + r - 1, 2.2, 0, 2 * Math.PI, false)
+          ctx.fillStyle = '#34c759'
+          ctx.fill()
+          ctx.strokeStyle = '#fff'
+          ctx.lineWidth = 1
+          ctx.stroke()
+        }
+        // 文字显示：缩放过低时隐藏深层节点文字，但保留前几层层级节点文字，
+        // 让用户在缩到很小时仍能定位根与主分支位置；节点过多时进一步只保留前 2 层。
+        const depth = node.depth || 0
+        const showByZoom = globalScale >= TEXT_ZOOM_MIN
+        const showTopLevel = renderedCount.value > TEXT_RENDER_LIMIT ? depth < 2 : depth < 3
+        if (node.name && (showByZoom || showTopLevel)) {
+          const fontSize = 12 / globalScale
+          ctx.font = `${fontSize}px "Microsoft YaHei", "PingFang SC", sans-serif`
+          ctx.textAlign = 'left'
+          ctx.textBaseline = 'middle'
+          ctx.fillStyle = 'rgba(40, 44, 52, 0.88)'
+          ctx.fillText(node.name, node.x + r + 4, node.y)
+        }
+      })
+      .nodePointerAreaPaint((node, color, ctx) => {
+        ctx.fillStyle = color
+        ctx.beginPath()
+        ctx.arc(node.x, node.y, 10, 0, 2 * Math.PI, false)
+        ctx.fill()
+      })
+      .onNodeHover(node => {
+        hoveredNode = node
+        container.style.cursor = node ? 'pointer' : 'grab'
+      })
+      .onNodeClick(node => {
+        if (node && node.id) {
+          previewNode.value = buildNodePreview(node.id)
+          previewPos.value = { x: 28, y: 28 }
+        }
+      })
+      .onBackgroundClick(() => { previewNode.value = null })
+
+    // 支持右键 / 中键（滚轮键）拖动平移画布，并阻止右键弹出系统菜单。
+    // force-graph 内部 d3-zoom 只放行左键；这里不侵入其内部，改为自行监听中/右键，
+    // 通过公开 API centerAt() 平移（screen 像素增量 ÷ 当前 zoom 换算成图坐标增量）。
+    const setupMultiButtonPan = () => {
+      let pan = null
+      const onDown = (e) => {
+        if (e.button !== 1 && e.button !== 2) return
+        e.preventDefault()
+        try {
+          const center = graph.centerAt()
+          const k = graph.zoom() || 1
+          pan = { startX: e.clientX, startY: e.clientY, cx: center.x, cy: center.y, k }
+        } catch (err) {
+          pan = null
+        }
+      }
+      const onMove = (e) => {
+        if (!pan) return
+        const dx = e.clientX - pan.startX
+        const dy = e.clientY - pan.startY
+        try {
+          graph.centerAt(pan.cx - dx / pan.k, pan.cy - dy / pan.k)
+        } catch (err) { /* 忽略 */ }
+      }
+      const onUp = () => { pan = null }
+      const onCtx = (e) => e.preventDefault()
+      container.addEventListener('mousedown', onDown)
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+      container.addEventListener('contextmenu', onCtx)
+      panCleanup = () => {
+        container.removeEventListener('mousedown', onDown)
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        container.removeEventListener('contextmenu', onCtx)
+      }
+    }
+    setupMultiButtonPan()
+
+    // 力导向参数（默认值）
+    try {
+      graph.d3Force('charge').strength(-120)
+      graph.d3Force('link').distance(link => (link.type === 'assoc' ? 80 : 55))
+      graph.d3Force('center').strength(0.05)
+      // 大量节点时降低模拟速度和迭代次数，优先保证可交互。
+      graph.d3AlphaDecay(0.02)
+      graph.cooldownTicks(120)
+    } catch (e) {
+      console.warn('[GraphView] d3Force 配置跳过:', e.message)
+    }
+
+    render()
+    initError.value = ''
+  } catch (e) {
+    console.error('[GraphView] initGraph error:', e)
+    initError.value = e.message || String(e)
+  }
+
+  // 响应式尺寸
+  if (parent && !resizeObserver) {
+    resizeObserver = new ResizeObserver(() => {
+      if (graph && parent) {
+        const w = parent.clientWidth
+        const h = parent.clientHeight
+        if (w > 0 && h > 0) {
+          try { graph.width(w).height(h) } catch (e) { /* 忽略 */ }
+        }
+      }
+    })
+    resizeObserver.observe(parent)
+  }
+}
+
+onMounted(() => {
+  nextTick(() => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        initGraph()
+      })
+    })
+  })
+})
+
+// 监听实例变化和原始数据变化，任意一个更新都重新渲染
+watch(() => props.mindMap, () => {
+  if (graph) nextTick(render)
+}, { deep: false })
+
+watch(() => props.mindMapData, () => {
+  if (graph) nextTick(render)
+}, { deep: true })
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  try { panCleanup?.() } catch (e) { /* 忽略 */ }
+  panCleanup = null
+  try { graph?._destructor?.() } catch (e) { /* 忽略 */ }
+  graph = null
+  ForceGraphModule = null
+})
+</script>
+
+<style scoped>
+.graph-view {
+  position: absolute;
+  inset: 0;
+  background: #fafafa;
+  overflow: hidden;
+}
+.graph-canvas-wrap {
+  position: absolute;
+  inset: 0;
+}
+.graph-canvas-wrap :deep(canvas) {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  cursor: grab;
+}
+.graph-canvas-wrap :deep(canvas:active) {
+  cursor: grabbing;
+}
+.graph-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #a8abb2;
+  font-size: 13px;
+  pointer-events: none;
+  z-index: 2;
+}
+.graph-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #ff3b30;
+  font-size: 13px;
+  z-index: 3;
+  background: rgba(255, 255, 255, 0.9);
+}
+.graph-node-preview {
+  position: absolute;
+  z-index: 5;
+  width: 280px;
+  max-width: calc(100% - 24px);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  overflow: hidden;
+  user-select: none;
+}
+.gpreview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 11px;
+  background: rgba(0, 122, 255, 0.07);
+  cursor: move;
+}
+.gpreview-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1c1c1e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gpreview-close {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #8e8e93;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.gpreview-close:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: #1c1c1e;
+}
+.gpreview-body {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 300px;
+  overflow: auto;
+}
+.gpreview-row {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #3a3a3c;
+  word-break: break-word;
+}
+.gpreview-main {
+  font-weight: 600;
+  color: #1c1c1e;
+}
+.gpreview-note {
+  color: #8a6d1a;
+}
+.gpreview-label {
+  display: inline-block;
+  flex-shrink: 0;
+  margin-right: 6px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #007aff;
+  background: rgba(0, 122, 255, 0.1);
+  border-radius: 5px;
+}
+.gpreview-children {
+  color: #4b5563;
+}
+.gpreview-empty {
+  color: #a8abb2;
+}
+.err-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.err-msg {
+  font-family: "Consolas", monospace;
+  font-size: 12px;
+  max-width: 80%;
+  word-break: break-all;
+  text-align: center;
+  color: #8e8e93;
+}
+.graph-count {
+  position: absolute;
+  bottom: 12px;
+  right: 16px;
+  font-size: 12px;
+  color: #a8abb2;
+  pointer-events: none;
+  z-index: 2;
+}
+.graph-truncated {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  font-size: 12px;
+  color: #8a6d1a;
+  background: rgba(255, 244, 214, 0.92);
+  border: 1px solid rgba(200, 150, 40, 0.35);
+  border-radius: 8px;
+  pointer-events: none;
+  z-index: 3;
+  white-space: nowrap;
+}
+.graph-export-btn {
+  position: absolute;
+  bottom: 12px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #1d1d1f;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  z-index: 3;
+  transition: all 0.15s ease;
+}
+.graph-export-btn:hover {
+  background: #fff;
+  border-color: rgba(10, 132, 255, 0.3);
+  color: #0a84ff;
+  box-shadow: 0 2px 12px rgba(10, 132, 255, 0.12);
+}
+.graph-export-btn:active {
+  transform: scale(0.97);
+}
+</style>
