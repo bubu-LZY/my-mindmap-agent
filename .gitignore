@@ -4,3 +4,26 @@ release/
 *.log
 .DS_Store
 *.zip
+
+# 临时文档与笔记
+对话总结.md
+多窗口多标签改造计划.md
+AI工具测试对话.md
+release-notes-*.md
+
+# 实验/研究目录
+cherry-cat-pet/
+multimodal-models-research/
+
+# 本地 skills
+skills/
+
+# 工具类测试脚本
+tools/test-*.js
+tools/test-*.mjs
+tools/api-toolcall-probe.js
+tools/inspect-legacy.js
+tools/repair-array-fields.mjs
+tools/fix-prompt.ps1
+tools/make-icon.ps1
+tools/make-package.ps1
