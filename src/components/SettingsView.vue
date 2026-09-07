@@ -937,7 +937,7 @@
       <div style="margin-bottom: 12px;">
         <el-button size="small" type="primary" :loading="checkingUpdate" @click="checkUpdate">检查更新</el-button>
       </div>
-      <p>my-mindmap agent v4.12.1</p>
+      <p>my-mindmap agent v4.12.2</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
@@ -3374,23 +3374,33 @@ const selectRclonePath = async () => {
   }
 }
 
+// 缓存 section 元素引用，避免滚动时反复 getElementById
+const sectionElsCache = {}
+// rAF 节流标记：scroll 事件高频触发，合并到每帧最多一次
+let scrollRaf = null
+
 const onSettingsScroll = () => {
-  const container = settingsViewRef.value
-  if (!container) return
-  const rect = container.getBoundingClientRect()
-  const top = rect.top + 100
-  let current = 'sec-ai-config'
-  for (const s of tocSections) {
-    const el = document.getElementById(s.id)
-    if (!el) continue
-    if (el.getBoundingClientRect().top <= top) current = s.id
-  }
-  if (current !== activeSection.value) activeSection.value = current
+  if (scrollRaf) return
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = null
+    const container = settingsViewRef.value
+    if (!container) return
+    // 容器自身在视口内的位置不随内部滚动变化，缓存一次即可
+    if (!settingsTopCache) settingsTopCache = container.getBoundingClientRect().top
+    const top = settingsTopCache + 100
+    let current = 'sec-ai-config'
+    for (const s of tocSections) {
+      const el = sectionElsCache[s.id]
+      if (!el) continue
+      if (el.getBoundingClientRect().top <= top) current = s.id
+    }
+    if (current !== activeSection.value) activeSection.value = current
+  })
 }
 
 const scrollToSection = (id) => {
   const doScroll = () => {
-    const el = document.getElementById(id)
+    const el = sectionElsCache[id] || document.getElementById(id)
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' })
       activeSection.value = id
@@ -3414,21 +3424,27 @@ const scrollToSection = (id) => {
 }
 
 let tocObserver = null
+let settingsTopCache = 0
 
 const setupTocObserver = () => {
-  const ids = tocSections.map(s => s.id)
-  const els = ids.map(id => document.getElementById(id)).filter(Boolean)
-  if (els.length === 0) return
+  const container = settingsViewRef.value
+  if (!container || typeof IntersectionObserver === 'undefined') return
+  // 预填充 section 元素缓存，供 onSettingsScroll 与 IntersectionObserver 共用
+  for (const s of tocSections) {
+    const el = document.getElementById(s.id)
+    if (el) sectionElsCache[s.id] = el
+  }
+  // 用 IntersectionObserver 替代昂贵的 getBoundingClientRect 循环：
+  // root 指定为设置界面的滚动容器，滚动时浏览器异步回调，不阻塞主线程
   tocObserver = new IntersectionObserver((entries) => {
-    // 找出当前在视口顶部区域最靠前的 section
     const visible = entries
       .filter(e => e.isIntersecting)
       .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
     if (visible.length > 0) {
       activeSection.value = visible[0].target.id
     }
-  }, { rootMargin: '-80px 0px -70% 0px' })
-  els.forEach(el => tocObserver.observe(el))
+  }, { root: container, rootMargin: '-80px 0px -70% 0px', threshold: 0 })
+  Object.values(sectionElsCache).forEach(el => tocObserver.observe(el))
 }
 
 onMounted(() => {
@@ -3447,7 +3463,10 @@ onMounted(() => {
   loadCustomTools()
   deskCalendarSyncEnabled.value = isDeskCalendarSyncEnabled()
   cloudSyncForm.value = cloudSyncService.loadConfig()
-  nextTick(onSettingsScroll)
+  nextTick(() => {
+    setupTocObserver()
+    onSettingsScroll()
+  })
 })
 
 onBeforeUnmount(() => {
