@@ -142,7 +142,7 @@
 
         <!-- 文件树（始终挂载，仅切换可见性，避免 v-if 导致组件销毁重建后数据丢失） -->
         <div class="file-tree-wrapper" v-show="viewMode !== 'review' && viewMode !== 'tag'">
-          <SearchBar ref="searchBarRef" @open-file="onSearchOpenFile" />
+          <SearchBar ref="searchBarRef" :currentFilePath="currentFilePath" @open-file="onSearchOpenFile" />
           <FileTree
             ref="fileTreeRef"
             :currentFilePath="currentFilePath"
@@ -170,7 +170,7 @@
 
         <!-- 标签模式：收藏标签列表（标签 + 备注 + 文件，点击跳转） -->
         <div class="tag-mode-wrapper" v-show="viewMode === 'tag'">
-          <SearchBar ref="tagSearchBarRef" @open-file="onSearchOpenFile" />
+          <SearchBar ref="tagSearchBarRef" :currentFilePath="currentFilePath" @open-file="onSearchOpenFile" />
           <TagView
             ref="tagViewRef"
             :visible="viewMode === 'tag'"
@@ -2045,6 +2045,19 @@ const aiCollapseBtnRight = computed(() => {
   return offset + 'px'
 })
 const floatingChatVisible = ref(false)
+// 侧边窗展开/收起后，延迟到 width transition（约 0.15s）结束再 resize 画布，
+// 避免 transition 期间每帧都触发导图重新布局造成卡顿；连续操作只执行最后一次。
+let editorResizeTimer = null
+const scheduleEditorResize = (delay = 170) => {
+  if (editorResizeTimer) clearTimeout(editorResizeTimer)
+  editorResizeTimer = setTimeout(() => {
+    editorResizeTimer = null
+    if (editorRef.value && (viewMode.value === 'mindmap' || viewMode.value === 'review')) {
+      editorRef.value.resize()
+    }
+  }, delay)
+}
+
 const toggleAiPanel = () => {
   // AI 助手与日志同时展开时，收起 AI 助手也一并收起日志，避免日志盖住画布。
   if (aiPanelExpanded.value && logPanelVisible.value) {
@@ -2052,11 +2065,7 @@ const toggleAiPanel = () => {
   }
   aiPanelExpanded.value = !aiPanelExpanded.value
   if (aiPanelExpanded.value) floatingChatVisible.value = false
-  nextTick(() => {
-    if (editorRef.value && (viewMode.value === 'mindmap' || viewMode.value === 'review')) {
-      editorRef.value.resize()
-    }
-  })
+  scheduleEditorResize()
 }
 const toggleFloatingChat = () => { floatingChatVisible.value = !floatingChatVisible.value }
 
@@ -2360,6 +2369,7 @@ const onToolCallStatus = (status) => {
 // 日志面板切换
 const onToggleLogPanel = (visible) => {
   logPanelVisible.value = visible
+  scheduleEditorResize()
 }
 
 // 关闭日志面板（同步 ChatPanel 内部状态）
@@ -2368,11 +2378,18 @@ const closeLogPanel = () => {
   if (chatPanelRef.value && chatPanelRef.value.setLogPanelVisible) {
     chatPanelRef.value.setLogPanelVisible(false)
   }
+  scheduleEditorResize()
 }
 
-// 日志更新信号
+// 日志更新信号：rAF 防抖，AI 多步任务时高频 log-updated 合并到每帧一次，
+// 避免日志面板打开时被频繁触发全量刷新导致 Agent 执行卡顿
+let logRefreshRaf = null
 const onLogUpdated = () => {
-  logRefreshSignal.value++
+  if (logRefreshRaf) return
+  logRefreshRaf = requestAnimationFrame(() => {
+    logRefreshRaf = null
+    logRefreshSignal.value++
+  })
 }
 
 // 当前对话切换，更新日志面板的对话筛选

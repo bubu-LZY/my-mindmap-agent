@@ -937,7 +937,7 @@
       <div style="margin-bottom: 12px;">
         <el-button size="small" type="primary" :loading="checkingUpdate" @click="checkUpdate">检查更新</el-button>
       </div>
-      <p>my-mindmap agent v4.12.2</p>
+      <p>my-mindmap agent v4.12.3</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
@@ -1230,7 +1230,8 @@ const submitAuth = async () => {
       authPassword.value = ''
       const cb = authOnSuccess
       authOnSuccess = null
-      cb?.()
+      // 把验证通过的密码回传给回调（导出备份等场景需要用它加密）
+      cb?.(pwd)
     } else {
       authError.value = r?.locked ? '尝试次数过多，已锁定 5 分钟' : (r?.error || '密码错误')
       authPassword.value = ''
@@ -3213,65 +3214,56 @@ const exportingBackup = ref(false)
 
 const exportBackup = async () => {
   if (exportingBackup.value) return
-  let password = ''
-  try {
-    const { value } = await ElMessageBox.prompt('请输入用于加密备份的密码（导入时需输入同一密码）', '导出备份', {
-      confirmButtonText: '导出',
-      cancelButtonText: '取消',
-      inputType: 'password',
-      inputPlaceholder: '请输入密码（至少 4 位）',
-      inputValidator: (v) => (v && v.trim().length >= 4) || '密码至少 4 位',
-    })
-    password = String(value || '').trim()
-  } catch {
-    return // 用户取消
+  // 未设置全局管理密码时，先引导设置，避免导出绕过密码保护直接拿到全部敏感配置
+  if (!passwordGateEnabled.value) {
+    ElMessage.warning('请先在「全局管理访问密码」中设置密码，再导出备份')
+    return
   }
-  exportingBackup.value = true
-  try {
-    const res = await window.electronAPI?.backup?.export({ password, memory: loadMemory() })
-    if (res?.success) {
-      ElMessage.success(`备份已导出：${res.filePath}`)
-    } else {
-      ElMessage.error(res?.message || '导出失败')
+  // 用全局管理密码验证身份，验证通过后用该密码加密备份文件
+  requireAuth(async (password) => {
+    exportingBackup.value = true
+    try {
+      const res = await window.electronAPI?.backup?.export({ password, memory: loadMemory() })
+      if (res?.success) {
+        ElMessage.success(`备份已导出：${res.filePath}`)
+      } else {
+        ElMessage.error(res?.message || '导出失败')
+      }
+    } catch (e) {
+      ElMessage.error(`导出失败：${e.message || e}`)
+    } finally {
+      exportingBackup.value = false
     }
-  } catch (e) {
-    ElMessage.error(`导出失败：${e.message || e}`)
-  } finally {
-    exportingBackup.value = false
-  }
+  })
 }
 
 // 从文件路径导入（拖入或选择文件后调用）
 const importBackupFromPath = async (filePath) => {
   if (!filePath) return
-  let password = ''
-  try {
-    const { value } = await ElMessageBox.prompt('请输入该备份文件的解密密码', '导入备份', {
-      confirmButtonText: '导入',
-      cancelButtonText: '取消',
-      inputType: 'password',
-      inputPlaceholder: '请输入导出时设置的密码',
-    })
-    password = String(value || '').trim()
-  } catch {
+  // 未设置全局管理密码时，先引导设置
+  if (!passwordGateEnabled.value) {
+    ElMessage.warning('请先在「全局管理访问密码」中设置密码，再导入备份')
     return
   }
-  try {
-    const res = await window.electronAPI?.backup?.import({ password, zipPath: filePath })
-    if (res?.success) {
-      if (typeof res.memory === 'string') saveMemory(res.memory)
-      ElMessage.success(res.message || '导入成功')
-      // 刷新界面上的配置（模型、记忆等）
-      if (res.memory !== undefined) permanentMemory.value = res.memory
-      await loadSkills()
-      await loadMcp()
-      await loadCustomTools()
-    } else {
-      ElMessage.error(res?.message || '导入失败')
+  // 用全局管理密码验证身份，验证通过后用该密码解密备份文件
+  requireAuth(async (password) => {
+    try {
+      const res = await window.electronAPI?.backup?.import({ password, zipPath: filePath })
+      if (res?.success) {
+        if (typeof res.memory === 'string') saveMemory(res.memory)
+        ElMessage.success(res.message || '导入成功')
+        // 刷新界面上的配置（模型、记忆等）
+        if (res.memory !== undefined) permanentMemory.value = res.memory
+        await loadSkills()
+        await loadMcp()
+        await loadCustomTools()
+      } else {
+        ElMessage.error(res?.message || '导入失败')
+      }
+    } catch (e) {
+      ElMessage.error(`导入失败：${e.message || e}`)
     }
-  } catch (e) {
-    ElMessage.error(`导入失败：${e.message || e}`)
-  }
+  })
 }
 
 const onBackupDrop = (event) => {

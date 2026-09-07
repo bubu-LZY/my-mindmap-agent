@@ -37,6 +37,20 @@
               <span v-if="semanticSearching" class="semantic-spinner tab-spinner"></span>
             </button>
           </div>
+          <div class="scope-tabs">
+            <button
+              class="scope-tab"
+              :class="{ active: scopeTab === 'file' }"
+              @mousedown.prevent="setScope('file')"
+              title="只搜索当前打开文件的内容"
+            >本文件</button>
+            <button
+              class="scope-tab"
+              :class="{ active: scopeTab === 'tree' }"
+              @mousedown.prevent="setScope('tree')"
+              title="搜索目录树全部文件的内容"
+            >目录树文件</button>
+          </div>
           <div v-if="activeTab === 'semantic' && !semanticItems.length" class="search-status">
             {{ semanticSearching ? '语义检索中...' : (semanticTimeout ? '语义检索超时（模型响应慢），关键词结果不受影响' : '暂无语义匹配结果') }}
           </div>
@@ -84,6 +98,9 @@ import { sanitizeSafeHtml } from '../utils/sanitizeHtml'
 import { Files, Reading, Grid, Memo, Document } from '@element-plus/icons-vue'
 
 const emit = defineEmits(['open-file'])
+const props = defineProps({
+  currentFilePath: { type: String, default: '' }
+})
 
 const inputRef = ref(null)
 const query = ref('')
@@ -95,14 +112,52 @@ const showResults = ref(false)
 const searched = ref(false)
 const activeTab = ref('keyword')
 const currentIndex = ref(-1) // 当前高亮的结果索引（回车/点击后导航用）
+// 搜索范围：'tree' = 目录树文件（默认），'file' = 仅当前打开文件
+const scopeTab = ref('tree')
 let debounceTimer = null
 let semanticSeq = 0
 
-const keywordItems = computed(() => results.value.filter(r => !r.semanticWord))
-// 语义结果按相似度从高到低排序（同分保持命中顺序）
+// 目录树文件路径集合（归一化），用于过滤语义/关键词结果，剔除知识库中不在目录树的孤立索引
+const treeFileSet = ref(new Set())
+let treeFileSetAt = 0
+
+const normalizePath = (p) => String(p || '').replace(/[\\/]+/g, '/').toLowerCase()
+
+// 加载目录树文件路径集合（5 秒内缓存，避免每次搜索都遍历目录树）
+const getTreeFileSet = async () => {
+  if (treeFileSet.value.size > 0 && Date.now() - treeFileSetAt < 5000) return
+  try {
+    const files = await searchService.listDirectoryTreeFiles()
+    treeFileSet.value = new Set(files)
+    treeFileSetAt = Date.now()
+  } catch {
+    treeFileSet.value = new Set()
+  }
+}
+
+// 按当前范围过滤结果
+const filterByScope = (items) => {
+  if (scopeTab.value === 'file') {
+    const cfp = normalizePath(props.currentFilePath)
+    return cfp ? items.filter(i => normalizePath(i.filePath) === cfp) : []
+  }
+  // scope === 'tree'：目录树集合未加载时不过滤，加载后只保留目录树内文件
+  if (treeFileSet.value.size === 0) return items
+  return items.filter(i => treeFileSet.value.has(normalizePath(i.filePath)))
+}
+
+const setScope = async (scope) => {
+  if (scopeTab.value === scope) return
+  scopeTab.value = scope
+  if (scope === 'tree' && treeFileSet.value.size === 0 && query.value.trim()) {
+    await getTreeFileSet()
+  }
+}
+
+const keywordItems = computed(() => filterByScope(results.value.filter(r => !r.semanticWord)))
+// 语义结果按相似度从高到低排序（同分保持命中顺序），并同样按范围过滤
 const semanticItems = computed(() =>
-  results.value
-    .filter(r => r.semanticWord)
+  filterByScope(results.value.filter(r => r.semanticWord))
     .sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0))
 )
 const tabItems = computed(() => activeTab.value === 'keyword' ? keywordItems.value : semanticItems.value)
@@ -263,6 +318,10 @@ const doSearch = async () => {
     semanticSearching.value = false
     semanticTimeout.value = false
     return
+  }
+  // 搜索范围是「目录树文件」时，先加载目录树文件集合，确保语义结果能过滤掉不在目录树的孤立索引
+  if (scopeTab.value === 'tree' && treeFileSet.value.size === 0) {
+    await getTreeFileSet()
   }
   searching.value = true
   showResults.value = true
@@ -467,6 +526,36 @@ defineExpose({ focus })
   position: sticky;
   top: 0;
   z-index: 2;
+}
+
+.scope-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 10px 8px;
+  background: var(--search-bg, #fafafa);
+  border-bottom: 1px solid var(--border-color, #f0f0f0);
+}
+
+.scope-tab {
+  border: 1px solid var(--border-color, #e5e5e5);
+  background: var(--popover-bg, #ffffff);
+  color: var(--text-secondary, #86868b);
+  font-size: 11px;
+  line-height: 20px;
+  padding: 0 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.scope-tab:hover {
+  color: var(--text-primary, #1d1d1f);
+}
+
+.scope-tab.active {
+  background: var(--apple-blue, #007aff);
+  border-color: var(--apple-blue, #007aff);
+  color: #ffffff;
 }
 
 .search-tab {

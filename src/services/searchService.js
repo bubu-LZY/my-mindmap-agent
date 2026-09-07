@@ -174,6 +174,60 @@ export const searchService = {
   },
 
   /**
+   * 列出目录树根目录下的全部文件路径（递归，只列文件名不读内容，速度快）。
+   * 用于过滤语义/关键词检索结果：只保留目录树文件里的内容，剔除知识库中已不在目录树的孤立索引。
+   * 返回归一化后的路径数组（统一分隔符 + 小写），便于 Set 快速判定。
+   */
+  async listDirectoryTreeFiles(options = {}) {
+    const maxFiles = Math.min(Math.max(Number(options.maxFiles) || 2000, 1), 5000)
+    const maxDepth = Math.min(Math.max(Number(options.maxDepth) || 6, 1), 10)
+    const deadline = Date.now() + Math.min(Math.max(Number(options.timeoutMs) || 4000, 1000), 10000)
+
+    let roots = []
+    try {
+      const saved = JSON.parse(localStorage.getItem('MINDMAP_FOLDER_ROOTS') || '[]')
+      if (Array.isArray(saved)) roots.push(...saved.filter(p => typeof p === 'string' && p))
+    } catch {}
+    try {
+      const saveDir = await window.electronAPI?.getDefaultSaveDir?.()
+      if (saveDir) roots.push(saveDir)
+    } catch {}
+    roots = [...new Set(roots.filter(p => p && typeof p === 'string'))]
+    if (!roots.length) return []
+
+    const norm = (p) => String(p || '').replace(/[\\/]+/g, '/').toLowerCase()
+    const files = []
+    let timedOut = false
+    const walk = async (dir, depth) => {
+      if (timedOut || files.length >= maxFiles || Date.now() > deadline) return
+      if (depth > maxDepth) return
+      let entries
+      try {
+        entries = await window.electronAPI?.fs?.listDir?.(dir) || []
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        if (timedOut || files.length >= maxFiles || Date.now() > deadline) {
+          timedOut = true
+          return
+        }
+        if (entry.isDir) {
+          await walk(entry.path, depth + 1)
+          continue
+        }
+        files.push(norm(entry.path))
+        if (files.length % 200 === 0) await new Promise((r) => setTimeout(r, 0))
+      }
+    }
+    for (const root of roots) {
+      if (timedOut || files.length >= maxFiles) break
+      await walk(root, 0)
+    }
+    return files
+  },
+
+  /**
    * 混合语义检索：BM25 关键词（含意图扩展词）+ 本地向量余弦（E5 embedding），
    * RRF 融合排序；向量模型不可用（未下载/加载失败）时自动降级纯 BM25。
    * @param {string} query 原始问题/核心词
