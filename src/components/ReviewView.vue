@@ -3,6 +3,18 @@
     <!-- 面板头部 -->
     <div class="panel-header">
       <span class="panel-title">复习计划</span>
+      <!-- 仅在设置里开启「同步 desk todo calendar」后显示 -->
+      <button
+        v-if="deskCalendarEnabled"
+        class="sync-desk-btn"
+        :class="{ 'is-syncing': deskSyncing }"
+        :disabled="deskSyncing"
+        :title="deskSyncHint"
+        @click="syncToDeskCalendar"
+      >
+        <span class="sync-desk-icon" :class="{ spin: deskSyncing }">⟳</span>
+        <span class="sync-desk-text">{{ deskSyncing ? '同步中…' : '立即同步桌面' }}</span>
+      </button>
       <div class="panel-stats" v-if="stats">
         <span class="stat-item">今日 {{ stats.todayTotal }}</span>
         <span class="stat-item done">已完成 {{ stats.todayCompleted }}</span>
@@ -172,8 +184,14 @@ import {
   extractNodeText,
   getReminderConfig,
   saveReminderConfig,
+  clearAllCycleCompletion,
   CYCLES
 } from '../utils/reviewPlan'
+import {
+  isDeskCalendarSyncEnabled,
+  runDeskCalendarSyncOnce,
+  getDeskCalendarSyncMeta
+} from '../services/deskCalendarSync'
 
 const props = defineProps({
   mindMap: {
@@ -280,16 +298,48 @@ const isAllCyclesCompleted = (item) => {
  * 清除所有已完成状态
  */
 const clearAllCompleted = () => {
-  const list = getReviewPlan()
-  list.forEach(item => {
-    item.cycles.forEach(c => {
-      c.completed = false
-      c.completedDate = null
-    })
-  })
-  localStorage.setItem('MINDMAP_REVIEW_PLAN', JSON.stringify(list))
+  const changed = clearAllCycleCompletion()
   refreshOverview()
   refreshData()
+  if (changed > 0) ElMessage.success(`已清除 ${changed} 项完成状态`)
+}
+
+// ===== 同步到 desktop_todo_Calendar =====
+// 开关状态跟随设置页：设置里开启后按钮才出现，关闭后立即隐藏，避免误触。
+const deskCalendarEnabled = ref(false)
+const deskSyncing = ref(false)
+
+const deskSyncHint = computed(() => {
+  const meta = getDeskCalendarSyncMeta()
+  if (!meta.hasToken) return '请先在设置中填写 desktop todo calendar 的 Token'
+  const time = meta.lastSyncAt ? new Date(meta.lastSyncAt).toLocaleString('zh-CN') : '尚未同步过'
+  return `上次同步：${time}${meta.lastError ? `\n最近错误：${meta.lastError}` : ''}`
+})
+
+const refreshDeskCalendarState = () => {
+  deskCalendarEnabled.value = isDeskCalendarSyncEnabled()
+}
+
+/**
+ * 立即同步：把复习计划与日历两端的完成状态按「最后变更时间」对齐。
+ * 只处理复习计划里的任务，不影响日历中其他任何任务。
+ */
+const syncToDeskCalendar = async () => {
+  if (deskSyncing.value) return
+  if (!isDeskCalendarSyncEnabled()) {
+    ElMessage.warning('请先在设置中开启「同步 desktop todo calendar」')
+    return
+  }
+  deskSyncing.value = true
+  try {
+    const res = await runDeskCalendarSyncOnce()
+    if (res?.success) ElMessage.success(res.message || '已同步到桌面日历')
+    else ElMessage.warning(res?.message || '同步失败')
+  } catch (e) {
+    ElMessage.error('同步失败：' + (e?.message || e))
+  } finally {
+    deskSyncing.value = false
+  }
 }
 
 /**
@@ -583,8 +633,14 @@ onMounted(() => {
     refreshOverview()
     refreshData()
   }
+  refreshDeskCalendarState()
   window.addEventListener('review-plan-changed', onReviewChanged)
-  onBeforeUnmount(() => window.removeEventListener('review-plan-changed', onReviewChanged))
+  // 设置页改动同步开关/Token 后即时刷新按钮显隐
+  window.addEventListener('desk-calendar-sync-changed', refreshDeskCalendarState)
+  onBeforeUnmount(() => {
+    window.removeEventListener('review-plan-changed', onReviewChanged)
+    window.removeEventListener('desk-calendar-sync-changed', refreshDeskCalendarState)
+  })
 })
 
 defineExpose({ refreshData, addCurrentNodeToReview })
@@ -610,6 +666,49 @@ defineExpose({ refreshData, addCurrentNodeToReview })
   font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+/* 立即同步桌面：与标题同一行，仅在开启同步后出现 */
+.sync-desk-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 2px 9px;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 1px solid rgba(0, 122, 255, 0.35);
+  border-radius: 10px;
+  background: rgba(0, 122, 255, 0.06);
+  color: var(--apple-blue);
+  cursor: pointer;
+  vertical-align: middle;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+}
+
+.sync-desk-btn:hover {
+  background: rgba(0, 122, 255, 0.12);
+  border-color: var(--apple-blue);
+}
+
+.sync-desk-btn:disabled,
+.sync-desk-btn.is-syncing {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.sync-desk-icon {
+  display: inline-block;
+  font-size: 12px;
+}
+
+.sync-desk-icon.spin {
+  animation: desk-sync-spin 0.8s linear infinite;
+}
+
+@keyframes desk-sync-spin {
+  to { transform: rotate(360deg); }
 }
 
 .panel-stats {

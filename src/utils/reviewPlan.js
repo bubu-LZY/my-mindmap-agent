@@ -7,10 +7,12 @@ const REVIEW_KEY = 'MINDMAP_REVIEW_PLAN'
 const REMINDER_KEY = 'MINDMAP_REVIEW_REMINDER'
 
 // 通知同步服务：复习计划发生变化（添加/删除/勾选/取消勾选）
-const notifyReviewPlanChanged = () => {
+// detail 用于区分变更类型：{ type: 'toggle', itemId, cycle } 表示单条勾选，同步服务只需同步这一条；
+// 其余（新增/删除/改期）不带 type，由同步服务走防抖后的全量同步。
+const notifyReviewPlanChanged = (detail) => {
   try {
     if (typeof window !== 'undefined' && window.dispatchEvent) {
-      window.dispatchEvent(new CustomEvent('review-plan-changed'))
+      window.dispatchEvent(new CustomEvent('review-plan-changed', { detail: detail || null }))
     }
   } catch { /* 忽略 */ }
 }
@@ -100,6 +102,13 @@ export function extractNodeText(node) {
 // 旧周期数据（9周期）迁移到新周期（5周期）：按 label 匹配保留完成状态，复习时间从创建时间重算
 function migrateItem(item) {
   if (!item || !Array.isArray(item.cycles)) return item
+  // 补齐状态变更时间戳：老数据没有该字段，用完成日期兜底（无法还原精确时刻，取当天 0 点），
+  // 未完成的老周期记为 0，表示"很久没变过"，在同步仲裁中必然输给带时间戳的一端。
+  item.cycles.forEach(c => {
+    if (typeof c.statusUpdatedAt !== 'number' || !isFinite(c.statusUpdatedAt) || c.statusUpdatedAt <= 0) {
+      c.statusUpdatedAt = c.completed && c.completedDate ? (parseDateMs(c.completedDate) || 0) : 0
+    }
+  })
   const needs = CYCLES.some(c => !item.cycles.find(o => o.cycle === c.cycle && o.label === c.label))
   if (!needs) return item
   const start = item.createdDateTs || Date.now()
@@ -112,10 +121,19 @@ function migrateItem(item) {
       reviewDate: formatDate(ts),
       reviewDateTs: ts,
       completed: old ? !!old.completed : false,
-      completedDate: old && old.completed ? (old.completedDate || null) : null
+      completedDate: old && old.completed ? (old.completedDate || null) : null,
+      statusUpdatedAt: old ? (old.statusUpdatedAt || 0) : 0
     }
   })
   return item
+}
+
+// 'YYYY-MM-DD' → 当天 00:00 的毫秒时间戳（仅用于老数据兜底）
+function parseDateMs(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || '').trim())
+  if (!m) return 0
+  const t = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()
+  return isFinite(t) ? t : 0
 }
 
 // 获取所有复习计划
@@ -151,7 +169,8 @@ export function calculateReviewDates(startTime = Date.now()) {
       reviewDate: formatDate(reviewTime),
       reviewDateTs: reviewTime,
       completed: false,
-      completedDate: null
+      completedDate: null,
+      statusUpdatedAt: 0
     }
   })
 }
@@ -356,34 +375,113 @@ export function getAllReviewDates() {
   return Array.from(dateSet).sort()
 }
 
-// 标记某个复习周期为已完成
+// 标记某个复习周期为已完成（用户主动操作：写入当前时间为状态变更时间）
 export function markCycleCompleted(id, cycleNum) {
-  const list = getReviewPlan()
-  const item = list.find(i => i.id === id)
-  if (item) {
-    const c = item.cycles.find(c => c.cycle === cycleNum)
-    if (c) {
-      c.completed = true
-      c.completedDate = formatDate(Date.now())
-    }
-  }
-  saveReviewPlan(list)
-  notifyReviewPlanChanged()
+  return writeCycleStatus(id, cycleNum, true, Date.now(), 'user')
 }
 
-// 标记某个复习周期为未完成
+// 标记某个复习周期为未完成（用户主动操作：写入当前时间为状态变更时间）
 export function markCycleUncompleted(id, cycleNum) {
+  return writeCycleStatus(id, cycleNum, false, Date.now(), 'user')
+}
+
+/**
+ * 统一的状态写入：completed + 变更时间戳 + 完成日期
+ * 用户勾选与同步回写都走这里，保证 statusUpdatedAt 永不缺失。
+ */
+function writeCycleStatus(id, cycleNum, completed, ts, source) {
   const list = getReviewPlan()
   const item = list.find(i => i.id === id)
-  if (item) {
-    const c = item.cycles.find(c => c.cycle === cycleNum)
-    if (c) {
-      c.completed = false
-      c.completedDate = null
-    }
-  }
+  if (!item) return null
+  const c = item.cycles.find(c => c.cycle === cycleNum)
+  if (!c) return null
+  const stamp = typeof ts === 'number' && isFinite(ts) && ts > 0 ? ts : Date.now()
+  c.completed = !!completed
+  c.completedDate = completed ? formatDate(stamp) : null
+  // 单调保护：同步回写时若远端时间戳比本地旧，不回退本地时间戳，
+  // 否则会出现"本地刚勾选 → 被远端旧状态覆盖时间戳 → 下次仲裁误判"。
+  c.statusUpdatedAt = Math.max(stamp, Number(c.statusUpdatedAt) || 0)
   saveReviewPlan(list)
-  notifyReviewPlanChanged()
+  // source='remote' 表示这次写入来自同步回写，同步服务收到后不再反向触发一次同步，避免来回触发。
+  notifyReviewPlanChanged(
+    source === 'remote'
+      ? { type: 'remote', itemId: id, cycle: cycleNum }
+      : { type: 'toggle', itemId: id, cycle: cycleNum }
+  )
+  return c
+}
+
+/**
+ * 供同步服务回写：带上远端给出的时间戳做仲裁后写入。
+ * 只在远端确实更新时才写（本地更新的话调用方不会调这个）。
+ */
+export function setCycleStatusFromRemote(id, cycleNum, completed, remoteTs) {
+  return writeCycleStatus(id, cycleNum, completed, remoteTs, 'remote')
+}
+
+/**
+ * 同步用的扁平快照：每个复习周期一条，携带状态时间戳。
+ * 只暴露同步必需的字段，不泄漏整份计划数据。
+ */
+export function getReviewSyncEntries() {
+  return getReviewPlan().flatMap(item =>
+    (item.cycles || []).map(c => ({
+      key: `${item.id}::${c.cycle}`,
+      itemId: item.id,
+      cycle: c.cycle,
+      date: c.reviewDate || formatDate(c.reviewDateTs),
+      title: item.nodeText || item.fileName || '',
+      completed: !!c.completed,
+      statusUpdatedAt: Number(c.statusUpdatedAt) || 0
+    }))
+  )
+}
+
+/**
+ * 按 key（itemId::cycle）读取某个复习周期的当前状态与时间戳。
+ */
+export function getCycleStatusByKey(key) {
+  const [id, cycleStr] = String(key || '').split('::')
+  if (!id) return null
+  const cycleNum = Number(cycleStr)
+  const item = getReviewPlan().find(i => i.id === id)
+  if (!item) return null
+  const c = (item.cycles || []).find(x => x.cycle === cycleNum)
+  if (!c) return null
+  return {
+    key,
+    itemId: id,
+    cycle: cycleNum,
+    date: c.reviewDate || formatDate(c.reviewDateTs),
+    title: item.nodeText || item.fileName || '',
+    completed: !!c.completed,
+    statusUpdatedAt: Number(c.statusUpdatedAt) || 0
+  }
+}
+
+/**
+ * 清除所有已完成的周期状态（复习总览的「清除所有已完成」）。
+ * 统一走这里，避免调用方直接改字段导致 statusUpdatedAt 缺失、同步仲裁失准。
+ */
+export function clearAllCycleCompletion() {
+  const list = getReviewPlan()
+  const now = Date.now()
+  let changed = 0
+  list.forEach(item => {
+    (item.cycles || []).forEach(c => {
+      if (c.completed) {
+        c.completed = false
+        c.completedDate = null
+        c.statusUpdatedAt = now
+        changed++
+      }
+    })
+  })
+  if (changed > 0) {
+    saveReviewPlan(list)
+    notifyReviewPlanChanged()
+  }
+  return changed
 }
 
 // 获取复习计划统计

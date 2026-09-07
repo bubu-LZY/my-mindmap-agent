@@ -153,6 +153,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const handler = (_event, payload) => callback(payload)
       ipcRenderer.on('desk-calendar:status', handler)
       return () => ipcRenderer.removeListener('desk-calendar:status', handler)
+    },
+    // 主进程（本地 HTTP 服务）查询复习计划数据：渲染进程处理后回传
+    onQuery: (callback) => {
+      const handler = (_event, payload) => callback(payload)
+      ipcRenderer.on('desk-calendar:query', handler)
+      return () => ipcRenderer.removeListener('desk-calendar:query', handler)
+    },
+    sendQueryResponse: (id, data, error) => {
+      ipcRenderer.send('desk-calendar:response', { id, data, error })
     }
   },
 

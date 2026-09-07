@@ -46,6 +46,9 @@ let frameRequested = false
 let preRemoteWindowState = null
 let lastWindowState = null
 const pendingAgentRequests = new Map()
+// 复习计划同步：主进程向渲染进程查询数据时的等待表（复用 agent-api 的双向 IPC 模式）
+const pendingDeskCalendarRequests = new Map()
+const DESK_CALENDAR_REQUEST_TIMEOUT_MS = 8000
 
 // 登录限流：每个 IP 在时间窗口内最多失败 N 次，超过则锁定（主服务与仅查看服务独立计数）
 const LOGIN_RATE_LIMIT = {
@@ -521,6 +524,25 @@ const isMainEditable = async () => {
   }
 }
 
+/**
+ * 向渲染进程查询复习计划数据并等待回复（复用 agent-api 的双向 IPC 模式）。
+ * 复习数据存放在渲染进程的 localStorage，主进程只能通过 IPC 取。
+ */
+const requestDeskCalendar = (action, payload) => new Promise((resolve, reject) => {
+  const win = getMainWindow()
+  if (!win || !isRendererAvailable(win)) {
+    reject(new Error('主页面已关闭'))
+    return
+  }
+  const id = crypto.randomUUID()
+  const timer = setTimeout(() => {
+    pendingDeskCalendarRequests.delete(id)
+    reject(new Error('复习计划查询超时'))
+  }, DESK_CALENDAR_REQUEST_TIMEOUT_MS)
+  pendingDeskCalendarRequests.set(id, { resolve, reject, timer })
+  win.webContents.send('desk-calendar:query', { id, action, payload: payload || {} })
+})
+
 const handleRequest = async (req, res) => {
   const url = new URL(req.url, 'http://localhost')
 
@@ -624,6 +646,29 @@ const handleRequest = async (req, res) => {
     return
   }
 
+  // 复习计划同步：供 desktop_todo_Calendar 拉取复习任务快照（含状态时间戳，用于双向仲裁）
+  if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/api/desk-calendar/review-plan') {
+    try {
+      const config = readConfig()
+      let body = {}
+      if (req.method === 'POST') {
+        body = await readBody(req)
+      }
+      const authToken = String(
+        body.token || url.searchParams.get('token') || req.headers['authorization'] || ''
+      ).replace(/^Bearer\s+/i, '').trim()
+      if (!config.enabled || Date.now() >= config.tokenExpiresAt || !tokenMatches(authToken)) {
+        sendJson(res, 401, { ok: false, error: 'Token 无效或已过期' })
+        return
+      }
+      const data = await requestDeskCalendar('review-plan', {})
+      sendJson(res, 200, { ok: true, tasks: Array.isArray(data?.tasks) ? data.tasks : [] })
+    } catch (e) {
+      sendJson(res, 503, { ok: false, error: e.message })
+    }
+    return
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/desk-calendar/status') {
     try {
       const body = await readBody(req)
@@ -644,7 +689,13 @@ const handleRequest = async (req, res) => {
         sendJson(res, 503, { ok: false, error: '主页面已关闭' })
         return
       }
-      win.webContents.send('desk-calendar:status', { title, date, isCompleted: !!body.isCompleted })
+      // updatedAt 为对端的状态最后变更时间（ISO 字符串或毫秒数），渲染进程据此做时间戳仲裁
+      win.webContents.send('desk-calendar:status', {
+        title,
+        date,
+        isCompleted: !!body.isCompleted,
+        updatedAt: body.updatedAt || body.statusUpdatedAt || null
+      })
       sendJson(res, 200, { ok: true })
     } catch (e) {
       sendJson(res, 400, { ok: false, error: e.message })
@@ -1101,6 +1152,16 @@ const init = (getWindow) => {
     clearTimeout(item.timer)
     if (payload.error) item.reject(new Error(payload.error))
     else item.resolve(String(payload.reply || ''))
+  })
+
+  // 复习计划查询的渲染进程回复（对应 requestDeskCalendar）
+  ipcMain.on('desk-calendar:response', (event, payload) => {
+    const item = payload && payload.id ? pendingDeskCalendarRequests.get(payload.id) : null
+    if (!item) return
+    pendingDeskCalendarRequests.delete(payload.id)
+    clearTimeout(item.timer)
+    if (payload.error) item.reject(new Error(payload.error))
+    else item.resolve(payload.data)
   })
 }
 

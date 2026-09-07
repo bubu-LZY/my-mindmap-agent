@@ -1,23 +1,34 @@
 /**
- * Desk Studio Calendar 同步服务
- * 通过对方内置的 MCP 服务（http://127.0.0.1:17804/mcp）进行双向状态同步：
- * - 把 my-mindmap agent 的复习计划推送到日历（标题带 [复习] 前缀）。
- * - 轮询日历任务完成状态，回写到 my-mindmap agent 的复习周期。
- * 删除日历任务不会删除 my-mindmap agent 的复习计划（仅同步勾选状态）。
+ * desktop_todo_Calendar 复习计划同步服务
+ *
+ * 同步范围：仅 my-mindmap agent「复习计划」中的复习周期任务（日历端标题带 [MM复习] 前缀），
+ * 用户/其他 AI 自己创建的日历任务一律不参与同步。
+ *
+ * 冲突仲裁：以「状态最后变更时间」为准的最后写入胜出（LWW）。
+ * 典型场景——10:00 在本端勾选完成，10:01 取消勾选：取消动作的时间戳更新，
+ * 因此同步时判定"未完成"为最新状态并推给对方，不会把误触的完成状态留在对端。
+ *
+ * 时间戳取自本地 cycle.statusUpdatedAt 与日历任务的 updatedAt（旧版日历无该字段时
+ * 回退 completedAt；未完成且无 updatedAt 时按 0 处理，必然输给带时间戳的一端）。
  */
 
 import {
   getReviewPlan,
+  getReviewSyncEntries,
+  getCycleStatusByKey,
   markCycleCompleted,
-  markCycleUncompleted
+  markCycleUncompleted,
+  setCycleStatusFromRemote
 } from '../utils/reviewPlan'
 
 const CONFIG_KEY = 'MINDMAP_DESK_CALENDAR_SYNC'
-// desktop_todo_Calendar 内置 MCP 默认端口为 17804（AppConfig.McpPort），此处兜底与之一致
+// desktop_todo_Calendar 内置 MCP 默认端口为 17804（AppConfig.McpPort）
 const DEFAULT_MCP_URL = 'http://127.0.0.1:17804/mcp'
 // 唯一前缀：只认由 my-mindmap agent 推送的任务，避免把用户/其他 AI 自己建的复习任务误识别。
 const REVIEW_TITLE_PREFIX = '[MM复习]'
 const LEGACY_REVIEW_TITLE_PREFIX = '[复习]'
+// 启用同步后的自动同步周期：每小时一次
+const SYNC_INTERVAL_MS = 60 * 60 * 1000
 
 const normalizeReviewTitle = (title) => {
   let t = String(title || '').trim()
@@ -33,16 +44,57 @@ let pollTimer = null
 let notifyTimer = null
 let running = false
 let lastTaskMap = {}
+let lastSyncAt = 0
+let lastError = ''
 
 const loadConfig = () => {
   try {
     const cfg = JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}')
-    return { enabled: !!cfg.enabled, taskMap: cfg.taskMap && typeof cfg.taskMap === 'object' ? cfg.taskMap : {}, token: cfg.token || '' }
-  } catch { return { enabled: false, taskMap: {}, token: '' } }
+    return {
+      enabled: !!cfg.enabled,
+      taskMap: cfg.taskMap && typeof cfg.taskMap === 'object' ? cfg.taskMap : {},
+      token: cfg.token || '',
+      lastSyncAt: Number(cfg.lastSyncAt) || 0
+    }
+  } catch { return { enabled: false, taskMap: {}, token: '', lastSyncAt: 0 } }
 }
 
 const saveConfig = () => {
-  localStorage.setItem(CONFIG_KEY, JSON.stringify({ enabled, token: authToken, taskMap: lastTaskMap }))
+  localStorage.setItem(CONFIG_KEY, JSON.stringify({
+    enabled,
+    token: authToken,
+    taskMap: lastTaskMap,
+    lastSyncAt
+  }))
+}
+
+// 通知 UI（复习面板的「立即同步桌面」按钮）同步开关/Token 已变化
+const notifyConfigChanged = () => {
+  try {
+    window.dispatchEvent?.(new CustomEvent('desk-calendar-sync-changed'))
+  } catch { /* 忽略 */ }
+}
+
+// 把 ISO 字符串 / 毫秒数 / 秒数统一成毫秒时间戳
+const parseTs = (value) => {
+  if (value === null || value === undefined || value === '') return 0
+  if (typeof value === 'number') {
+    if (!isFinite(value) || value <= 0) return 0
+    // 秒级时间戳（10 位）按秒处理，其余按毫秒
+    return value < 1e11 ? value * 1000 : value
+  }
+  const t = Date.parse(String(value))
+  return isFinite(t) ? t : 0
+}
+
+/**
+ * 取日历任务的状态变更时间戳。
+ * updatedAt 优先（完成与取消完成都会刷新）；旧版日历没有该字段时回退 completedAt。
+ */
+const remoteStatusTs = (task) => {
+  const updated = parseTs(task?.updatedAt)
+  if (updated > 0) return updated
+  return parseTs(task?.completedAt)
 }
 
 const callMcp = async (method, params) => {
@@ -95,6 +147,7 @@ export const isDeskCalendarSyncEnabled = () => {
   enabled = cfg.enabled
   authToken = cfg.token
   lastTaskMap = cfg.taskMap
+  lastSyncAt = cfg.lastSyncAt
   if (enabled) setTimeout(startSync, 0)
   return enabled
 }
@@ -107,8 +160,11 @@ export const setDeskCalendarSyncEnabled = (value, token = '') => {
   enabled = !!value
   if (token) authToken = String(token).trim()
   else if (!authToken) authToken = loadConfig().token
-  lastTaskMap = loadConfig().taskMap
+  const cfg = loadConfig()
+  lastTaskMap = cfg.taskMap
+  lastSyncAt = cfg.lastSyncAt
   saveConfig()
+  notifyConfigChanged()
   if (enabled) startSync()
   else stopSync()
   return enabled
@@ -120,14 +176,27 @@ export const setDeskCalendarToken = (token) => {
   authToken = String(token || '').trim()
   enabled = cfg.enabled
   lastTaskMap = cfg.taskMap
+  lastSyncAt = cfg.lastSyncAt
   saveConfig()
-  if (enabled && authToken) {
-    startSync()
-  }
+  notifyConfigChanged()
+  if (enabled && authToken) startSync()
   return authToken
 }
 
 export const getDeskCalendarSyncStatus = () => ({ enabled, running, lastTaskMap })
+
+// 供 UI 展示的同步元信息（上次同步时间、最近一次错误）
+export const getDeskCalendarSyncMeta = () => {
+  const cfg = loadConfig()
+  return {
+    enabled,
+    running,
+    lastSyncAt: lastSyncAt || cfg.lastSyncAt || 0,
+    lastError,
+    hasToken: !!authToken,
+    linkedCount: Object.keys(lastTaskMap || {}).length
+  }
+}
 
 // 接收 desktop_todo_Calendar 主动推送的勾选状态（走 my-mindmap agent 本地 HTTP 服务）
 export const initDeskCalendarStatusListener = () => {
@@ -137,11 +206,15 @@ export const initDeskCalendarStatusListener = () => {
     const title = normalizeReviewTitle(payload.title || '')
     const date = String(payload.date || '')
     const targetCompleted = !!payload.isCompleted
+    const remoteTs = parseTs(payload.updatedAt)
     const items = getReviewPlan()
     for (const item of items) {
       for (const c of item.cycles || []) {
         if (c.reviewDate !== date) continue
         if (normalizeReviewTitle(item.nodeText || item.fileName || '') !== title) continue
+        const localTs = Number(c.statusUpdatedAt) || 0
+        // 时间戳仲裁：本端更新的话忽略这次推送，避免把用户刚做的操作回退
+        if (remoteTs > 0 && localTs > remoteTs) return
         if (targetCompleted && !c.completed) markCycleCompleted(item.id, c.cycle)
         else if (!targetCompleted && c.completed) markCycleUncompleted(item.id, c.cycle)
         return
@@ -150,35 +223,101 @@ export const initDeskCalendarStatusListener = () => {
   })
 }
 
-// 手动触发一次同步（供 AI 工具调用）。即使自动同步开关关闭，只要 Token 已配置也会执行一次。
+/**
+ * 响应来自 desktop_todo_Calendar 的查询请求（经主进程本地 HTTP 服务转发）。
+ * 目前只提供复习计划快照，供对方做时间戳仲裁后回写；HTTP 层已做 Token 鉴权。
+ */
+export const initDeskCalendarQueryListener = () => {
+  if (typeof window === 'undefined') return
+  const api = window.electronAPI?.deskCalendar
+  if (!api?.onQuery || !api?.sendQueryResponse) return
+  api.onQuery((payload) => {
+    if (!payload?.id) return
+    try {
+      if (payload.action === 'review-plan') {
+        api.sendQueryResponse(payload.id, { tasks: getReviewSyncEntries() })
+        return
+      }
+      api.sendQueryResponse(payload.id, null, `未知操作：${payload.action || ''}`)
+    } catch (e) {
+      api.sendQueryResponse(payload.id, null, e?.message || '查询复习计划失败')
+    }
+  })
+}
+
+/**
+ * 手动触发一次全量同步（供「立即同步桌面」按钮与 AI 工具调用）。
+ * 即使自动同步开关关闭，只要 Token 已配置也会执行一次。
+ */
 export const runDeskCalendarSyncOnce = async () => {
   if (running) return { success: false, message: '同步正在进行中，请稍后再试' }
   const cfg = loadConfig()
   authToken = cfg.token
   enabled = cfg.enabled
+  lastTaskMap = cfg.taskMap
   if (!authToken) return { success: false, message: '未配置 desktop todo calendar Token，请先在设置中填写' }
   running = true
   try {
-    await loadMcpServerConfig()
-    await pushDueReviewPlans()
-    await pullCompletionStatus()
-    await cleanupDuplicateCalendarTasks()
-    await deleteRemovedReviewPlans()
-    return { success: true, message: '复习计划同步完成（已去重并同步状态）' }
+    const stats = await syncAll()
+    lastError = ''
+    return {
+      success: true,
+      message: `同步完成：新增 ${stats.added}、更新 ${stats.updated}、拉取 ${stats.pulled}、删除 ${stats.deleted}`,
+      stats
+    }
   } catch (e) {
-    return { success: false, message: `同步失败：${e?.message || e}` }
+    lastError = e?.message || String(e)
+    return { success: false, message: `同步失败：${lastError}` }
   } finally {
     running = false
   }
 }
 
+/**
+ * 勾选/取消勾选某个复习周期时触发的即时同步：
+ * 先读取对方同一任务的状态与时间戳，比对后把最新的状态写到落后的一方。
+ * 仅处理这一条复习任务，不影响其他任务；未开启同步或未配置 Token 时静默跳过。
+ */
+export const syncReviewCycleToDeskCalendar = async (itemId, cycleNum) => {
+  if (!enabled) return { success: false, skipped: true, message: '未开启同步' }
+  const cfg = loadConfig()
+  if (!cfg.token) return { success: false, skipped: true, message: '未配置 Token' }
+  authToken = cfg.token
+  const key = `${itemId}::${cycleNum}`
+  const local = getCycleStatusByKey(key)
+  if (!local) return { success: false, skipped: true, message: '复习周期不存在' }
+
+  try {
+    const calendarId = await ensureCalendarTask(local)
+    if (!calendarId) return { success: false, message: '日历任务创建失败' }
+    const remote = await fetchCalendarTask(calendarId)
+    if (!remote) return { success: false, message: '未找到日历任务' }
+
+    const decision = resolveConflict(local, remote)
+    if (decision.action === 'push') {
+      await applyRemoteCompletion(calendarId, local.completed, remote)
+      return { success: true, action: 'push', completed: local.completed }
+    }
+    if (decision.action === 'pull') {
+      setCycleStatusFromRemote(itemId, cycleNum, remote.isCompleted, remoteStatusTs(remote))
+      return { success: true, action: 'pull', completed: !!remote.isCompleted }
+    }
+    return { success: true, action: 'none', completed: local.completed }
+  } catch (e) {
+    lastError = e?.message || String(e)
+    return { success: false, message: lastError }
+  }
+}
+
+// ===== 同步主流程 =====
+
 const startSync = () => {
   stopSync()
   if (!enabled) return
-  window.addEventListener?.('review-plan-changed', notifyReviewPlanChanged)
+  window.addEventListener?.('review-plan-changed', onReviewPlanChanged)
   runSyncOnce()
-  // 每天自动同步 4 次（6 小时一次），其余依赖 review-plan-changed 事件即时触发
-  pollTimer = setInterval(runSyncOnce, 6 * 60 * 60 * 1000)
+  // 每小时自动同步一次，保证长时间不操作也能对齐两端状态
+  pollTimer = setInterval(runSyncOnce, SYNC_INTERVAL_MS)
 }
 
 const stopSync = () => {
@@ -186,184 +325,209 @@ const stopSync = () => {
   pollTimer = null
   if (notifyTimer) clearTimeout(notifyTimer)
   notifyTimer = null
-  window.removeEventListener?.('review-plan-changed', notifyReviewPlanChanged)
+  window.removeEventListener?.('review-plan-changed', onReviewPlanChanged)
 }
 
-const notifyReviewPlanChanged = () => {
+const onReviewPlanChanged = (event) => {
   if (!enabled || !authToken) return
+  const detail = event?.detail
+  // 同步回写引起的变更：不再反向触发，否则两端会互相触发形成回环
+  if (detail && detail.type === 'remote') return
+  // 勾选/取消勾选：只同步这一条，做到点一下就立刻对齐，避免全量扫描
+  if (detail && detail.type === 'toggle' && detail.itemId && detail.cycle) {
+    syncReviewCycleToDeskCalendar(detail.itemId, detail.cycle)
+    return
+  }
+  // 新增/删除/改期等：防抖后走全量
   if (notifyTimer) clearTimeout(notifyTimer)
   notifyTimer = setTimeout(() => { notifyTimer = null; runSyncOnce() }, 600)
 }
 
 const runSyncOnce = async () => {
   if (running) return
+  if (!authToken) return
   running = true
   try {
-    await loadMcpServerConfig()
-    await pushDueReviewPlans()
-    await pullCompletionStatus()
-    await cleanupDuplicateCalendarTasks()
-    await deleteRemovedReviewPlans()
+    await syncAll()
+    lastError = ''
   } catch (e) {
     // 日历未启动/未连接时静默，等待下个轮询周期
+    lastError = e?.message || String(e)
   } finally {
     running = false
   }
 }
 
-const deleteRemovedReviewPlans = async () => {
-  // 以「itemId::cycle」完整键为准：复习项整体删除、或某个复习周期被移除时，
-  // 都要把对应的日历任务删掉（旧逻辑只判断 item 是否存在，会漏掉单个 cycle 被删的场景）。
-  const validKeys = new Set()
-  for (const item of getReviewPlan()) {
-    for (const c of item.cycles || []) {
-      validKeys.add(`${item.id}::${c.cycle}`)
-    }
+/**
+ * 仲裁：谁的"状态最后变更时间"更新，就以谁为准。
+ * 时间戳相同（极少见）时以本端为准，保证用户刚做的操作不会被回退。
+ */
+const resolveConflict = (local, remote) => {
+  const localCompleted = !!local.completed
+  const remoteCompleted = !!remote.isCompleted
+  if (localCompleted === remoteCompleted) return { action: 'none' }
+  const localTs = Number(local.statusUpdatedAt) || 0
+  const remoteTs = remoteStatusTs(remote)
+  if (remoteTs > localTs) return { action: 'pull', completed: remoteCompleted }
+  return { action: 'push', completed: localCompleted }
+}
+
+// 只写差异：避免在已一致的任务上产生无意义的写操作与时间戳刷新
+const applyRemoteCompletion = async (calendarId, completed, remote) => {
+  if (!!remote.isCompleted === !!completed) return
+  await toolsCall(completed ? 'complete_task' : 'uncomplete_task', { id: calendarId })
+}
+
+// 按 id 精确取一条日历任务
+const fetchCalendarTask = async (calendarId) => {
+  const data = await toolsCall('query_tasks', { range: 'all' })
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : []
+  return tasks.find(t => t?.id === calendarId) || null
+}
+
+/**
+ * 保证本端复习周期在日历上有对应任务，返回日历任务 id。
+ * 先查已建立的映射，再按「日期::标题」匹配，都没有才新建。
+ */
+const ensureCalendarTask = async (entry) => {
+  const title = `${REVIEW_TITLE_PREFIX}${entry.title || '复习任务'}`
+  const mapped = lastTaskMap[entry.key]
+  if (mapped) return mapped
+
+  const data = await toolsCall('query_tasks', { range: 'all' })
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : []
+  const base = normalizeReviewTitle(title)
+  const existing = tasks.find(t => t?.id && t?.date === entry.date && normalizeReviewTitle(t.title) === base)
+  if (existing) {
+    lastTaskMap[entry.key] = existing.id
+    saveConfig()
+    return existing.id
   }
-  const removedKeys = Object.keys(lastTaskMap).filter(key => !validKeys.has(key))
-  if (!removedKeys.length) return
-  for (const key of removedKeys) {
-    const calendarId = lastTaskMap[key]
-    try { await toolsCall('delete_task', { id: calendarId }) } catch (e) {}
-    delete lastTaskMap[key]
-  }
+  const created = await toolsCall('add_task', { title, date: entry.date, isImportant: false })
+  if (!created?.id) return null
+  lastTaskMap[entry.key] = created.id
   saveConfig()
+  return created.id
 }
 
-const buildReviewItems = () => {
-  return getReviewPlan()
-}
+const syncAll = async () => {
+  await loadMcpServerConfig()
+  const entries = getReviewSyncEntries()
+  const stats = { added: 0, updated: 0, pulled: 0, deleted: 0 }
 
-const pushDueReviewPlans = async () => {
-  const items = buildReviewItems()
-  if (!items.length) return
-  // 拉取日历已有任务，建立「日期::归一化标题」→ 任务对象 映射，
-  // 用于去重、补齐 lastTaskMap（已有任务也能同步状态）、并回写完成状态。
-  let calendarByKey = new Map()
-  let calendarById = new Map()
+  let tasks = []
   try {
     const data = await toolsCall('query_tasks', { range: 'all' })
-    for (const t of Array.isArray(data?.tasks) ? data.tasks : []) {
-      if (!t?.id || !t?.date || !t?.title) continue
-      const key = `${t.date}::${normalizeReviewTitle(t.title)}`
-      calendarByKey.set(key, t)
-      calendarById.set(t.id, t)
-    }
+    tasks = Array.isArray(data?.tasks) ? data.tasks : []
   } catch (e) {
-    // 查询失败时回退为仅按本地映射去重
-  }
-  // 同步所有复习周期（含过去、未来、已完成），把任务与状态全部推送到日历。
-  const tasksToAdd = []
-  const tasksToUpdate = []
-  for (const item of items) {
-    for (const c of item.cycles || []) {
-      const key = `${item.id}::${c.cycle}`
-      const title = `${REVIEW_TITLE_PREFIX}${item.nodeText || item.fileName || '复习任务'}`
-      const calKey = `${c.reviewDate}::${normalizeReviewTitle(title)}`
-      const existing = calendarByKey.get(calKey)
-      if (existing) {
-        lastTaskMap[key] = existing.id
-        tasksToUpdate.push({ key, calendarId: existing.id, date: c.reviewDate, title, completed: !!c.completed, existingDate: existing.date, existingTitle: existing.title, existingCompleted: !!existing.isCompleted })
-        continue
-      }
-      if (lastTaskMap[key]) {
-        const mapped = calendarById.get(lastTaskMap[key])
-        if (mapped) {
-          tasksToUpdate.push({ key, calendarId: mapped.id, date: c.reviewDate, title, completed: !!c.completed, existingDate: mapped.date, existingTitle: mapped.title, existingCompleted: !!mapped.isCompleted })
-          continue
-        }
-      }
-      tasksToAdd.push({ key, date: c.reviewDate, title, completed: !!c.completed })
-    }
-  }
-  let added = 0
-  let failed = 0
-  for (const t of tasksToAdd.slice(0, 500)) {
-    try {
-      const created = await toolsCall('add_task', { title: t.title, date: t.date, isImportant: false })
-      if (created && created.id) {
-        lastTaskMap[t.key] = created.id
-        added++
-        if (t.completed) {
-          try { await toolsCall('complete_task', { id: created.id }) } catch (e) {}
-        }
-      }
-    } catch (e) {
-      failed++
-    }
-  }
-  // 双向同步：my-mindmap agent 的完成状态 / 日期 / 标题 → desktop_todo_Calendar
-  for (const u of tasksToUpdate) {
-    try {
-      if (u.completed !== u.existingCompleted) {
-        if (u.completed) await toolsCall('complete_task', { id: u.calendarId })
-        else await toolsCall('uncomplete_task', { id: u.calendarId })
-      }
-      // 复习日期或节点标题变化后，同步更新日历任务（此前只同步完成状态，日期/标题变更会被遗漏）
-      const dateChanged = !!u.existingDate && !!u.date && String(u.existingDate) !== String(u.date)
-      const titleChanged = !!u.existingTitle && !!u.title && String(u.existingTitle) !== String(u.title)
-      if (dateChanged || titleChanged) {
-        await toolsCall('update_task', { id: u.calendarId, date: u.date, title: u.title })
-      }
-    } catch (e) {}
-  }
-  saveConfig()
-  if (tasksToAdd.length > 0 && added === 0 && failed > 0) {
     throw new Error('无法连接 desktop_todo_Calendar 或 Token 无效，请确认日历已运行并检查 Token')
   }
-}
 
-const cleanupDuplicateCalendarTasks = async () => {
-  const data = await toolsCall('query_tasks', { range: 'all' })
-  const tasks = Array.isArray(data?.tasks) ? data.tasks : []
-  const groups = new Map()
+  const byId = new Map()
+  const byKey = new Map()
   for (const t of tasks) {
     if (!t?.id || !t?.date || !t?.title) continue
-    const base = normalizeReviewTitle(t.title)
-    const hasPrefix = t.title.startsWith(REVIEW_TITLE_PREFIX) || t.title.startsWith(LEGACY_REVIEW_TITLE_PREFIX)
-    if (!hasPrefix && !t.title.includes('复习')) continue
-    const key = `${t.date}::${base}`
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key).push(t)
+    byId.set(t.id, t)
+    byKey.set(`${t.date}::${normalizeReviewTitle(t.title)}`, t)
   }
-  for (const items of groups.values()) {
-    if (items.length <= 1) continue
-    // 只清理「同一天、去掉复习前缀后内容相同」且至少一条带我们前缀的任务
-    if (!items.some(t => t.title.startsWith(REVIEW_TITLE_PREFIX) || t.title.startsWith(LEGACY_REVIEW_TITLE_PREFIX))) continue
-    // 优先保留 [MM复习]，其次 [复习]，再按创建时间最早
-    const rank = (t) => {
-      if (t.title.startsWith(REVIEW_TITLE_PREFIX)) return 0
-      if (t.title.startsWith(LEGACY_REVIEW_TITLE_PREFIX)) return 1
-      return 2
+
+  const validKeys = new Set()
+  for (const entry of entries) {
+    validKeys.add(entry.key)
+    const title = `${REVIEW_TITLE_PREFIX}${entry.title || '复习任务'}`
+    const calKey = `${entry.date}::${normalizeReviewTitle(title)}`
+
+    let calendarId = lastTaskMap[entry.key]
+    let remote = calendarId ? byId.get(calendarId) : null
+    // 映射失效（任务被外部删掉）时按日期+标题重新挂接
+    if (!remote) {
+      remote = byKey.get(calKey) || null
+      if (remote) calendarId = remote.id
     }
-    items.sort((a, b) => rank(a) - rank(b) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
-    const keep = items[0]
-    for (const t of items.slice(1)) {
-      try { await toolsCall('delete_task', { id: t.id }) } catch (e) {}
+
+    if (!remote) {
+      const created = await toolsCall('add_task', { title, date: entry.date, isImportant: false })
+      if (created?.id) {
+        lastTaskMap[entry.key] = created.id
+        byId.set(created.id, created)
+        stats.added++
+        if (entry.completed) {
+          await toolsCall('complete_task', { id: created.id })
+        }
+      }
+      continue
     }
-    // 若保留下来的不是 [MM复习]，更新其标题为 [MM复习] 前缀，统一后续识别
-    if (keep && !keep.title.startsWith(REVIEW_TITLE_PREFIX)) {
-      try { await toolsCall('update_task', { id: keep.id, title: `${REVIEW_TITLE_PREFIX}${normalizeReviewTitle(keep.title)}` }) } catch (e) {}
+
+    lastTaskMap[entry.key] = remote.id
+
+    // 复习日期或标题变化：先对齐基础信息，再仲裁状态
+    const dateChanged = String(remote.date || '') !== String(entry.date)
+    const titleChanged = String(remote.title || '') !== String(title)
+    if (dateChanged || titleChanged) {
+      await toolsCall('update_task', { id: remote.id, date: entry.date, title })
+      stats.updated++
+    }
+
+    // 时间戳仲裁：本端更新则推给日历，对端更新则拉回本端
+    const decision = resolveConflict(entry, remote)
+    if (decision.action === 'push') {
+      await applyRemoteCompletion(remote.id, entry.completed, remote)
+      stats.updated++
+    } else if (decision.action === 'pull') {
+      setCycleStatusFromRemote(entry.itemId, entry.cycle, !!remote.isCompleted, remoteStatusTs(remote))
+      stats.pulled++
     }
   }
+
+  // 复习项/复习周期被删除时，移除对应的日历任务
+  for (const key of Object.keys(lastTaskMap)) {
+    if (validKeys.has(key)) continue
+    try {
+      await toolsCall('delete_task', { id: lastTaskMap[key] })
+      stats.deleted++
+    } catch (e) { /* 已被删除则忽略 */ }
+    delete lastTaskMap[key]
+  }
+
+  lastSyncAt = Date.now()
+  saveConfig()
+  await cleanupDuplicateCalendarTasks()
+  return stats
 }
 
-const pullCompletionStatus = async () => {
-  const entries = Object.entries(lastTaskMap)
-  if (!entries.length) return
-  const data = await toolsCall('query_tasks', { range: 'all' })
-  const tasks = Array.isArray(data?.tasks) ? data.tasks : []
-  const byId = new Map(tasks.map(t => [t.id, t]))
-  for (const [key, calendarId] of entries) {
-    const t = byId.get(calendarId)
-    if (!t) continue
-    const [itemId, cycleStr] = key.split('::')
-    const cycle = Number(cycleStr)
-    const item = getReviewPlan().find(i => i.id === itemId)
-    if (!item) continue
-    const c = (item.cycles || []).find(x => x.cycle === cycle)
-    if (!c) continue
-    if (t.isCompleted && !c.completed) markCycleCompleted(itemId, cycle)
-    else if (!t.isCompleted && c.completed) markCycleUncompleted(itemId, cycle)
-  }
+// 清理同一天标题重复的历史任务（早期版本可能重复推送过）
+const cleanupDuplicateCalendarTasks = async () => {
+  try {
+    const data = await toolsCall('query_tasks', { range: 'all' })
+    const tasks = Array.isArray(data?.tasks) ? data.tasks : []
+    const groups = new Map()
+    for (const t of tasks) {
+      if (!t?.id || !t?.date || !t?.title) continue
+      const hasPrefix = t.title.startsWith(REVIEW_TITLE_PREFIX) || t.title.startsWith(LEGACY_REVIEW_TITLE_PREFIX)
+      if (!hasPrefix) continue
+      const key = `${t.date}::${normalizeReviewTitle(t.title)}`
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(t)
+    }
+    for (const items of groups.values()) {
+      if (items.length <= 1) continue
+      const rank = (t) => {
+        if (t.title.startsWith(REVIEW_TITLE_PREFIX)) return 0
+        if (t.title.startsWith(LEGACY_REVIEW_TITLE_PREFIX)) return 1
+        return 2
+      }
+      items.sort((a, b) => rank(a) - rank(b) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+      const keep = items[0]
+      for (const t of items.slice(1)) {
+        // 保留映射指向的任务，避免把正在使用的那条删掉
+        if (Object.values(lastTaskMap).includes(t.id)) continue
+        try { await toolsCall('delete_task', { id: t.id }) } catch (e) { /* 忽略 */ }
+      }
+      if (keep && !keep.title.startsWith(REVIEW_TITLE_PREFIX)) {
+        try {
+          await toolsCall('update_task', { id: keep.id, title: `${REVIEW_TITLE_PREFIX}${normalizeReviewTitle(keep.title)}` })
+        } catch (e) { /* 忽略 */ }
+      }
+    }
+  } catch (e) { /* 清理失败不影响主流程 */ }
 }

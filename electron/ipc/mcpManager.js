@@ -206,7 +206,7 @@ const getTools = async (server) => {
   await rpcFor(server, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'my-mindmap-agent', version: '4.11.4' }
+    clientInfo: { name: 'my-mindmap-agent', version: '4.11.5' }
   })
   const result = await rpcFor(server, 'tools/list', {})
   return Array.isArray(result?.tools) ? result.tools : []

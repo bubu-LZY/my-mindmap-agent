@@ -718,7 +718,11 @@ import { parseDocument, chunkText } from './services/docParseService'
 import { countNodes } from './utils/treeUtils'
 import { resolveRefAction, getBaseName } from './utils/refTarget'
 import { addToReviewPlan, isInReviewPlan, extractNodeText, removeOrphanReviewItems, remapReviewPaths, getTodayReviewItems, getReminderConfig, getToday } from './utils/reviewPlan'
-import { initDeskCalendarStatusListener } from './services/deskCalendarSync'
+import {
+  initDeskCalendarStatusListener,
+  initDeskCalendarQueryListener,
+  isDeskCalendarSyncEnabled
+} from './services/deskCalendarSync'
 import { addTag, getTagsByFilePath, removeTagsByFilePath, remapTagPaths } from './utils/tagStore'
 import { addFeishuLog } from './utils/feishuLogStore'
 import { addPanelLog } from './utils/panelLogStore'
@@ -4868,6 +4872,10 @@ const initUpdateCheckerListener = () => {
 onMounted(() => {
   initMindMapInstance()
   initDeskCalendarStatusListener()
+  // 允许桌面日历通过本地 HTTP 服务拉取复习计划快照（带状态时间戳）
+  initDeskCalendarQueryListener()
+  // 恢复上次保存的同步开关：开启时立即启动每小时自动同步，不必先进设置页
+  isDeskCalendarSyncEnabled()
   initUpdateCheckerListener()
   loadLayoutTemplates()
   // 延迟恢复上次多屏布局，给目录树和文件系统预热留出时间。
