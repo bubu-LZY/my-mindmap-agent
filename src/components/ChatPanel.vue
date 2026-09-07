@@ -4584,11 +4584,14 @@ Output a JSON code block with EXACTLY this format. Put it FIRST in your reply:
             emit('log-updated')
             aiStatus.value = 'thinking'
             emit('tool-call-status', 'thinking')
-            // 把多模态轮的回复作为 assistant 消息，切回主模型（带完整 tools）继续
-            const continuedMsgs = [
-              ...messagesToSend,
-              { role: 'assistant', content: respText }
-            ]
+            // 把多模态轮的回复作为 assistant 消息，切回主模型（带完整 tools）继续。
+            // 关键：切回主模型必须用「干净」的 system prompt（剥离 TEXT-BASED TOOL USE 指令），
+            // 否则主模型会误以为要用 json_tool_calls 文本格式输出工具调用，最终只输出 JSON 代码块而不调用原生工具，任务就此中断。
+            const cleanSystemPrompt = (systemPrompt || '').split(/## TEXT-BASED TOOL USE/i)[0]
+            const continuedMsgs = messagesToSend.map(m =>
+              m.role === 'system' ? { ...m, content: cleanSystemPrompt } : m
+            )
+            continuedMsgs.push({ role: 'assistant', content: respText })
             attemptChat(continuedMsgs, null, false)
             return
           }
