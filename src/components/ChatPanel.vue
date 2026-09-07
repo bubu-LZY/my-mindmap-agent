@@ -2127,6 +2127,19 @@ watch(() => props.currentFilePath, (newPath, oldPath) => {
   if (!newPath || newPath === oldPath) return
   const fid = String(newPath).replace(/[\\/]+/g, '/').replace(/\/+$/g, '')
   if (!fid) return
+  // 点击对话引发的文件切换（watch 到的正是该对话绑定的文件）：
+  // 保持用户刚选中的对话，只刷新 文件↔对话 映射，不再自动切到别的对话
+  if (suppressFileWatch && suppressFileWatch.fid === fid) {
+    const keepId = suppressFileWatch.convId
+    suppressFileWatch = null
+    const keepConv = getConversationById(keepId)
+    if (keepConv) {
+      keepConv.fileId = fid
+      fileConversationMap.value.set(fid, keepId)
+      conversationFileMap.value.set(keepId, fid)
+    }
+    return
+  }
   // AI 运行中：对话锁定在发起时的文件，切换文件不切对话，避免消息写进错误对话
   if (aiStatus.value === 'thinking' || aiStatus.value === 'calling') {
     const boundFileId = conversationFileMap.value.get(currentConversation.value?.id) || ''
@@ -2609,6 +2622,10 @@ const doDeleteConversation = () => {
   ElMessage.success('已删除该记录')
 }
 
+// 点击对话触发的文件导航标志：文件路径 watch 检测到目标文件后不再自动切换对话，避免覆盖用户刚点的对话
+// { convId, fid }：fid 用于精确匹配（仅当 watch 到的文件正是该对话绑定的文件时才消费）
+let suppressFileWatch = null
+
 // 加载历史对话
 const loadConversation = (id) => {
   // 进行中的生成先中止并丢弃回调，避免消息/日志落错会话
@@ -2626,6 +2643,21 @@ const loadConversation = (id) => {
     summaryCoveredCount.value = conv.summaryCoveredCount || 0
     setCurrentConversationId(id)
     historyPanelVisible.value = false
+
+    // 点击绑定文件的对话 → 自动打开该文件（全局对话不绑定文件；已打开同一文件时不重复切换）
+    if (conv.fileId) {
+      const fid = String(conv.fileId).replace(/[\\/]+/g, '/').replace(/\/+$/g, '')
+      const curFid = String(props.currentFilePath || '').replace(/[\\/]+/g, '/').replace(/\/+$/g, '')
+      if (fid && fid !== curFid) {
+        suppressFileWatch = { convId: conv.id, fid }
+        emit('navigate-to-file', conv.fileId, getConversationFileName(conv.fileId))
+        // 兜底清理：文件打开失败（已删除/移动）时路径不会变化，超时后标志失效，
+        // 避免残留导致之后手动打开同一文件时不切对话
+        setTimeout(() => {
+          if (suppressFileWatch && suppressFileWatch.convId === conv.id) suppressFileWatch = null
+        }, 5000)
+      }
+    }
   }
 }
 
@@ -2904,7 +2936,7 @@ const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/grap
 - Editing EXISTING map: modify in-place (update_node_text / batch_node_actions / delete_node / merge_nodes). NEVER regenerate with generate_mindmap (writes new file).
 - Background/path-scoped .smm edits: after edits, AUTOMATICALLY save_mindmap (overwrite same path). Do NOT ask "是否保存". Include final absolute path in reply.
 - Review tasks: activate_tools("review") → get_today_review_status / get_review_schedule / complete_review_task / add_to_review. Never search nodes for review questions.
-- Recitation: ai_recite_rewrite. Quizzes: ai_quiz / ai_quiz_append. Exact cloze: mechanical_cloze. Smart cloze: ai_cloze. Activate by keyword if not active.
+- Recitation: ai_recite_rewrite. Quizzes: ai_quiz / ai_quiz_append. Exact cloze: mechanical_cloze. Smart cloze: ai_cloze. Cloze quality issues (bad blanks to remove / missing keywords to add, e.g. title-like nodes wrongly blanked): ai_cloze_review (targets incl. mode=all). Activate by keyword if not active.
 - find_local_file returns absolute paths; open directly. merge_mindmap_files reads source in background. rename_mindmap_file in place.
 - **Batch tools**: split_mindmap (split one map into many .smm); export_to_markdown(file_paths=[...]) batch SMM→MD; merge_mindmap_files(sourceFilePaths=[...]) batch merge; import_file_as_mindmap(file_paths=[...]) batch MD→SMM. Prefer these ONE-call batch tools over looping a single-file tool.
 - **Finish the whole task**: Never stop mid-task and wait for the user to say "continue". If a step fails, self-recover (retry ≤2, or switch to an equivalent tool) and keep going until the goal is fully achieved. Only stop when the task is actually done or you truly need a user decision.

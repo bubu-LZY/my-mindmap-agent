@@ -306,7 +306,7 @@
               placeholder="留空则按厂商自动推导内置端点"
             />
             <div class="model-hint manual-hint">
-              用于把图片 / PDF 等文件上传到模型服务的 files 端点。留空走内置推导；内置不可用或上传失败时，可在此手动指定（如 https://api.openai.com/v1/files）。
+              【非独立配置】这是上方多模态模型的配套上传通道：文件先经此端点上传，再由上方多模态模型读取。用于把图片 / PDF 等文件上传到模型服务的 files 端点。留空走内置推导；内置不可用或上传失败时，可在此手动指定（如 https://api.openai.com/v1/files）。
             </div>
           </el-form-item>
         </el-form>
@@ -937,7 +937,7 @@
       <div style="margin-bottom: 12px;">
         <el-button size="small" type="primary" :loading="checkingUpdate" @click="checkUpdate">检查更新</el-button>
       </div>
-      <p>my-mindmap agent v4.12.3</p>
+      <p>my-mindmap agent v4.12.4</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>

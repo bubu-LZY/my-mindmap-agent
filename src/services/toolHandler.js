@@ -40,6 +40,7 @@ import { buildTriModeHtml } from '../utils/triModeExport'
 import { renderSvgFromData } from '../utils/offscreenRender'
 import { safeExportSvg } from '../utils/safeExportSvg'
 import { uploadFileForProvider } from './fileUploadService'
+import { reviewClozeQuality } from '../utils/aiCloze'
 import { toolRegistry, TIMEOUT_PRESETS } from '../tools/ToolRegistry'
 import { registerAllNewTools, runCodeTool, registerLegacyTools } from '../tools'
 
@@ -240,6 +241,7 @@ const toolCatalog = [
   { name: 'ai_continue_children', category: 'AI', desc: 'AI continue children: AI generates child nodes and attaches them for the selected node (or the whole map with scope=root); depth per user request, default 2~5, max 6; keeps original text; Ctrl+Z undoable' },
   { name: 'ai_recite_rewrite', category: 'AI', desc: 'AI recitation rewrite: 【memory shorthand】+summary; short original text is preserved verbatim, longer text summarized; natural homophones only; targets (uids/keyword/mode) sets rewrite scope; Ctrl+Z undoable' },
   { name: 'ai_cloze', category: 'AI', desc: 'AI smart cloze: pick keywords to blank out (fill-in-blank) for one or more selected nodes, keeping context clues for review' },
+  { name: 'ai_cloze_review', category: 'AI', desc: 'AI review existing clozes and fix: remove unreasonable blanks (title-like parent nodes e.g. 特点/含义, unguessable ones) + add missing keywords; targets uids/keyword/mode(incl. all)' },
   { name: 'mechanical_cloze', category: 'AI', desc: 'Mechanical cloze: blank every occurrence of an exact text/regex in target nodes directly, without AI analysis' },
   { name: 'ai_cloze_full_map', category: 'AI', desc: 'AI full-map cloze: blank keywords across the whole opened map (all nodes), ignoring selection; for full self-test review' },
   { name: 'parallel_ai_workers', category: 'AI', desc: 'Split a heavy AI job into multiple independent subtasks and run them concurrently, then aggregate the results; use for large map generation/rewrite/cloze/content production' },
@@ -1767,6 +1769,27 @@ export const aiTools = [
   {
     type: 'function',
     function: {
+      name: 'ai_cloze_review',
+      description: 'AI review EXISTING clozes and fix them in place: remove unreasonable blanks (a node that is itself the title/summary of its children — e.g. 特点/含义/形式 — got blanked; blanks that cannot be inferred; non-keyword words), add missing key clozes, keep good ones. Use when the user says 审查挖空/挖空质量/不该挖的挖了/该挖的没挖/去除挖空问题. Requires nodes already clozed (run ai_cloze first). targets uids/keyword/mode(incl. all=whole map); omit = current selection.',
+      parameters: {
+        type: 'object',
+        properties: {
+          targets: {
+            type: 'object',
+            description: 'Which nodes to review; omit = currently selected nodes',
+            properties: {
+              uids: { type: 'array', items: { type: 'string' }, description: 'Node uid list (get from search_nodes)' },
+              keyword: { type: 'string', description: 'Keyword: matches all nodes whose text contains it' },
+              mode: { type: 'string', enum: ['leaves', 'leaf_parents', 'all'], description: 'leaves=all leaf nodes; leaf_parents=parents of leaves; all=all nodes of the whole map' }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'ai_cloze_full_map',
       description: 'AI full-map cloze: blank keywords across the whole opened map (all nodes), ignoring current selection; picks keywords per node to create fill-in-blanks for full self-test review. Use when the user says 全文挖空/整张图挖空/全导图挖空/全部挖空.',
       parameters: { type: 'object', properties: {} }
@@ -2645,6 +2668,7 @@ export const TOOL_NAME_MAP = {
   parallel_ai_workers: '并行子 Agent',
   ai_recite_rewrite: 'AI 背诵改写',
   ai_cloze: 'AI 智能挖空',
+  ai_cloze_review: 'AI 审查挖空',
   ai_cloze_full_map: 'AI 全文挖空',
   ai_quiz: 'AI 出题（新文件）',
   ai_quiz_append: 'AI 出题（挂到节点）',
@@ -5272,7 +5296,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const sheet = { id: 'sheet1', class: 'sheet', title: rootText, rootTopic: toTopic(treeData) }
           const zip = new JSZip()
           zip.file('content.json', JSON.stringify([sheet]))
-          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.12.3' } }))
+          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.12.4' } }))
           const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
           if (!window.electronAPI?.saveBinaryFile) return { success: false, message: '文件保存功能不可用' }
           const r = await window.electronAPI.saveBinaryFile(fileName, base64)
@@ -5912,6 +5936,41 @@ ${mindMapTypePrompt(mapType, 'organize')}
         return { success: false, message: 'AI全文挖空功能不可用' }
       } catch (e) {
         return { success: false, message: `AI全文挖空失败: ${e.message}` }
+      }
+    }
+
+    case 'ai_cloze_review': {
+      try {
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先打开或创建一个导图文件。' }
+        let targetNodes
+        if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
+          if (args.targets.mode === 'all') {
+            const all = []
+            const walkAll = (n) => {
+              if (n && !n.isGeneralization) all.push(n)
+              if (n.children) n.children.forEach(walkAll)
+            }
+            if (mindMap.renderer.root) walkAll(mindMap.renderer.root)
+            targetNodes = all
+          } else {
+            const { nodes, error } = resolveTargetNodes(mindMap, args.targets)
+            if (error) return { success: false, message: `目标节点解析失败：${error}` }
+            targetNodes = nodes.filter(n => !n.isGeneralization)
+          }
+        } else {
+          targetNodes = (mindMap.renderer.activeNodeList || []).filter(n => !n.isGeneralization)
+        }
+        if (!targetNodes.length) {
+          return { success: false, message: '没有可审查的节点：请通过 targets 指定（uids/keyword/mode，mode=all 可审查全图）或先选中节点' }
+        }
+        const result = await reviewClozeQuality(targetNodes)
+        return {
+          success: true,
+          message: `AI审查完成：共 ${result.total} 个节点，审查 ${result.reviewed} 个；移除不合理挖空 ${result.removed} 处，补充遗漏 ${result.added} 处`,
+          data: result
+        }
+      } catch (e) {
+        return { success: false, message: `AI审查挖空失败: ${e.message}` }
       }
     }
 

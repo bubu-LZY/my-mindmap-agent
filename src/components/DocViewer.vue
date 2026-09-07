@@ -197,6 +197,11 @@ const visibleOutline = computed(() => {
 // 每页渲染状态（canvas 是否已渲染 / 是否在渲染中）
 const pdfRenderedPages = new Set()
 const pdfRenderingPages = new Set()
+// 渲染会话标记：num -> 会话号。文件切换后旧协程的清理不再误删新文件同页码的"渲染中"标记
+const pdfRenderingSessions = new Map()
+let pdfRenderSessionSeq = 0
+// 渲染失败重试计数（每页最多自动重试 1 次）
+const pdfRenderRetries = new Map()
 // 每页 canvas / textLayer DOM 引用（懒渲染 + 离屏回收）
 const pdfCanvasEls = new Map()
 const pdfTextEls = new Map()
@@ -510,6 +515,8 @@ const loadPdf = async (token) => {
   pdfPages.value = []
   pdfRenderedPages.clear()
   pdfRenderingPages.clear()
+  pdfRenderingSessions.clear()
+  pdfRenderRetries.clear()
   pdfCanvasEls.clear()
   pdfTextEls.clear()
 
@@ -607,10 +614,16 @@ const renderPdfPage = async (num) => {
   if (pdfRenderedPages.has(num) || pdfRenderingPages.has(num)) return
   const wrap = docBodyRef.value?.querySelector(`.pdf-page-wrap[data-page="${num}"]`)
   if (!wrap) return
+  // 捕获当前文档引用与渲染会话号：文件切换/重载后旧协程据此自行中止，
+  // 不再对已销毁的文档渲染（报"渲染失败"），也不会误清新文件同页码的渲染标记
+  const doc = pdfDoc
+  const session = ++pdfRenderSessionSeq
   pdfRenderingPages.add(num)
+  pdfRenderingSessions.set(num, session)
   let page = null
   try {
-    page = await pdfDoc.getPage(num)
+    page = await doc.getPage(num)
+    if (doc !== pdfDoc) return
     const meta = pdfPages.value[num - 1] || { scale: 1 }
     const viewport = page.getViewport({ scale: meta.scale })
     // 高 DPI 屏幕按 1.5 倍封顶，避免 2x/3x 下 canvas 像素数量成倍放大导致内存暴涨
@@ -637,6 +650,7 @@ const renderPdfPage = async (num) => {
       transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
       background: '#ffffff'
     }).promise
+    if (doc !== pdfDoc) return
 
     // 画布渲染完成立即标记已渲染（不等文本层），避免已显示内容仍被当作未渲染而判定错乱
     pdfRenderedPages.add(num)
@@ -670,11 +684,25 @@ const renderPdfPage = async (num) => {
       if (el) { el.innerHTML = '' }
     }
   } catch (e) {
-    console.warn('PDF 页面渲染失败:', num, e)
+    // 文件切换导致的失败属正常现象，静默中止
+    if (doc !== pdfDoc) return
+    console.warn('PDF 页面渲染失败:', num, e?.message || e)
+    // 瞬态失败（worker 繁忙/竞态）：延迟自动重试一次
+    if (!pdfRenderedPages.has(num)) {
+      const retries = pdfRenderRetries.get(num) || 0
+      if (retries < 1) {
+        pdfRenderRetries.set(num, retries + 1)
+        setTimeout(() => { if (doc === pdfDoc) renderPdfPage(num) }, 600)
+      }
+    }
   } finally {
-    pdfRenderingPages.delete(num)
+    // 仅当仍是本会话持有该页的渲染标记时才清除，避免旧协程误删新文件的标记
+    if (pdfRenderingSessions.get(num) === session) {
+      pdfRenderingPages.delete(num)
+      pdfRenderingSessions.delete(num)
+    }
     if (page) { try { page.cleanup() } catch {} }
-    schedulePdfRecycle()
+    if (doc === pdfDoc) schedulePdfRecycle()
   }
 }
 
@@ -926,6 +954,8 @@ const cleanupPdf = () => {
   locateFlash.value = false
   pdfRenderedPages.clear()
   pdfRenderingPages.clear()
+  pdfRenderingSessions.clear()
+  pdfRenderRetries.clear()
   pdfCanvasEls.clear()
   pdfTextEls.clear()
   if (pdfDoc) { try { pdfDoc.destroy() } catch {} pdfDoc = null }

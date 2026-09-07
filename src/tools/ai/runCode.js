@@ -65,6 +65,7 @@ const READWRITE_RUN_CODE_TOOLS = new Set([
   'toggle_cloze_visibility',
   'clear_cloze',
   'ai_cloze',
+  'ai_cloze_review',
   'mechanical_cloze',
   // 保存/导出
   'save_mindmap',

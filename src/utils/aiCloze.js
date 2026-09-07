@@ -118,6 +118,7 @@ ${mindMapTypePrompt(mapType, 'cloze')}
 4. 挖空文本必须与节点原文完全匹配，包括标点符号。
 5. 同一关键词在同一节点只出现一次。
 6. 章节名、目录名、概括性大标题不挖空。
+7. 【重要】若 childrenTexts 非空，且 text 本身就是子内容的标题/概括/名称（典型：text 很短，如"理性认识""含义""特点""形式"，子节点是对它的展开），挖掉后无法从子节点推断、背诵失去框架 → 这种节点一律返回空 clozes，不挖空。注意区分：父节点文本若是完整陈述句（如"定义：抽象思维对事物本质的把握"），仍正常挖空"值"部分。
 
 ## 保留可推测性规则（最重要）
 1. "标签：值"格式，只挖空"值"部分，保留"标签"作为提示
@@ -895,6 +896,11 @@ const buildEnhancedFallbackClozeList = (nodes) => {
     if (text.length < 2) return
     if (isHeadingLike(text)) return
 
+    // 有子节点且文本很短（≤6字）：该节点是子内容的标题/概括/名称（如"含义""特点""形式"），
+    // 挖掉后无法从子节点推断，背诵时失去框架 → 不挖空
+    const hasChildren = Array.isArray(node.childrenTexts) && node.childrenTexts.length > 0
+    if (hasChildren && text.length <= 6) return
+
     const uid = node.uid
     const maxCount = getMaxClozeCount(text)
 
@@ -1158,16 +1164,18 @@ const callAiForClozeBatched = async (nodes, mode, onProgress, onBatchResult) => 
 
 const buildReviewSystemPrompt = () => {
   const mapType = classifyMindMap(getMindMapRef()?.renderer?.root || getMindMapRef()?.getData?.() || '')
-  return `你是一个思维导图挖空质量审查助手。以下节点已经做了初步挖空（由本地规则生成），请你：
-1. 审查已有挖空的质量：判断每个挖空是否合理、是否是关键考点
-2. 补充遗漏：如果发现有重要关键词漏掉了，请补充进去
-3. 移除不合理的：如果某个挖空太简单、不是考点、或挖了之后完全无法推断，请移除
+  return `你是一个思维导图挖空质量审查助手。以下节点已经做了初步挖空（由本地规则生成），你的任务是双向修补：
+1. 移除不合理的挖空：不该挖的被挖了 → 移除（重点！）
+2. 补充遗漏的挖空：该挖的没挖 → 补充
+3. 保留合理的挖空：挖得对的 → 保留
 
 ${mindMapTypePrompt(mapType, 'cloze')}
 
 ## 审查标准
 - **保留（keep）**：是关键考点/核心术语/重要结论，且剩余文字+上下文能推断出来 → 保留
-- **移除（remove）**：不是考点、太简单、挖了之后无法推断、或只是普通修饰词 → 移除
+- **移除（remove）**：命中以下任一情况 → 移除：
+  - 该节点有子节点，且节点文本是子节点内容的概括、名称或标题（如节点为"特点"，子节点为"间接性/抽象性"；节点为"含义"，子节点为具体定义）→ 该节点的挖空全部移除（挖掉标题后无法从子节点推断，背诵时失去框架）
+  - 不是考点、太简单、挖了之后无法推断、或只是普通修饰词
 - **补充（add）**：原文中有重要关键词被漏掉了 → 补充进去
 
 ## 补充挖空的原则（宁缺毋滥）
@@ -1180,10 +1188,13 @@ ${mindMapTypePrompt(mapType, 'cloze')}
 每个节点附带：
 - text：节点原文
 - parentText：父节点文本
+- childrenTexts：子节点文本列表（判断该节点是否为子内容的标题/概括的关键依据）
 - siblingsTexts：同级节点文本列表
 - currentClozes：当前已有的挖空词列表
 
-请结合上下文判断：优先保留/补充"和同级节点有区分度的关键词"。
+请结合上下文判断：
+- 若 childrenTexts 非空且 text 是子内容的标题/概括/名称（典型如"含义""特点""形式"等分类词），该节点所有挖空都应移除
+- 优先保留/补充"和同级节点有区分度的关键词"
 
 ## 返回格式（必须严格遵守）
 输出合法 JSON，可以包裹在 \`\`\`json 代码块中；禁止尾随逗号、注释或 NaN。
@@ -1206,7 +1217,7 @@ ${mindMapTypePrompt(mapType, 'cloze')}
 }
 
 const buildReviewUserMessage = (items) => {
-  return `请审查以下节点的挖空质量，并补充遗漏的重要关键词：
+  return `请审查以下节点的挖空质量：移除不合理的挖空（重点：有子节点且自身是子内容标题/概括的，全部移除），并补充遗漏的重要关键词：
 
 ${JSON.stringify(items)}
 
@@ -1254,7 +1265,7 @@ const parseReviewResponse = (content) => {
   }
 }
 
-const callAiForReview = async (items, timeoutMs = 60000) => {
+const callAiForReview = async (items, timeoutMs = 90000) => {
   const choice = await Promise.race([
     aiService.chat(buildReviewUserMessage(items), buildReviewSystemPrompt(), null, { thinking: false }),
     new Promise((_, reject) => setTimeout(() => reject(new Error('AI审查超时')), timeoutMs))
@@ -1267,6 +1278,13 @@ const callAiForReview = async (items, timeoutMs = 60000) => {
 const isConfidentFallback = (node, clozes) => {
   const text = extractPlainText(node.text || '').trim()
   const clozeCount = Array.isArray(clozes) ? clozes.length : 0
+
+  // 有子节点且文本很短（≤6字）：该节点是子内容的标题/概括（如"含义""特点"），
+  // 整词挖空必然不合理，不能跳过AI审查，让 AI 决定移除
+  const hasChildren = Array.isArray(node.childrenTexts) && node.childrenTexts.length > 0
+  if (hasChildren && text.length <= 6) {
+    return false
+  }
 
   // 情况1：短节点（≤8字）整词挖空 → 非常有把握
   if (text.length <= 8 && clozeCount === 1 && clozes[0] === text) {
@@ -1287,7 +1305,8 @@ const isConfidentFallback = (node, clozes) => {
 }
 
 // 批量 AI 审查+补充（选择性审查 + 并行执行）
-const callAiForReviewBatched = async (nodes, clozeList, onProgress, onBatchReviewed) => {
+// options.skipConfident=false 时强制审查全部节点（供手动审查工具使用）
+const callAiForReviewBatched = async (nodes, clozeList, onProgress, onBatchReviewed, options = {}) => {
   if (!nodes || nodes.length === 0) return { reviewed: 0, added: 0, removed: 0 }
 
   // 建立 uid -> 挖空信息 的映射
@@ -1304,7 +1323,7 @@ const callAiForReviewBatched = async (nodes, clozeList, onProgress, onBatchRevie
     const clozes = clozeItem && Array.isArray(clozeItem.clozes) ? clozeItem.clozes : []
 
     // 如果兜底很有把握，就跳过AI审查
-    if (isConfidentFallback(node, clozes)) {
+    if (options.skipConfident !== false && isConfidentFallback(node, clozes)) {
       skipped++
       return
     }
@@ -1313,6 +1332,7 @@ const callAiForReviewBatched = async (nodes, clozeList, onProgress, onBatchRevie
       uid: node.uid,
       text: node.text,
       parentText: node.parentText,
+      childrenTexts: node.childrenTexts,
       siblingsTexts: node.siblingsTexts,
       currentClozes: clozes
     })
@@ -1348,8 +1368,8 @@ const callAiForReviewBatched = async (nodes, clozeList, onProgress, onBatchRevie
     }
   }
 
-  // 处理单个批次
-  const processBatch = async (batch) => {
+  // 处理单个批次；失败时拆成两半重试，避免整批超时/解析失败导致该批全部丢失
+  const processBatch = async (batch, depth = 0) => {
     if (aiService.isAborted()) {
       const err = new Error('已停止')
       err.aborted = true
@@ -1380,18 +1400,19 @@ const callAiForReviewBatched = async (nodes, clozeList, onProgress, onBatchRevie
           // 过滤：只保留在原文中确实存在的挖空词
           const newClozes = [...new Set([...keeps, ...adds])].filter(c => c && nodeText && nodeText.includes(c))
 
-          if (newClozes.length > 0) {
-            const addedCount = adds.filter(a => !oldClozes.includes(a) && nodeText.includes(a)).length
-            const removedCount = oldClozes.filter(c => !newClozes.includes(c)).length
-            batchAdded += addedCount
-            batchRemoved += removedCount
-            batchReviewed++
+          // AI 要求全部移除（keeps/adds 均空）且该节点原有挖空 → 应用空结果以清除挖空
+          if (newClozes.length === 0 && oldClozes.length === 0) return
 
-            clozeMap[uid].clozes = newClozes
+          const addedCount = adds.filter(a => !oldClozes.includes(a) && nodeText.includes(a)).length
+          const removedCount = oldClozes.filter(c => !newClozes.includes(c)).length
+          batchAdded += addedCount
+          batchRemoved += removedCount
+          batchReviewed++
 
-            if (onBatchReviewed) {
-              onBatchReviewed(clozeMap[uid])
-            }
+          clozeMap[uid].clozes = newClozes
+
+          if (onBatchReviewed) {
+            onBatchReviewed(clozeMap[uid])
           }
         })
       }
@@ -1399,6 +1420,18 @@ const callAiForReviewBatched = async (nodes, clozeList, onProgress, onBatchRevie
       return { reviewed: batchReviewed, added: batchAdded, removed: batchRemoved }
     } catch (e) {
       if (e.aborted) throw e
+      // 整批失败（常见为超时）：拆成两半递归重试，最多拆两层
+      if (batch.length > 4 && depth < 2) {
+        console.warn(`[AI挖空-审查] 批次审查失败（${e.message}），${batch.length} 个节点拆半重试`)
+        const mid = Math.ceil(batch.length / 2)
+        const r1 = await processBatch(batch.slice(0, mid), depth + 1)
+        const r2 = await processBatch(batch.slice(mid), depth + 1)
+        return {
+          reviewed: r1.reviewed + r2.reviewed,
+          added: r1.added + r2.added,
+          removed: r1.removed + r2.removed
+        }
+      }
       console.warn('[AI挖空-审查] 批次审查失败，跳过该批次:', e.message)
       return { reviewed: 0, added: 0, removed: 0 }
     }
@@ -1827,4 +1860,89 @@ export const smartClozeFullMap = async (mode = 'smart', onProgress, options = {}
 
   if (nodes.length === 0) throw new Error('思维导图为空，无法挖空')
   return doSmartCloze(nodes, mode, onProgress, options)
+}
+
+/* ==================== 独立审查：AI 审查已有挖空并修复 ==================== */
+
+// 从节点富文本 HTML 中提取当前挖空词（smm-cloze span 的内容）
+const extractNodeClozeWords = (node) => {
+  const raw = (typeof node.getData === 'function' ? node.getData('text') : node.text) || ''
+  if (typeof raw !== 'string' || !raw.includes('smm-cloze')) return []
+  const words = []
+  const re = /<span[^>]*class="[^"]*smm-cloze[^"]*"[^>]*>([\s\S]*?)<\/span>/gi
+  let m
+  while ((m = re.exec(raw)) !== null) {
+    const w = extractPlainText(m[1]).trim()
+    if (w) words.push(w)
+  }
+  return words
+}
+
+/**
+ * AI 审查已有挖空的质量并直接修复：
+ * - 移除不合理挖空（节点自身是子内容的标题/概括、挖了无法推断、非考点）
+ * - 补充遗漏的关键考点
+ * - 挖得对的保留
+ * 供 Agent 工具（ai_cloze_review）直接调用；nodeList 为思维导图原始节点对象数组
+ */
+export const reviewClozeQuality = async (nodeList, onProgress) => {
+  const mindMapRef = getMindMapRef()
+  if (!mindMapRef || !mindMapRef.renderer) {
+    throw new Error('思维导图未初始化')
+  }
+  if (!nodeList || nodeList.length === 0) {
+    throw new Error('未指定任何节点')
+  }
+
+  // 提取节点上下文信息 + 当前挖空词
+  const nodes = []
+  const clozeList = []
+  nodeList.forEach(node => {
+    if (!node) return
+    const info = buildNodeInfo(node, 1)
+    if (!info || !info.text) return
+    nodes.push(info)
+    clozeList.push({ uid: info.uid, clozes: extractNodeClozeWords(node) })
+  })
+  if (nodes.length === 0) throw new Error('选中的节点没有可审查的内容')
+
+  const hasAnyCloze = clozeList.some(c => c.clozes.length > 0)
+  if (!hasAnyCloze) throw new Error('选中的节点都还没有挖空，请先用 ai_cloze 生成挖空后再审查')
+
+  const applyItem = (item) => {
+    if (!item || !item.uid) return
+    const root = mindMapRef.renderer.root
+    if (!root) return
+    const findNode = (n) => {
+      if (getNodeUid(n) === item.uid) return n
+      if (n.children) {
+        for (const child of n.children) {
+          const found = findNode(child)
+          if (found) return found
+        }
+      }
+      return null
+    }
+    const node = findNode(root)
+    if (node) {
+      clearNodeCloze(node)
+      applyClozeToNode(node, item)
+    }
+  }
+
+  // 显式审查不跳过任何节点（skipConfident: false）
+  const result = await callAiForReviewBatched(nodes, clozeList, onProgress, applyItem, { skipConfident: false })
+
+  // 刷新画布与样式
+  const mm = mindMapRef
+  if (mm && typeof mm.render === 'function') mm.render()
+  setTimeout(() => applyClozeStyles(), 50)
+  setTimeout(() => applyClozeStyles(), 300)
+
+  return {
+    total: nodes.length,
+    reviewed: result.reviewed,
+    added: result.added,
+    removed: result.removed
+  }
 }

@@ -118,6 +118,7 @@ function inferTimeout(name, category) {
     name === 'add_child_nodes' ||
     name === 'ai_continue_children' ||
     name === 'ai_cloze_full_map' ||
+    name === 'ai_cloze_review' ||
     name === 'ai_quiz' ||
     name === 'reorganize_mindmap' ||
     name === 'refactor_mindmap' ||
