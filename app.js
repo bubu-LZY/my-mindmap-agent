@@ -1,3 +1,17 @@
+/* ================================================================
+ * 全局错误兜底：任何 JS 异常都显示在页面底部红条上，避免白屏看不到原因
+ * ================================================================ */
+window.addEventListener('error', function (e) {
+  try {
+    if (!e || !e.error) return;
+    var msg = (e.error && e.error.message) || String(e);
+    var banner = document.createElement('div');
+    banner.style.cssText = 'position:fixed;bottom:8px;left:8px;right:8px;max-height:40vh;overflow:auto;background:#ff3b30;color:#fff;padding:10px 14px;font:12px/1.5 monospace;z-index:99999;border-radius:6px;white-space:pre-wrap;word-break:break-all;';
+    banner.textContent = '[demo] 脚本异常：' + msg;
+    (document.body || document.documentElement).appendChild(banner);
+  } catch (_) {}
+});
+
 const SAMPLE_FILES = {
   'computer-network': {
     fileName: '计算机网络基础.smm',
@@ -496,9 +510,24 @@ function toggleClozeGlobal() {
   if (btn) btn.classList.toggle('active', clozeHiddenGlobal);
 }
 
-/* 启动 */
-switchFile('computer-network');
-renderChat();
+/* 启动 —— 等 DOM 就绪再调用，避免 defer/解析顺序导致的 getElementById 失败白屏 */
+function bootstrapDemo() {
+  try {
+    switchFile('computer-network');
+    renderChat();
+  } catch (e) {
+    console.error('[demo] 启动失败：', e);
+    document.body && document.body.insertAdjacentHTML(
+      'beforeend',
+      '<div style="position:fixed;bottom:8px;right:8px;background:#ff3b30;color:#fff;padding:8px 12px;font:12px monospace;z-index:99999;border-radius:6px;">demo 启动失败：' + (e && e.message ? e.message : String(e)) + '</div>'
+    );
+  }
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bootstrapDemo);
+} else {
+  bootstrapDemo();
+}
 
 /* 点击空白处关闭右键菜单 */
 document.addEventListener('click', (e) => {
