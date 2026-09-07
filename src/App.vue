@@ -2380,23 +2380,24 @@ const onConversationChanged = (conversationId) => {
   currentConversationId.value = conversationId || ''
 }
 
-// AI 创建了新文件，更新当前文件路径并刷新目录树
+// 目录树刷新防抖：AI 多步任务会在短时间内创建多个文件，逐个刷新会卡顿。
+// 这里合并为一次刷新，任务执行期间目录树不抖动。
+let treeRefreshTimer = null
+const scheduleTreeRefresh = (delay = 600) => {
+  if (treeRefreshTimer) clearTimeout(treeRefreshTimer)
+  treeRefreshTimer = setTimeout(() => {
+    treeRefreshTimer = null
+    if (fileTreeRef.value && fileTreeRef.value.refreshTree) {
+      fileTreeRef.value.refreshTree()
+    }
+  }, delay)
+}
+
+// AI 创建了新文件：只刷新目录树让新文件出现，不自动打开/切换画布
 const onFileCreated = (filePath, fileName) => {
   if (filePath) {
     hasFile.value = true
-    nextTick(() => {
-      if (fileTreeRef.value && fileTreeRef.value.refreshTree) {
-        fileTreeRef.value.refreshTree()
-      }
-      // 分屏模式下不自动打开新文件（避免替换当前 pane 破坏分屏布局），单 pane 时才打开查看
-      if (!isMultiPane.value) {
-        if (fileTreeRef.value && fileTreeRef.value.openFileByPath) {
-          fileTreeRef.value.openFileByPath(filePath)
-        } else {
-          currentFilePath.value = filePath
-        }
-      }
-    })
+    scheduleTreeRefresh()
   }
 }
 
@@ -2427,13 +2428,9 @@ const onOpenLocalFileFromPanel = (event) => {
 }
 
 // AI 生成了独立文件（AI出题/导出等），画布内容未切换：
-// 只刷新左侧目录树让新文件出现，当前打开的文件保持不变
+// 只刷新左侧目录树让新文件出现（防抖合并），当前打开的文件保持不变
 const onExternalFileCreated = () => {
-  nextTick(() => {
-    if (fileTreeRef.value && fileTreeRef.value.refreshTree) {
-      fileTreeRef.value.refreshTree()
-    }
-  })
+  scheduleTreeRefresh()
 }
 
 // AI 撤销后删除了本轮生成的文件，刷新目录树让这些文件消失。

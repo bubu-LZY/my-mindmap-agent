@@ -19,40 +19,42 @@
           <span class="status-text">{{ statusText }}</span>
         </div>
       </div>
-      <div v-if="!compact" class="header-right">
-        <span class="ai-bind-target-name" :title="aiBindTargetDisplay">{{ aiBindTargetDisplay }}</span>
-        <el-dropdown v-if="mindMapWindows.length" trigger="click" @command="onAiBindCommand">
-          <button
-            class="header-icon-btn ai-bind-btn"
-            :class="{ locked: aiBindLocked }"
-            :title="aiBindLocked ? 'AI 已锁定到：' + aiBindTargetName + '（点击切换）' : 'AI 目标：跟随当前窗口（点击切换）'"
-          >
-            <svg viewBox="0 0 20 20" fill="none" width="16" height="16">
-              <circle cx="10" cy="10" r="2.6" :fill="aiBindLocked ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.5"/>
-              <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
-            </svg>
-          </button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="__auto__" :class="{ 'is-selected': !aiBindLocked }">
-                跟随当前窗口
-              </el-dropdown-item>
-              <el-dropdown-item
-                v-for="w in mindMapWindows"
-                :key="w.fileId"
-                :command="w.fileId"
-                :class="{ 'is-selected': aiBindLocked && aiBindFileId === w.fileId }"
-              >
-                {{ w.fileName }}
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-        <button class="header-icon-btn" @click="toggleLogPanel" :class="{ active: logPanelVisible }" title="运行日志">
+      <div class="header-actions">
+        <button class="header-icon-btn log-btn" @click="toggleLogPanel" :class="{ active: logPanelVisible }" title="快速查看运行日志">
           <svg viewBox="0 0 20 20" fill="none" width="16" height="16">
             <path d="M4 5h12M4 10h12M4 15h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
+        <div v-if="!compact" class="header-right">
+          <span class="ai-bind-target-name" :title="aiBindTargetDisplay">{{ aiBindTargetDisplay }}</span>
+          <el-dropdown v-if="mindMapWindows.length" trigger="click" @command="onAiBindCommand">
+            <button
+              class="header-icon-btn ai-bind-btn"
+              :class="{ locked: aiBindLocked }"
+              :title="aiBindLocked ? 'AI 已锁定到：' + aiBindTargetName + '（点击切换）' : 'AI 目标：跟随当前窗口（点击切换）'"
+            >
+              <svg viewBox="0 0 20 20" fill="none" width="16" height="16">
+                <circle cx="10" cy="10" r="2.6" :fill="aiBindLocked ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.5"/>
+                <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
+              </svg>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="__auto__" :class="{ 'is-selected': !aiBindLocked }">
+                  跟随当前窗口
+                </el-dropdown-item>
+                <el-dropdown-item
+                  v-for="w in mindMapWindows"
+                  :key="w.fileId"
+                  :command="w.fileId"
+                  :class="{ 'is-selected': aiBindLocked && aiBindFileId === w.fileId }"
+                >
+                  {{ w.fileName }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
       </div>
     </header>
 
@@ -199,10 +201,10 @@
           </div>
           <!-- Markdown 渲染内容 -->
           <div v-if="msg.content" class="md-content" :class="{ 'show-raw': msg.showRaw }">
-            <div v-if="msg.showRaw" class="md-raw-text">{{ stripThinkBlocks(msg.content) }}</div>
+            <div v-if="msg.showRaw" class="md-raw-text">{{ cleanMessageContent(msg.content) }}</div>
             <div
               v-else
-              v-html="renderMarkdown(stripThinkBlocks(msg.content))"
+              v-html="renderMarkdown(cleanMessageContent(msg.content))"
               @click="handleLinkClick"
               @contextmenu="handleMdContextMenu"
             ></div>
@@ -1098,7 +1100,7 @@ import { isTrustMode, setTrustMode } from '../utils/trustMode'
 import { formatMemoryText } from '../utils/aiMemory'
 import { addToReviewPlan } from '../utils/reviewPlan'
 import { renderMarkdown, getMarkdownCSS } from '../utils/markdownRenderer'
-import { stripThinkBlocks } from '../utils/thinkFilter'
+import { stripThinkBlocks, cleanMessageContent } from '../utils/thinkFilter'
 import { initCloze, applyClozeStyles, toggleAllCloze, isClozeHiddenAll } from '../utils/cloze'
 import { getDragFilePath, clearDragFilePath } from '../utils/dragState'
 import { smartClozeNodes, smartClozeFullMap } from '../utils/aiCloze'
@@ -2890,6 +2892,8 @@ const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/grap
 - List dirs: list_directory(recursive=true). Path-based .smm ops: export_mindmap_html, export_to_markdown, read_mindmap_file — all work WITHOUT opening the file.
 
 ## RULES
+- **Concisely output**: Keep final replies brief and result-oriented. All reasoning / internal monologue / step-by-step thinking MUST go inside <think>...</think> tags — NEVER print thinking aloud in the main content. The user only sees the final result, not your intermediate analysis.
+- **No chatter between tool calls**: Do NOT output explanations, status updates, or "let me try X" text between tool calls. Just call the tools, then give the final result when done. Use <plan> + <step-done> only for long multi-step tasks, not for trivial ones.
 - Batch in ONE call. Never loop select_node+edit; use batch_node_actions. Feishu multi-file ops use array params in ONE call.
 - Add multi-level subtree → plan structure first, then add_child_nodes(targets=..., children=[{text,children:[...]}]) in ONE call. NEVER loop with expand_node (causes concurrency conflicts).
 - Multi-step: emit <plan> first, then <step-done>N after each. Never skip/reorder.
@@ -2902,6 +2906,9 @@ const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/grap
 - Review tasks: activate_tools("review") → get_today_review_status / get_review_schedule / complete_review_task / add_to_review. Never search nodes for review questions.
 - Recitation: ai_recite_rewrite. Quizzes: ai_quiz / ai_quiz_append. Exact cloze: mechanical_cloze. Smart cloze: ai_cloze. Activate by keyword if not active.
 - find_local_file returns absolute paths; open directly. merge_mindmap_files reads source in background. rename_mindmap_file in place.
+- **Batch tools**: split_mindmap (split one map into many .smm); export_to_markdown(file_paths=[...]) batch SMM→MD; merge_mindmap_files(sourceFilePaths=[...]) batch merge; import_file_as_mindmap(file_paths=[...]) batch MD→SMM. Prefer these ONE-call batch tools over looping a single-file tool.
+- **Finish the whole task**: Never stop mid-task and wait for the user to say "continue". If a step fails, self-recover (retry ≤2, or switch to an equivalent tool) and keep going until the goal is fully achieved. Only stop when the task is actually done or you truly need a user decision.
+- **Clean up temp files**: If you created intermediate/temp files (scratch .md/.smm/code files) only as stepping stones, delete them (delete_local_file) before finishing. Keep only the final deliverables the user wants.
 - MCP: list_mcp_servers → list_mcp_tools → mcp_call_tool. Skills: list_skills / invoke_skill / create_skill (only after success).
 - Include returned filePath when a tool creates/renames/exports a file. Verify results; retry ≤2 on failure.
 
@@ -4333,7 +4340,16 @@ Output a JSON code block with EXACTLY this format. Put it FIRST in your reply:
             // 连续多次写操作时立即 reRender 会导致渲染状态叠加冲突。
             // 统一走 scheduleReRender 防抖，短时间内多次操作只做一次最终重绘。
             const READ_ONLY_RE = /^(search_|get_|list_|read_|query_|focus_|activate_|semantic_|zoom_|context_|audit_)/
-            const isWriteOp = !READ_ONLY_RE.test(toolName) && !['select_node', 'find_related', 'list_references', 'get_location', 'memory'].includes(toolName)
+            // 不修改画布内容的「后台/导出/文件类」工具：它们不碰当前导图，重渲染纯属浪费性能
+            const NO_CANVAS_MUTATION = new Set([
+              'export_to_markdown', 'export_mindmap_html', 'export_mindmap_pdf', 'export_outline_pdf',
+              'export_subtree', 'split_mindmap', 'save_text_file', 'save_mindmap', 'new_mindmap',
+              'generate_mindmap', 'convert_doc_to_mindmap', 'import_file_as_mindmap',
+              'rename_mindmap_file', 'find_local_file', 'list_directory', 'read_mindmap_file'
+            ])
+            const isWriteOp = !READ_ONLY_RE.test(toolName)
+              && !NO_CANVAS_MUTATION.has(toolName)
+              && !['select_node', 'find_related', 'list_references', 'get_location', 'memory'].includes(toolName)
             if (isWriteOp && props.mindMap) {
               // 批量节点操作、删除节点等改动较大的操作用 reRender 完全重绘
               // 普通新增/修改用 render 增量渲染即可
@@ -4477,9 +4493,17 @@ Output a JSON code block with EXACTLY this format. Put it FIRST in your reply:
                   const result = await executeToolByName(toolName, toolArgs)
                   tcEntry.status = 'done'
                   toolResults.push({ name: toolName, result })
-                  // 写操作触发重绘
+                  // 写操作触发重绘（导出/后台文件类工具不碰画布，跳过重渲染）
                   const READ_ONLY_RE = /^(search_|get_|list_|read_|query_|focus_|activate_|semantic_|zoom_|context_|audit_)/
-                  const isWriteOp = !READ_ONLY_RE.test(toolName) && !['select_node', 'find_related', 'list_references', 'get_location', 'memory'].includes(toolName)
+                  const NO_CANVAS_MUTATION = new Set([
+                    'export_to_markdown', 'export_mindmap_html', 'export_mindmap_pdf', 'export_outline_pdf',
+                    'export_subtree', 'split_mindmap', 'save_text_file', 'save_mindmap', 'new_mindmap',
+                    'generate_mindmap', 'convert_doc_to_mindmap', 'import_file_as_mindmap',
+                    'rename_mindmap_file', 'find_local_file', 'list_directory', 'read_mindmap_file'
+                  ])
+                  const isWriteOp = !READ_ONLY_RE.test(toolName)
+                    && !NO_CANVAS_MUTATION.has(toolName)
+                    && !['select_node', 'find_related', 'list_references', 'get_location', 'memory'].includes(toolName)
                   if (isWriteOp && props.mindMap) {
                     const heavyOps = ['batch_node_actions', 'delete_node', 'merge_nodes', 'refactor_mindmap', 'reorganize_mindmap', 'sort_children', 'duplicate_nodes', 'move_node', 'batch_move_nodes']
                     const needsFullReRender = heavyOps.includes(toolName)
@@ -9471,6 +9495,14 @@ defineExpose({
 }
 
 /* ========== Header Right ========== */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
 .header-right {
   display: flex;
   align-items: center;

@@ -568,5 +568,5 @@ ipcMain.handle('ai:testVisionModel', async (event, { baseURL, apiKey, profileId,
   }
 })
 
-// 导出供 ocr.js 使用
-module.exports = { resolveProfileForVision, isVisionEnabled, resolveApiKeyForProfile }
+// 导出供 ocr.js / backupManager.js 使用
+module.exports = { resolveProfileForVision, isVisionEnabled, resolveApiKeyForProfile, readConfig, writeConfig }

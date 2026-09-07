@@ -158,15 +158,19 @@ export const getDeskCalendarToken = () => {
 
 export const setDeskCalendarSyncEnabled = (value, token = '') => {
   enabled = !!value
-  if (token) authToken = String(token).trim()
-  else if (!authToken) authToken = loadConfig().token
   const cfg = loadConfig()
+  if (token) authToken = String(token).trim()
+  else authToken = cfg.token
   lastTaskMap = cfg.taskMap
   lastSyncAt = cfg.lastSyncAt
   saveConfig()
   notifyConfigChanged()
-  if (enabled) startSync()
-  else stopSync()
+  if (enabled) {
+    // 启用时优先读取 MCP 配置（url + Authorization），保持一致
+    loadMcpServerConfig().then(() => startSync())
+  } else {
+    stopSync()
+  }
   return enabled
 }
 
@@ -251,11 +255,13 @@ export const initDeskCalendarQueryListener = () => {
  */
 export const runDeskCalendarSyncOnce = async () => {
   if (running) return { success: false, message: '同步正在进行中，请稍后再试' }
+  // 优先读取 MCP 配置（url + Authorization），与本地 token 保持一致，避免两处冲突
+  await loadMcpServerConfig()
   const cfg = loadConfig()
-  authToken = cfg.token
+  if (!authToken) authToken = cfg.token
   enabled = cfg.enabled
   lastTaskMap = cfg.taskMap
-  if (!authToken) return { success: false, message: '未配置 desktop todo calendar Token，请先在设置中填写' }
+  if (!authToken) return { success: false, message: '未配置 desktop todo calendar 连接，请先在设置中粘贴 MCP JSON 配置' }
   running = true
   try {
     const stats = await syncAll()
@@ -280,9 +286,11 @@ export const runDeskCalendarSyncOnce = async () => {
  */
 export const syncReviewCycleToDeskCalendar = async (itemId, cycleNum) => {
   if (!enabled) return { success: false, skipped: true, message: '未开启同步' }
+  // 优先读取 MCP 配置，与本地 token 保持一致
+  await loadMcpServerConfig()
   const cfg = loadConfig()
-  if (!cfg.token) return { success: false, skipped: true, message: '未配置 Token' }
-  authToken = cfg.token
+  if (!authToken) authToken = cfg.token
+  if (!authToken) return { success: false, skipped: true, message: '未配置连接' }
   const key = `${itemId}::${cycleNum}`
   const local = getCycleStatusByKey(key)
   if (!local) return { success: false, skipped: true, message: '复习周期不存在' }

@@ -879,18 +879,19 @@
       <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 12px;">
         与 desktop todo calendar 实时同步复习计划和复习状态。
       </p>
-      <div class="setting-row">
-        <span class="setting-label">连接 Token</span>
+      <div class="setting-row" style="align-items: flex-start;">
+        <span class="setting-label">粘贴 MCP 配置</span>
         <el-input
-          v-model="deskCalendarToken"
-          class="desk-token-input"
-          type="password"
-          show-password
-          placeholder="输入 desktop todo calendar 的 MCP Token"
-          @keydown.enter="saveDeskCalendarToken"
-          @change="saveDeskCalendarToken"
+          v-model="deskCalendarMcpJson"
+          type="textarea"
+          :rows="6"
+          class="desk-mcp-input"
+          placeholder='粘贴 desktop todo calendar 的 MCP JSON（Claude Desktop 格式），例如：{"mcpServers":{"desktop_todo_Calendar":{"type":"streamable-http","url":"http://127.0.0.1:17804/mcp","headers":{"Authorization":"Bearer xxx"}}}}}'
         />
-        <el-button size="small" type="primary" @click="saveDeskCalendarToken">保存 Token</el-button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label"></span>
+        <el-button size="small" type="primary" :loading="savingDeskMcp" @click="saveDeskCalendarMcp">保存 MCP 配置</el-button>
       </div>
       <div class="setting-row">
         <span class="setting-label">启用同步</span>
@@ -906,12 +907,37 @@
       </p>
     </div>
 
+    <div id="sec-backup" class="settings-section">
+      <h3>数据备份</h3>
+      <p class="section-desc">
+        一键导出 AI 沉淀记忆、永久记忆、MCP 配置、Skills、自定义工具（手动添加）与大模型配置，打包为单个加密 zip 文件；之后把该 zip 拖入即可自动恢复全部配置。
+      </p>
+      <div class="setting-row">
+        <span class="setting-label">导出备份</span>
+        <el-button size="small" type="primary" :loading="exportingBackup" @click="exportBackup">导出为 zip（需密码）</el-button>
+      </div>
+      <div
+        class="backup-drop-zone"
+        :class="{ dragging: backupDragging }"
+        @dragover.prevent="backupDragging = true"
+        @dragleave.prevent="backupDragging = false"
+        @drop.prevent="onBackupDrop"
+        @click="pickBackupFile"
+      >
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+          <path d="M12 16V4m0 0L7 9m5-5l5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>拖入备份 zip 文件到这里，或点击选择文件导入（需密码）</span>
+      </div>
+      <input ref="backupFileInput" type="file" accept=".zip" style="display: none" @change="onBackupFilePicked" />
+    </div>
+
     <div id="sec-about" class="settings-section">
       <h3>关于</h3>
       <div style="margin-bottom: 12px;">
         <el-button size="small" type="primary" :loading="checkingUpdate" @click="checkUpdate">检查更新</el-button>
       </div>
-      <p>my-mindmap agent v4.11.5</p>
+      <p>my-mindmap agent v4.12.0</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
@@ -1015,7 +1041,7 @@ import { isTrustMode, setTrustMode } from '../utils/trustMode'
 import FeishuPanel from './FeishuPanel.vue'
 import { getMemoryFacts, removeMemoryFact as deleteMemoryFact, clearMemoryFacts, updateMemoryFact } from '../utils/aiMemory'
 import { loadMemory, saveMemory } from '../utils/conversationStore'
-import { isDeskCalendarSyncEnabled, setDeskCalendarSyncEnabled, getDeskCalendarToken, setDeskCalendarToken } from '../services/deskCalendarSync'
+import { isDeskCalendarSyncEnabled, setDeskCalendarSyncEnabled } from '../services/deskCalendarSync'
 import * as cloudSyncService from '../services/cloudSyncService'
 
 const emit = defineEmits(['saved'])
@@ -3118,19 +3144,158 @@ const tocSections = [
   { id: 'sec-integrations', label: '三方集成' },
   { id: 'sec-desk-calendar', label: '同步 desktop todo calendar' },
   { id: 'sec-cloud-sync', label: '云盘同步' },
+  { id: 'sec-backup', label: '数据备份' },
   { id: 'sec-about', label: '关于' }
 ]
 const activeSection = ref('sec-ai-config')
 const settingsViewRef = ref(null)
 const deskCalendarSyncEnabled = ref(false)
-const deskCalendarToken = ref('')
+const deskCalendarMcpJson = ref('')
+const savingDeskMcp = ref(false)
+
 const onDeskCalendarSyncToggle = (value) => {
-  deskCalendarSyncEnabled.value = setDeskCalendarSyncEnabled(!!value, deskCalendarToken.value)
+  deskCalendarSyncEnabled.value = setDeskCalendarSyncEnabled(!!value)
 }
-const saveDeskCalendarToken = () => {
-  const t = deskCalendarToken.value.trim()
-  setDeskCalendarToken(t)
-  ElMessage.success(t ? 'Token 已保存' : 'Token 已清空')
+
+// 解析并保存粘贴的 MCP JSON：自动把 desktop_todo_Calendar 等 MCP 添加到程序（复用/更新同名 MCP）
+const saveDeskCalendarMcp = async () => {
+  const raw = deskCalendarMcpJson.value.trim()
+  if (!raw) { ElMessage.warning('请先粘贴 MCP JSON 配置'); return }
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    ElMessage.error('JSON 格式错误，请检查后重试')
+    return
+  }
+  const servers = parsed?.mcpServers
+  if (!servers || typeof servers !== 'object' || !Object.keys(servers).length) {
+    ElMessage.error('JSON 中缺少 mcpServers 字段')
+    return
+  }
+  savingDeskMcp.value = true
+  try {
+    const existing = await window.electronAPI.mcp.list()
+    let saved = 0
+    for (const [name, cfg] of Object.entries(servers)) {
+      const transport = (cfg?.type || '').toLowerCase().includes('stdio') ? 'stdio' : 'http'
+      const normalized = {
+        name: String(cfg?.name || name).trim(),
+        transport,
+        url: String(cfg?.url || ''),
+        command: String(cfg?.command || ''),
+        args: Array.isArray(cfg?.args) ? cfg.args : [],
+        env: cfg?.env && typeof cfg.env === 'object' ? cfg.env : {},
+        headers: cfg?.headers && typeof cfg.headers === 'object' ? cfg.headers : {},
+        enabled: true
+      }
+      const hit = (existing || []).find(s => s.name === normalized.name || s.id === name)
+      if (hit) {
+        await window.electronAPI.mcp.update(hit.id, normalized)
+      } else {
+        await window.electronAPI.mcp.create(normalized)
+      }
+      saved++
+    }
+    await loadMcp()
+    ElMessage.success(`已保存 ${saved} 个 MCP 配置，复习计划同步将直接使用该 MCP`)
+  } catch (e) {
+    ElMessage.error(`保存 MCP 配置失败：${e.message || e}`)
+  } finally {
+    savingDeskMcp.value = false
+  }
+}
+
+// ========== 数据备份 / 恢复 ==========
+const backupFileInput = ref(null)
+const backupDragging = ref(false)
+const exportingBackup = ref(false)
+
+const exportBackup = async () => {
+  if (exportingBackup.value) return
+  let password = ''
+  try {
+    const { value } = await ElMessageBox.prompt('请输入用于加密备份的密码（导入时需输入同一密码）', '导出备份', {
+      confirmButtonText: '导出',
+      cancelButtonText: '取消',
+      inputType: 'password',
+      inputPlaceholder: '请输入密码（至少 4 位）',
+      inputValidator: (v) => (v && v.trim().length >= 4) || '密码至少 4 位',
+    })
+    password = String(value || '').trim()
+  } catch {
+    return // 用户取消
+  }
+  exportingBackup.value = true
+  try {
+    const res = await window.electronAPI?.backup?.export({ password, memory: loadMemory() })
+    if (res?.success) {
+      ElMessage.success(`备份已导出：${res.filePath}`)
+    } else {
+      ElMessage.error(res?.message || '导出失败')
+    }
+  } catch (e) {
+    ElMessage.error(`导出失败：${e.message || e}`)
+  } finally {
+    exportingBackup.value = false
+  }
+}
+
+// 从文件路径导入（拖入或选择文件后调用）
+const importBackupFromPath = async (filePath) => {
+  if (!filePath) return
+  let password = ''
+  try {
+    const { value } = await ElMessageBox.prompt('请输入该备份文件的解密密码', '导入备份', {
+      confirmButtonText: '导入',
+      cancelButtonText: '取消',
+      inputType: 'password',
+      inputPlaceholder: '请输入导出时设置的密码',
+    })
+    password = String(value || '').trim()
+  } catch {
+    return
+  }
+  try {
+    const res = await window.electronAPI?.backup?.import({ password, zipPath: filePath })
+    if (res?.success) {
+      if (typeof res.memory === 'string') saveMemory(res.memory)
+      ElMessage.success(res.message || '导入成功')
+      // 刷新界面上的配置（模型、记忆等）
+      if (res.memory !== undefined) permanentMemory.value = res.memory
+      await loadSkills()
+      await loadMcp()
+      await loadCustomTools()
+    } else {
+      ElMessage.error(res?.message || '导入失败')
+    }
+  } catch (e) {
+    ElMessage.error(`导入失败：${e.message || e}`)
+  }
+}
+
+const onBackupDrop = (event) => {
+  backupDragging.value = false
+  const file = event.dataTransfer?.files?.[0]
+  if (!file) return
+  const fp = window.electronAPI?.getPathForFile
+    ? window.electronAPI.getPathForFile(file)
+    : (file.path || '')
+  importBackupFromPath(fp)
+}
+
+const pickBackupFile = () => {
+  backupFileInput.value?.click()
+}
+
+const onBackupFilePicked = (event) => {
+  const file = event.target?.files?.[0]
+  if (!file) return
+  const fp = window.electronAPI?.getPathForFile
+    ? window.electronAPI.getPathForFile(file)
+    : (file.path || '')
+  event.target.value = ''
+  importBackupFromPath(fp)
 }
 
 // 手动检查更新（设置页「关于」里的按钮）
@@ -3281,7 +3446,6 @@ onMounted(() => {
   loadSkills()
   loadCustomTools()
   deskCalendarSyncEnabled.value = isDeskCalendarSyncEnabled()
-  deskCalendarToken.value = getDeskCalendarToken()
   cloudSyncForm.value = cloudSyncService.loadConfig()
   nextTick(onSettingsScroll)
 })
@@ -3746,8 +3910,29 @@ onBeforeUnmount(() => {
   font-size: 14px;
   color: #1c1c1e;
 }
-.desk-token-input {
-  width: 300px;
+.backup-drop-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 18px;
+  border: 1.5px dashed #c7c7cc;
+  border-radius: 10px;
+  color: #86868b;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s, color 0.15s;
+}
+.backup-drop-zone:hover,
+.backup-drop-zone.dragging {
+  border-color: var(--apple-blue, #007aff);
+  background-color: rgba(0, 122, 255, 0.05);
+  color: var(--apple-blue, #007aff);
+}
+.desk-mcp-input {
+  width: 460px;
+  max-width: 100%;
 }
 
 /* ---------- 配置档管理栏 ---------- */

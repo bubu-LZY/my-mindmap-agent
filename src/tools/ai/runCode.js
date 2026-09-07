@@ -21,6 +21,8 @@ const READONLY_RUN_CODE_TOOLS = new Set([
   'get_mindmap_info',
   'get_node_detail',
   'query_node_styles',
+  'read_mindmap_file',
+  'read_node_subtree',
   // 节点查询
   'query_nodes',
   'search_nodes',
@@ -69,6 +71,14 @@ const READWRITE_RUN_CODE_TOOLS = new Set([
   'export_to_markdown',
   'export_mindmap_html',
   'export_mindmap_pdf',
+  'export_outline_pdf',
+  'export_subtree',
+  // 导图整体操作（拆分/合并/导入/生成）
+  'split_mindmap',
+  'merge_mindmap_files',
+  'import_file_as_mindmap',
+  'generate_mindmap',
+  'convert_doc_to_mindmap',
 ])
 
 const ALLOWED_RUN_CODE_TOOLS = new Set([

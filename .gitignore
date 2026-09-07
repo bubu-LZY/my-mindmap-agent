@@ -18,6 +18,10 @@ multimodal-models-research/
 # 本地 skills
 skills/
 
+# 工作区临时文件
+.workbuddy/
+.trae-html-share-packages/
+
 # 工具类测试脚本
 tools/test-*.js
 tools/test-*.mjs

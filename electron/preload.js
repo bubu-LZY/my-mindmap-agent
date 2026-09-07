@@ -247,6 +247,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     importFolder: (folderName, files) => ipcRenderer.invoke('customTools:importFolder', { folderName, files })
   },
 
+  // 一键备份 / 恢复（导出 zip / 拖入 zip 导入）
+  backup: {
+    export: (payload) => ipcRenderer.invoke('backup:export', payload),
+    import: (payload) => ipcRenderer.invoke('backup:import', payload),
+    preview: (zipPath) => ipcRenderer.invoke('backup:preview', zipPath),
+  },
+
   // OCR 识别
   ocrImage: (imagePath) => ipcRenderer.invoke('ocr-image', imagePath),
   ocrBase64: (base64Data, lang) => ipcRenderer.invoke('ocr-base64', base64Data, lang),

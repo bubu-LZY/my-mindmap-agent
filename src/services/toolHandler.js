@@ -41,7 +41,7 @@ import { renderSvgFromData } from '../utils/offscreenRender'
 import { safeExportSvg } from '../utils/safeExportSvg'
 import { uploadFileForProvider } from './fileUploadService'
 import { toolRegistry, TIMEOUT_PRESETS } from '../tools/ToolRegistry'
-import { registerAllNewTools, runCodeTool } from '../tools'
+import { registerAllNewTools, runCodeTool, registerLegacyTools } from '../tools'
 
 // 注册所有新版格式工具（如 run_code）
 registerAllNewTools()
@@ -300,6 +300,7 @@ const toolCatalog = [
   { name: 'format_painter', category: 'Style', desc: 'Format painter: copy the source node format onto a target node set; optionally copy text-level styles too' },
   { name: 'merge_mindmap_files', category: 'Mindmap', desc: 'Merge another .smm map file (or a given branch of it) under a node of the current map; cross-file knowledge consolidation' },
   { name: 'export_subtree', category: 'Export', desc: 'Export the selected/given subtree: smm=standalone map file; png/jpg/svg=image (jpg saved as png; saved to default dir and sent into chat); ask the user first if the format is unspecified' },
+  { name: 'split_mindmap', category: 'Mindmap', desc: 'Split one mindmap into MULTIPLE standalone .smm files in the background (by each level-1 branch, or by given uids; can read a file by path without opening it); current canvas untouched' },
   { name: 'export_to_markdown', category: 'Export', desc: 'SMM to Markdown: export the whole map as a .md file (default save dir; can read a file by path without opening it)' },
   { name: 'export_mindmap_html', category: 'Export', desc: 'Map to interactive HTML: single mindmap view, or full-view 3-mode HTML (mindmap+outline+graph); can read a file by path without opening it' },
   { name: 'export_mindmap_pdf', category: 'Export', desc: 'Map to PDF: export the whole mindmap (canvas graphic) as a .pdf file (default save dir)' },
@@ -970,15 +971,16 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'merge_mindmap_files',
-      description: 'Merge another .smm map file (or a given branch of it) under a given node of the current map, for cross-file knowledge consolidation (e.g. merge a chapter of "史纲" into "政治总纲"). Merges a copy; source file unchanged; node uids regenerated to avoid conflicts; NOT undoable with Ctrl+Z — to roll back, do not save and reopen the file.',
+      description: 'Merge ONE or MORE .smm map files (or a given branch of each) under a given node of the current map, for cross-file knowledge consolidation (e.g. merge chapters into a master map). Merges a copy; source files unchanged; node uids regenerated to avoid conflicts; NOT undoable with Ctrl+Z. Pass sourceFilePath for a single file, or sourceFilePaths (array) to batch-merge multiple files in one call.',
       parameters: {
         type: 'object',
         properties: {
           sourceFilePath: { type: 'string', description: 'Source .smm file path (find it via search_knowledge_base first)' },
+          sourceFilePaths: { type: 'array', items: { type: 'string' }, description: 'Array of source .smm file paths to batch-merge (all merged under the target node in one call)' },
           sourceNodeUid: { type: 'string', description: 'Optional: merge only the subtree of this uid in the source file; omit = all level-1 branches under the source root' },
           targetUid: { type: 'string', description: 'Optional: merge under this node of the current map; omit = under root' }
         },
-        required: ['sourceFilePath']
+        required: []
       }
     }
   },
@@ -996,6 +998,21 @@ export const aiTools = [
           open_folder: { type: 'boolean', description: 'true = reveal the exported file in the system file explorer after saving' }
         },
         required: ['format']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'split_mindmap',
+      description: 'Split one mindmap into MULTIPLE standalone .smm files in the background (does NOT switch/open the current canvas). By default splits by each level-1 branch (each branch becomes one .smm file); pass uids to split only specific subtrees. Pass file_path to split a .smm file by path without opening it. Returns the list of saved file paths.',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Optional absolute path of a .smm file to split. Omit to split the currently open map.' },
+          uids: { type: 'array', items: { type: 'string' }, description: 'Optional: only split the subtrees rooted at these node uids; omit = split every level-1 branch' },
+          save_dir: { type: 'string', description: 'Optional target directory; omit = default save dir' }
+        }
       }
     }
   },
@@ -1102,12 +1119,13 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'export_to_markdown',
-      description: 'Convert a mindmap (SMM doc) to a Markdown file saved to the default save dir. By default exports the currently open map; pass file_path to export any .smm file WITHOUT opening it (MCP/external calls). Use when the user says SMM转markdown/导出markdown/转成md文件. Returns the saved path and a content preview.',
+      description: 'Convert one or MORE mindmaps (SMM) to Markdown files saved to the default save dir. By default exports the currently open map; pass file_path for a single .smm file, or file_paths (array) to batch-convert multiple .smm files WITHOUT opening them. Use when the user says SMM转markdown/批量转markdown/导出markdown/转成md文件. Returns the saved paths.',
       parameters: {
         type: 'object',
         properties: {
-          file_name: { type: 'string', description: 'File name (no extension); default = root node text' },
-          file_path: { type: 'string', description: 'Optional absolute path of a .smm file to export. Omit to export the currently open map.' }
+          file_name: { type: 'string', description: 'File name (no extension); default = root node text (single-file mode only)' },
+          file_path: { type: 'string', description: 'Optional absolute path of a .smm file to export. Omit to export the currently open map.' },
+          file_paths: { type: 'array', items: { type: 'string' }, description: 'Optional array of .smm file paths to batch-convert to Markdown (background, no canvas switch)' }
         }
       }
     }
@@ -2522,15 +2540,16 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'import_file_as_mindmap',
-      description: 'Import an external-format file as a mindmap and save it as .smm: supports Markdown(.md), OPML outline(.opml), FreeMind(.mm), XMind(.xmind), plain text(.txt, split into nodes per line). Use when the user says import / convert to a map / turn this file into a mindmap — instead of hand-copying content with generate_mindmap.',
+      description: 'Import external-format files as mindmaps and save each as .smm: supports Markdown(.md), OPML outline(.opml), FreeMind(.mm), XMind(.xmind), plain text(.txt, split into nodes per line). Pass file_path for a SINGLE file, or file_paths (array) to batch-convert MULTIPLE files — each file becomes its OWN .smm file (background, canvas untouched unless open=true). Use when the user says import / batch convert md to map / turn these files into mindmaps.',
       parameters: {
         type: 'object',
         properties: {
-          file_path: { type: 'string', description: 'Absolute source file path' },
+          file_path: { type: 'string', description: 'Absolute source file path (single file)' },
+          file_paths: { type: 'array', items: { type: 'string' }, description: 'Array of source file paths; each file is imported and saved as its OWN .smm file (batch mode)' },
           open: { type: 'boolean', description: 'true=load onto the current canvas right after import (replaces canvas content; unsaved content is lost — use with care); default false = only save the .smm file, canvas untouched' },
           save_dir: { type: 'string', description: 'Save directory (default: the folder of the source file)' }
         },
-        required: ['file_path']
+        required: []
       }
     }
   },
@@ -2684,6 +2703,7 @@ export const TOOL_NAME_MAP = {
   export_mindmap_pdf: '导出导图 PDF',
   export_outline_pdf: '导出大纲 PDF',
   export_subtree: '导出子树',
+  split_mindmap: '拆分导图',
   merge_mindmap_files: '合并导图文件',
   clear_mindmap: '清空导图',
   clear_cloze: '清除挖空',
@@ -3833,6 +3853,27 @@ export async function handleToolCall(toolCall, mindMap, activeNode, extraHandler
   return handleToolCallInner(toolCall, mindMap, activeNode, extraHandlers)
 }
 
+// ===== 把旧版工具桥接注册到 ToolRegistry =====
+// run_code 等新版工具在 worker 内通过 toolRegistry.call() 调用其它工具；
+// 旧版工具（export_to_markdown 等）此前只存在于 switch-case，未注册到 ToolRegistry，
+// 导致 run_code 内调用时报「未知工具」。这里一次性桥接注册，让新版工具能复用旧版工具。
+let _legacyBridgeRegistered = false
+function ensureLegacyToolsRegistered() {
+  if (_legacyBridgeRegistered) return
+  _legacyBridgeRegistered = true
+  try {
+    const categoryMap = {}
+    for (const t of toolCatalog) categoryMap[t.name] = t.category
+    registerLegacyTools(aiTools, handleToolCall, {
+      dangerousMap: DANGEROUS_TOOLS,
+      categoryMap
+    })
+  } catch (e) {
+    console.error('注册旧版工具到 ToolRegistry 失败:', e)
+  }
+}
+ensureLegacyToolsRegistered()
+
 async function handleToolCallInner(toolCall, mindMap, activeNode, extraHandlers = {}) {
   const name = toolCall.function.name
   let args = normalizeToolArgs(name, parseToolCallArgs(toolCall.function.arguments))
@@ -4067,7 +4108,8 @@ ${mindMapTypePrompt(mapType, 'organize')}
           filePath,
           fileName,
           nodes: uidMap.nodes,
-          switchFile: !!filePath
+          externalFile: true,
+          switchFile: false
         }
       } catch (e) {
         console.error('generate_mindmap error:', e)
@@ -5230,7 +5272,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const sheet = { id: 'sheet1', class: 'sheet', title: rootText, rootTopic: toTopic(treeData) }
           const zip = new JSZip()
           zip.file('content.json', JSON.stringify([sheet]))
-          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.11.5' } }))
+          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.12.0' } }))
           const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
           if (!window.electronAPI?.saveBinaryFile) return { success: false, message: '文件保存功能不可用' }
           const r = await window.electronAPI.saveBinaryFile(fileName, base64)
@@ -6872,37 +6914,14 @@ ${block}`
     case 'merge_mindmap_files': {
       try {
         if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
-        const srcPath = (args.sourceFilePath || '').trim()
-        if (!srcPath) return { success: false, message: '请提供 sourceFilePath' }
         if (!window.electronAPI?.fs?.readFile) return { success: false, message: '文件读取功能不可用' }
-        const content = await window.electronAPI.fs.readFile(srcPath)
-        let srcTree
-        try {
-          srcTree = JSON.parse(content)
-        } catch {
-          return { success: false, message: '源文件不是有效的 .smm 导图（JSON 解析失败）' }
+        // 收集源文件路径：sourceFilePaths 数组优先，否则 sourceFilePath 单个
+        let srcPaths = Array.isArray(args.sourceFilePaths) ? args.sourceFilePaths.map(p => String(p || '').trim()).filter(Boolean) : []
+        if (!srcPaths.length) {
+          const single = String(args.sourceFilePath || '').trim()
+          if (single) srcPaths = [single]
         }
-        if (!srcTree || !srcTree.data) return { success: false, message: '源文件缺少节点数据' }
-
-        // 定位源子树
-        let srcRoots = []
-        if (args.sourceNodeUid) {
-          const findIn = (n) => {
-            if (!n) return null
-            if (n.data?.uid === args.sourceNodeUid) return n
-            for (const c of n.children || []) {
-              const r = findIn(c)
-              if (r) return r
-            }
-            return null
-          }
-          const hit = findIn(srcTree)
-          if (!hit) return { success: false, message: `源文件中未找到 uid=${args.sourceNodeUid} 的节点` }
-          srcRoots = [hit]
-        } else {
-          srcRoots = (srcTree.children || []).filter(c => c && c.data)
-          if (!srcRoots.length) return { success: false, message: '源导图没有一级分支可合并' }
-        }
+        if (!srcPaths.length) return { success: false, message: '请提供 sourceFilePath（单个）或 sourceFilePaths（数组）' }
 
         // 深拷贝 + 重新生成全部 uid（避免与当前导图冲突）
         const cloneRenew = (n) => {
@@ -6921,6 +6940,31 @@ ${block}`
           return copy
         }
 
+        // 读取单个源文件并返回要合并的子树根集合
+        const collectSrcRoots = async (srcPath) => {
+          const content = await window.electronAPI.fs.readFile(srcPath)
+          if (!content) throw new Error(`无法读取文件：${srcPath}`)
+          let srcTree
+          try { srcTree = JSON.parse(content) } catch { throw new Error(`源文件不是有效的 .smm 导图：${srcPath}`) }
+          if (!srcTree || !srcTree.data) throw new Error(`源文件缺少节点数据：${srcPath}`)
+          let roots = []
+          if (args.sourceNodeUid) {
+            const findIn = (n) => {
+              if (!n) return null
+              if (n.data?.uid === args.sourceNodeUid) return n
+              for (const c of n.children || []) { const r = findIn(c); if (r) return r }
+              return null
+            }
+            const hit = findIn(srcTree)
+            if (!hit) throw new Error(`源文件中未找到 uid=${args.sourceNodeUid} 的节点`)
+            roots = [hit]
+          } else {
+            roots = (srcTree.children || []).filter(c => c && c.data)
+            if (!roots.length) throw new Error(`源导图没有一级分支可合并：${srcPath}`)
+          }
+          return roots
+        }
+
         // 目标节点（数据树定位）
         const treeData = mindMap.getData()
         let targetData = treeData
@@ -6928,17 +6972,27 @@ ${block}`
           const findData = (n) => {
             if (!n) return null
             if (n.data?.uid === args.targetUid) return n
-            for (const c of n.children || []) {
-              const r = findData(c)
-              if (r) return r
-            }
+            for (const c of n.children || []) { const r = findData(c); if (r) return r }
             return null
           }
           targetData = findData(treeData)
           if (!targetData) return { success: false, message: `当前导图中未找到 uid=${args.targetUid} 的目标节点` }
         }
         targetData.children = targetData.children || []
-        for (const src of srcRoots) targetData.children.push(cloneRenew(src))
+
+        // 逐个源文件合并（读取失败的文件记录错误，不影响其它文件）
+        let mergedBranchCount = 0
+        const errors = []
+        for (const srcPath of srcPaths) {
+          try {
+            const roots = await collectSrcRoots(srcPath)
+            for (const src of roots) targetData.children.push(cloneRenew(src))
+            mergedBranchCount += roots.length
+          } catch (e) {
+            errors.push(`${srcPath}：${e.message}`)
+          }
+        }
+        if (!mergedBranchCount) return { success: false, message: `合并失败：${errors.join('；') || '没有可合并的分支'}` }
 
         mindMap.setData(treeData)
         applyClozeStyles()
@@ -6948,10 +7002,10 @@ ${block}`
         if (targetLive && typeof mindMap.renderer.moveNodeToCenter === 'function') {
           mindMap.renderer.moveNodeToCenter(targetLive)
         }
-        const srcName = srcPath.replace(/^.*[\\/]/, '')
         return {
           success: true,
-          message: `已把「${srcName}」的 ${srcRoots.length} 个分支合并到「${nodePlainText(targetData.data?.text || '').slice(0, 30) || '根节点'}」下（副本合并，源文件不变；已重新生成节点 uid。注意：合并操作不可用 Ctrl+Z 撤销，如需回退请勿保存并重新打开文件）`
+          message: `已把 ${srcPaths.length} 个源导图的 ${mergedBranchCount} 个分支合并到「${nodePlainText(targetData.data?.text || '').slice(0, 30) || '根节点'}」下（副本合并，源文件不变；已重新生成节点 uid。注意：合并操作不可用 Ctrl+Z 撤销，如需回退请勿保存并重新打开文件）` +
+            (errors.length ? `\n\n部分文件失败：\n${errors.join('\n')}` : '')
         }
       } catch (e) {
         return { success: false, message: `合并导图失败: ${e.message}` }
@@ -7061,6 +7115,100 @@ ${block}`
         }
       } catch (e) {
         return { success: false, message: `导出子树失败: ${e.message}` }
+      }
+    }
+
+    case 'split_mindmap': {
+      try {
+        if (!window.electronAPI?.saveFile) return { success: false, message: '文件保存功能不可用' }
+        // 数据来源：优先 file_path/filePath 直接读文件（后台拆分，不切换前端画布）；否则用当前打开的导图
+        let treeData
+        const fp = String(args.file_path || args.filePath || '').trim()
+        if (fp) {
+          if (!window.electronAPI?.fs?.readFile) return { success: false, message: '文件系统不可用' }
+          const content = await window.electronAPI.fs.readFile(fp)
+          if (!content) return { success: false, message: `无法读取文件：${fp}` }
+          try { treeData = JSON.parse(content) } catch { return { success: false, message: `文件格式错误（不是有效的 .smm 文件）：${fp}` } }
+        } else {
+          if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先用 find_local_file(exts=["smm"]) 搜索本地导图文件，再用 split_mindmap(file_path=...) 直接拆分。' }
+          treeData = mindMap.getData()
+        }
+        treeData = Array.isArray(treeData) ? treeData[0] : treeData
+        if (!treeData || !treeData.data) return { success: false, message: '导图数据为空，无法拆分' }
+
+        // 重建 uid + 深拷贝（每个拆分出的子导图都是独立副本）
+        const cloneRenew = (n) => {
+          const copy = JSON.parse(JSON.stringify(n))
+          const renew = (node) => {
+            if (node.data) {
+              node.data.uid = createUid()
+              node.data.richText = true
+              if (!node.data.text || !String(node.data.text).startsWith('<')) {
+                node.data.text = `<p><span>${String(node.data.text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</span></p>`
+              }
+            }
+            ;(node.children || []).forEach(renew)
+          }
+          renew(copy)
+          return copy
+        }
+
+        // 确定要拆分的子树根集合：按一级分支（默认）或按指定 uids
+        let roots = []
+        if (Array.isArray(args.uids) && args.uids.length) {
+          const findNode = (n) => {
+            if (!n) return null
+            if (n.data?.uid === undefined) return null
+            if (args.uids.includes(n.data.uid)) return n
+            for (const c of n.children || []) {
+              const r = findNode(c)
+              if (r) return r
+            }
+            return null
+          }
+          for (const uid of args.uids) {
+            const hit = findNode(treeData)
+            if (hit) roots.push(hit)
+          }
+          if (!roots.length) return { success: false, message: '未在导图中找到指定的 uids 节点' }
+        } else {
+          roots = (treeData.children || []).filter(c => c && c.data)
+          if (!roots.length) return { success: false, message: '导图没有一级分支可拆分' }
+        }
+
+        // 逐分支生成独立 .smm（后台保存，不打开、不切换画布）
+        const saved = []
+        const saveDir = String(args.save_dir || '').replace(/[\\/]+$/, '')
+        for (const root of roots) {
+          const branch = cloneRenew(root)
+          const branchRootText = nodePlainText(branch?.data?.text || '') || '分支'
+          const safeName = branchRootText.replace(/[<>:"/\\|?*]/g, '_').slice(0, 50)
+          const fileName = `${safeName}.smm`
+          const target = saveDir ? saveDir + (/\\/.test(saveDir) ? '\\' : '/') + fileName : fileName
+          const saveData = JSON.stringify(branch, null, 2)
+          const r = await window.electronAPI.saveFile(target, saveData, { overwrite: true })
+          if (r && r.success) {
+            saved.push({ fileName, filePath: r.filePath, nodeCount: countNodes(branch) })
+          } else {
+            saved.push({ fileName, error: r?.error || '保存失败' })
+          }
+        }
+
+        const ok = saved.filter(s => s.filePath)
+        const failed = saved.filter(s => !s.filePath)
+        const summary = `已把「${nodePlainText(treeData.data?.text || '').slice(0, 30) || '导图'}」拆分为 ${saved.length} 个独立导图（后台保存，未影响当前画布）：\n` +
+          ok.map(s => `- ${s.fileName}（${s.nodeCount} 个节点）：${s.filePath}`).join('\n') +
+          (failed.length ? `\n\n失败 ${failed.length} 个：\n` + failed.map(s => `- ${s.fileName}：${s.error}`).join('\n') : '')
+        return {
+          success: true,
+          message: summary,
+          filePaths: ok.map(s => s.filePath),
+          files: saved,
+          externalFile: true,
+          switchFile: false
+        }
+      } catch (e) {
+        return { success: false, message: `拆分导图失败: ${e.message}` }
       }
     }
 
@@ -8578,115 +8726,146 @@ ${block}`
 
     case 'import_file_as_mindmap': {
       try {
-        let filePath = String(args.file_path || args.filePath || '').trim()
-        if (!filePath) return { success: false, message: '请提供 file_path（源文件绝对路径）' }
         if (!window.electronAPI?.fs?.readFile) {
           return { success: false, message: '文件系统不可用' }
         }
-        // 相对路径（如 test-assets\xx.md）按主进程工作目录绝对化，保证后续保存目录计算正确
-        filePath = await toAbsPath(filePath) || filePath
-        const exists = await window.electronAPI.fs.exists(filePath)
-        if (!exists) {
-          const baseName = filePath.split(/[/\\]/).pop().replace(/\.[^.]+$/, '')
-          return { success: false, message: `文件不存在：${filePath}。禁止继续猜测其他路径（每台电脑的用户名和目录都不同），请立即调用 find_local_file(keyword="${baseName}") 在当前电脑的常用目录中搜索定位，再用返回的 path 导入` }
+        // 收集源文件路径：file_paths 数组优先，否则 file_path 单个
+        let filePaths = Array.isArray(args.file_paths) ? args.file_paths.map(p => String(p || '').trim()).filter(Boolean) : []
+        if (!filePaths.length) {
+          const single = String(args.file_path || args.filePath || '').trim()
+          if (single) filePaths = [single]
         }
+        if (!filePaths.length) return { success: false, message: '请提供 file_path（单个）或 file_paths（数组）' }
 
-        const ext = filePath.split('.').pop().toLowerCase()
-        const fileName = filePath.split(/[/\\]/).pop()
-        const baseName = fileName.replace(/\.[^.]+$/, '')
-        let treeData = null
-        let fmtLabel = ''
-
-        if (ext === 'smm') {
-          return { success: false, message: '该文件本身就是思维导图（.smm），无需导入。可直接在文件树中打开。' }
-        } else if (ext === 'md' || ext === 'markdown' || ext === 'txt') {
-          const content = await window.electronAPI.fs.readFile(filePath)
-          treeData = parseMarkdownToTree(content)
-          // 解析器无结构输入时根节点是占位名（空导图/思维导图），替换为文件名
-          const rootPlain = String(treeData?.data?.text || '').replace(/<[^>]+>/g, '').trim()
-          if (!rootPlain || rootPlain === '空导图' || rootPlain === '思维导图') {
-            const safeRoot = baseName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-            treeData.data.text = `<p><span>${safeRoot}</span></p>`
+        // 单文件导入核心：解析 + 保存 .smm，返回结果对象（不切换画布，除非 open=true 且为单文件）
+        const importOne = async (rawPath, { openOnCanvas }) => {
+          let filePath = String(rawPath || '').trim()
+          filePath = await toAbsPath(filePath) || filePath
+          const exists = await window.electronAPI.fs.exists(filePath)
+          if (!exists) {
+            const baseName = filePath.split(/[/\\]/).pop().replace(/\.[^.]+$/, '')
+            return { success: false, message: `文件不存在：${filePath}。禁止继续猜测其他路径（每台电脑的用户名和目录都不同），请立即调用 find_local_file(keyword="${baseName}") 在当前电脑的常用目录中搜索定位，再用返回的 path 导入` }
           }
-          fmtLabel = ext === 'txt' ? '纯文本（按行转节点）' : 'Markdown'
-        } else if (ext === 'opml' || ext === 'xml') {
-          const content = await window.electronAPI.fs.readFile(filePath)
-          const res = parseOpmlToTree(content, baseName)
-          if (!res.success) return { success: false, message: res.error }
-          treeData = res.tree
-          fmtLabel = 'OPML 大纲'
-        } else if (ext === 'mm') {
-          const content = await window.electronAPI.fs.readFile(filePath)
-          const res = parseFreemindToTree(content, baseName)
-          if (!res.success) return { success: false, message: res.error }
-          treeData = res.tree
-          fmtLabel = 'FreeMind'
-        } else if (ext === 'xmind') {
-          if (!window.electronAPI?.openFile) return { success: false, message: '文件系统不可用' }
-          const opened = await window.electronAPI.openFile(filePath)
-          if (!opened.success || !opened.isXmind) {
-            return { success: false, message: `读取 XMind 文件失败: ${opened.error || '不是有效的 .xmind 文件'}` }
+
+          const ext = filePath.split('.').pop().toLowerCase()
+          const fileName = filePath.split(/[/\\]/).pop()
+          const baseName = fileName.replace(/\.[^.]+$/, '')
+          let treeData = null
+          let fmtLabel = ''
+
+          if (ext === 'smm') {
+            return { success: false, message: `「${fileName}」本身就是思维导图（.smm），无需导入` }
+          } else if (ext === 'md' || ext === 'markdown' || ext === 'txt') {
+            const content = await window.electronAPI.fs.readFile(filePath)
+            treeData = parseMarkdownToTree(content)
+            const rootPlain = String(treeData?.data?.text || '').replace(/<[^>]+>/g, '').trim()
+            if (!rootPlain || rootPlain === '空导图' || rootPlain === '思维导图') {
+              const safeRoot = baseName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+              treeData.data.text = `<p><span>${safeRoot}</span></p>`
+            }
+            fmtLabel = ext === 'txt' ? '纯文本（按行转节点）' : 'Markdown'
+          } else if (ext === 'opml' || ext === 'xml') {
+            const content = await window.electronAPI.fs.readFile(filePath)
+            const res = parseOpmlToTree(content, baseName)
+            if (!res.success) return { success: false, message: res.error }
+            treeData = res.tree
+            fmtLabel = 'OPML 大纲'
+          } else if (ext === 'mm') {
+            const content = await window.electronAPI.fs.readFile(filePath)
+            const res = parseFreemindToTree(content, baseName)
+            if (!res.success) return { success: false, message: res.error }
+            treeData = res.tree
+            fmtLabel = 'FreeMind'
+          } else if (ext === 'xmind') {
+            if (!window.electronAPI?.openFile) return { success: false, message: '文件系统不可用' }
+            const opened = await window.electronAPI.openFile(filePath)
+            if (!opened.success || !opened.isXmind) {
+              return { success: false, message: `读取 XMind 文件失败: ${opened.error || '不是有效的 .xmind 文件'}` }
+            }
+            treeData = await parseXmindBase64(opened.data, fileName)
+            if (!treeData) return { success: false, message: 'XMind 文件解析失败（可能版本过旧或结构特殊）' }
+            fmtLabel = 'XMind'
+          } else {
+            return { success: false, message: `不支持的导入格式 .${ext}（${fileName}）。支持：md / txt / opml / mm(FreeMind) / xmind` }
           }
-          treeData = await parseXmindBase64(opened.data, fileName)
-          if (!treeData) return { success: false, message: 'XMind 文件解析失败（可能版本过旧或结构特殊）' }
-          fmtLabel = 'XMind'
-        } else {
-          return { success: false, message: `不支持的导入格式 .${ext}。支持：md / txt / opml / mm(FreeMind) / xmind` }
-        }
 
-        ensureRichText(treeData)
-        const nodeCount = countNodes(treeData)
-        if (nodeCount < 1) return { success: false, message: '解析后没有有效节点，导入中止' }
+          ensureRichText(treeData)
+          const nodeCount = countNodes(treeData)
+          if (nodeCount < 1) return { success: false, message: '解析后没有有效节点，导入中止' }
 
-        // 保存 .smm：三级回落（指定目录 → 源文件所在目录 → 默认保存目录），失败时透传真实错误
-        const rootText = String(treeData.data.text || '').replace(/<[^>]+>/g, '').trim() || baseName
-        const safeName = rootText.replace(/[<>:"/\\|?*]/g, '_').slice(0, 50)
-        const outName = `${safeName}.smm`
-        const saveData = JSON.stringify(treeData, null, 2)
-        const candidateDirs = ['']
-        let savedPath = null
-        const saveErrors = []
-        if (window.electronAPI?.saveFile) {
-          for (const dir of candidateDirs) {
-            const target = dir
-              ? dir.replace(/[\\/]+$/, '') + (/\\/.test(dir) ? '\\' : '/') + outName
-              : outName
+          const rootText = String(treeData.data.text || '').replace(/<[^>]+>/g, '').trim() || baseName
+          const safeName = rootText.replace(/[<>:"/\\|?*]/g, '_').slice(0, 50)
+          const outName = `${safeName}.smm`
+          const saveData = JSON.stringify(treeData, null, 2)
+          let savedPath = null
+          const saveErrors = []
+          if (window.electronAPI?.saveFile) {
             try {
-              const r = await window.electronAPI.saveFile(target, saveData)
-              if (r && r.success) {
-                savedPath = r.filePath
-                break
-              }
-              if (r && r.error) saveErrors.push(`${target} → ${r.error}`)
+              const r = await window.electronAPI.saveFile(outName, saveData)
+              if (r && r.success) savedPath = r.filePath
+              else if (r && r.error) saveErrors.push(`${outName} → ${r.error}`)
             } catch (e) {
-              saveErrors.push(`${target} → ${e.message}`)
+              saveErrors.push(`${outName} → ${e.message}`)
             }
           }
-        }
 
-        let extra = ''
-        if (args.open) {
-          if (!mindMap) {
-            extra = '（画布不可用，未能打开）'
-          } else {
+          if (openOnCanvas && mindMap) {
             mindMap.setData(treeData)
-            extra = '，已加载到当前画布（如需撤销可 Ctrl+Z）'
+          }
+
+          const uidMap = buildUidMap(treeData)
+          return {
+            success: true,
+            filePath: savedPath,
+            fileName: outName,
+            sourceName: fileName,
+            fmtLabel,
+            nodeCount,
+            nodes: uidMap.nodes,
+            saveErrors: saveErrors.length ? saveErrors : undefined
           }
         }
 
-        const uidMap = buildUidMap(treeData)
-        const uidSection = uidMap.text
-          ? `\n\n节点UID清单（可直接用于 batch_node_actions / select_node 的 uids 参数）：\n${uidMap.text}${uidMap.truncated ? `\n（共 ${uidMap.total} 个节点，以上仅列出前 ${uidMap.nodes.length} 个，其余用 search_nodes 定位）` : ''}`
-          : ''
+        // 批量模式
+        if (filePaths.length > 1) {
+          const results = []
+          for (const p of filePaths) {
+            try {
+              const r = await importOne(p, { openOnCanvas: false })
+              results.push({ sourcePath: p, ...r })
+            } catch (e) {
+              results.push({ sourcePath: p, success: false, message: e.message })
+            }
+          }
+          const ok = results.filter(r => r.success)
+          const failed = results.filter(r => !r.success)
+          const summary = `已批量导入 ${filePaths.length} 个文件为思维导图（后台保存，未打开任何文件）：\n` +
+            ok.map(r => `- ${r.sourceName} → ${r.fileName}（${r.nodeCount} 个节点）：${r.filePath}`).join('\n') +
+            (failed.length ? `\n\n失败 ${failed.length} 个：\n` + failed.map(r => `- ${r.sourcePath}：${r.message}`).join('\n') : '')
+          return {
+            success: ok.length > 0,
+            message: summary,
+            filePaths: ok.map(r => r.filePath),
+            files: results,
+            externalFile: true,
+            switchFile: false
+          }
+        }
 
+        // 单文件模式
+        const r = await importOne(filePaths[0], { openOnCanvas: args.open === true })
+        if (!r.success) return r
+        const extra = args.open === true && mindMap ? '，已加载到当前画布（如需撤销可 Ctrl+Z）' : ''
         return {
           success: true,
-          message: `已导入${fmtLabel}文件"${fileName}"为思维导图：${nodeCount} 个节点${savedPath ? `，已保存为 ${savedPath}` : `（保存失败，内容已在内存中。真实原因：${saveErrors.join('；') || '文件系统不可用'}）`}${extra}${uidSection}`,
-          filePath: savedPath,
-          fileName: outName,
-          nodeCount,
-          nodes: uidMap.nodes,
-          saveErrors: saveErrors.length ? saveErrors : undefined
+          message: `已导入${r.fmtLabel}文件"${r.sourceName}"为思维导图：${r.nodeCount} 个节点${r.filePath ? `，已保存为 ${r.filePath}` : `（保存失败：${(r.saveErrors || []).join('；') || '文件系统不可用'}）`}${extra}`,
+          filePath: r.filePath,
+          fileName: r.fileName,
+          nodeCount: r.nodeCount,
+          nodes: r.nodes,
+          externalFile: true,
+          switchFile: false,
+          saveErrors: r.saveErrors
         }
       } catch (e) {
         return { success: false, message: `导入失败: ${e.message}` }
@@ -9218,33 +9397,75 @@ ${block}`
         if (!window.electronAPI?.saveFile) {
           return { success: false, message: '文件保存接口不可用（需在应用内运行）' }
         }
-        // 数据来源：优先 file_path 直接读文件（脱离当前打开的导图）；否则用当前打开的导图
+        const mod = await import('simple-mind-map/src/parse/markdown.js')
+        const markdown = mod.default || mod
+
+        // 单文件转换：读数据 → 转 Markdown → 保存
+        const convertOne = async (treeData, explicitName) => {
+          const d = Array.isArray(treeData) ? treeData[0] : treeData
+          const rootText = nodePlainText(d?.data?.text || d?.text || '')
+          const safeName = String(explicitName || rootText || '思维导图').slice(0, 40).replace(/[\\/:*?"<>|]/g, '_').trim() || '思维导图'
+          const mdText = markdown.transformToMarkdown(d)
+          if (!mdText) return { success: false, message: `「${safeName}」Markdown 转换结果为空` }
+          const result = await window.electronAPI.saveFile(`${safeName}.md`, mdText, { overwrite: true })
+          if (!result?.success) return { success: false, message: `保存失败：${result?.error || '未知错误'}` }
+          return { success: true, filePath: result.filePath, fileName: `${safeName}.md`, preview: mdText.split('\n').slice(0, 8).join('\n'), totalLines: mdText.split('\n').length }
+        }
+
+        // 批量模式：file_paths 数组
+        const batchPaths = Array.isArray(args.file_paths) ? args.file_paths.map(p => String(p || '').trim()).filter(Boolean) : []
+        if (batchPaths.length) {
+          if (!window.electronAPI?.fs?.readFile) return { success: false, message: '文件系统不可用' }
+          const results = []
+          for (const p of batchPaths) {
+            try {
+              const content = await window.electronAPI.fs.readFile(p)
+              if (!content) { results.push({ filePath: p, success: false, message: '无法读取文件' }); continue }
+              let data
+              try { data = JSON.parse(content) } catch { results.push({ filePath: p, success: false, message: '不是有效的 .smm 文件' }); continue }
+              // 批量导出用源文件名（去扩展名）命名，避免多个导图根节点同名时互相覆盖
+              const baseName = p.split(/[/\\]/).pop().replace(/\.smm$/i, '')
+              const r = await convertOne(data, baseName)
+              results.push({ filePath: p, ...r })
+            } catch (e) {
+              results.push({ filePath: p, success: false, message: e.message })
+            }
+          }
+          const ok = results.filter(r => r.success)
+          const failed = results.filter(r => !r.success)
+          const summary = `已批量转换 ${results.length} 个导图为 Markdown（后台操作，未打开任何文件）：\n` +
+            ok.map(r => `- ${r.fileName}：${r.filePath}`).join('\n') +
+            (failed.length ? `\n\n失败 ${failed.length} 个：\n` + failed.map(r => `- ${r.filePath}：${r.message}`).join('\n') : '')
+          return {
+            success: ok.length > 0,
+            message: summary,
+            filePaths: ok.map(r => r.filePath),
+            files: results,
+            externalFile: true,
+            switchFile: false
+          }
+        }
+
+        // 单文件模式
         let data = null
-        if (args.file_path) {
-          const fp = String(args.file_path).trim()
+        const fp = String(args.file_path || args.filePath || '').trim()
+        if (fp) {
           if (!window.electronAPI?.fs?.readFile) return { success: false, message: '文件系统不可用' }
           const content = await window.electronAPI.fs.readFile(fp)
           if (!content) return { success: false, message: `无法读取文件：${fp}` }
           try { data = JSON.parse(content) } catch { return { success: false, message: `文件格式错误（不是有效的 .smm 文件）：${fp}` } }
         } else {
-          if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先用 list_directory(recursive=true) 或 find_local_file 找到 .smm 文件，再用 export_to_markdown(file_path=...) 直接导出，无需打开。' }
+          if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先用 list_directory(recursive=true) 或 find_local_file 找到 .smm 文件，再用 export_to_markdown(file_path=...) 或 export_to_markdown(file_paths=[...]) 直接导出，无需打开。' }
           data = mindMap.getData()
         }
-        data = Array.isArray(data) ? data[0] : data
-        const rootText = nodePlainText(data?.data?.text || data?.text || '')
-        const safeName = String(args.file_name || rootText || '思维导图').slice(0, 40).replace(/[\\/:*?"<>|]/g, '_').trim() || '思维导图'
-
-        const mod = await import('simple-mind-map/src/parse/markdown.js')
-        const markdown = mod.default || mod
-        const mdText = markdown.transformToMarkdown(data)
-        if (!mdText) return { success: false, message: 'Markdown 转换结果为空' }
-        const result = await window.electronAPI.saveFile(`${safeName}.md`, mdText, { overwrite: true })
-        if (!result?.success) return { success: false, message: `保存失败：${result?.error || '未知错误'}` }
-        const preview = mdText.split('\n').slice(0, 8).join('\n')
+        const r = await convertOne(data, args.file_name || args.fileName)
+        if (!r.success) return r
         return {
           success: true,
-          message: `已导出 Markdown：${result.filePath}\n\n内容预览：\n${preview}${mdText.split('\n').length > 8 ? '\n…' : ''}`,
-          filePath: result.filePath
+          message: `已导出 Markdown：${r.filePath}\n\n内容预览：\n${r.preview}${r.totalLines > 8 ? '\n…' : ''}`,
+          filePath: r.filePath,
+          externalFile: true,
+          switchFile: false
         }
       } catch (e) {
         return { success: false, message: `导出失败: ${e.message}` }
@@ -9256,11 +9477,11 @@ ${block}`
         if (!window.electronAPI?.saveFile) {
           return { success: false, message: '文件保存接口不可用（需在应用内运行）' }
         }
-        // 数据来源：优先 file_path 直接读文件（脱离当前打开的导图）；否则用当前打开的导图
+        // 数据来源：优先 file_path/filePath 直接读文件（脱离当前打开的导图，后台离屏渲染，不切换前端画布）；否则用当前打开的导图
         let data = null
         let useOffscreen = false
-        if (args.file_path) {
-          const fp = String(args.file_path).trim()
+        const fp = String(args.file_path || args.filePath || '').trim()
+        if (fp) {
           if (!window.electronAPI?.fs?.readFile) return { success: false, message: '文件系统不可用' }
           const content = await window.electronAPI.fs.readFile(fp)
           if (!content) return { success: false, message: `无法读取文件：${fp}` }
@@ -9272,7 +9493,7 @@ ${block}`
         }
         data = Array.isArray(data) ? data[0] : data
         const rootText = nodePlainText(data?.data?.text || data?.text || '')
-        const safeName = String(args.file_name || rootText || '思维导图').slice(0, 40).replace(/[\\/:*?"<>|]/g, '_').trim() || '思维导图'
+        const safeName = String(args.file_name || args.fileName || rootText || '思维导图').slice(0, 40).replace(/[\\/:*?"<>|]/g, '_').trim() || '思维导图'
         const mode = args.mode === 'full' ? 'full' : 'single'
 
         // 生成 SVG：离屏渲染（file_path 或当前无实例时）或复用当前实例（更贴近实时画布）

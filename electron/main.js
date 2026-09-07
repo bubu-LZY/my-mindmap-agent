@@ -82,6 +82,7 @@ require('./ipc/skillsManager')
 require('./ipc/customTools')
 require('./ipc/vectorStore')
 require('./ipc/passwordGate')
+require('./ipc/backupManager')
 const updateChecker = require('./ipc/updateChecker')
 require('./ipc/cloudSync')
 

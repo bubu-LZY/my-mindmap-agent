@@ -25,8 +25,14 @@ import { toolRegistry, TIMEOUT_PRESETS } from './ToolRegistry'
 export function registerLegacyTools(aiTools, handleToolCall, options = {}) {
   const { dangerousMap = {}, timeoutMap = {}, categoryMap = {} } = options
 
+  let registeredCount = 0
   for (const toolDef of aiTools) {
     const name = toolDef.function.name
+
+    // 跳过已经是新版格式的工具（_isNewStyle，如 run_code），避免用桥接 handler 覆盖它们
+    const existing = toolRegistry.get(name)
+    if (existing && existing._isNewStyle) continue
+
     const description = toolDef.function.description
     const parameters = toolDef.function.parameters?.properties || {}
     const required = toolDef.function.parameters?.required || []
@@ -59,9 +65,10 @@ export function registerLegacyTools(aiTools, handleToolCall, options = {}) {
       dangerous,
       handler,
     })
+    registeredCount++
   }
 
-  return toolRegistry.list().length
+  return registeredCount
 }
 
 /**

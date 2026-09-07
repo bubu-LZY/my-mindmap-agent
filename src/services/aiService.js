@@ -1170,6 +1170,7 @@ class AIService {
     let anyToolCalled = false
     let autoDiscoveryTried = false
     let emptyResponseRetryTried = false
+    let lengthRetryCount = 0 // finish_reason=length 时自动续跑次数，最多 2 次
 
     // 首轮预匹配：在发给 AI 之前，先做一次本地关键词匹配
     // 如果命中高分未激活工具，直接激活，让 AI 第一轮就能看到
@@ -1418,6 +1419,17 @@ class AIService {
             currentMessages.push({
               role: 'system',
               content: '【系统恢复指令】上一轮工具已执行成功，但没有产生任何可见回复。不要输出思考过程，不要重复解释。若用户要求修改导图且下一步工具明确，请立即调用该工具；否则用不超过200字中文汇报工具结果。'
+            })
+            lastRoundHadTools = false
+            continue
+          }
+          // 输出被 max_tokens 截断（finish_reason=length）且之前调用过工具：任务很可能还没完成，
+          // 注入一条续跑指令让 AI 接着往下做，避免用户手动说“继续”。最多自动续跑 2 次。
+          if (finishReason === 'length' && anyToolCalled && lengthRetryCount < 2 && !this._aborted && !isStale()) {
+            lengthRetryCount++
+            currentMessages.push({
+              role: 'system',
+              content: '【系统续跑指令】输出因长度限制被截断，但用户任务尚未完成。请立刻继续执行剩余步骤：调用必要的工具、不要输出思考过程、不要重复解释已做过的事，直到任务全部完成再给出最终结果。'
             })
             lastRoundHadTools = false
             continue
