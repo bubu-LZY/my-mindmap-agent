@@ -2337,18 +2337,28 @@ function injectToolDetector() {
     console.log(`[🧠 Agent] getLastAIMessage: 找到 ${messages.length} 个 .ds-message 元素`)
     
     const aiMessages = []
-    for (const msg of messages) {
-      if (isUserMessage(msg)) {
-        console.log('[🧠 Agent] getLastAIMessage: 跳过用户消息')
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i]
+      const role = msg.getAttribute?.('data-role') || msg.getAttribute?.('data-author') || ''
+      const userMsg = isUserMessage(msg)
+      
+      if (userMsg) {
+        console.log(`[🧠 Agent] getLastAIMessage: 消息[${i}] 是用户消息 (role="${role}")，跳过`)
         continue
       }
+      
       // 找 markdown 容器
       const markdown = msg.querySelector(':scope > .ds-markdown')
       if (markdown) {
         const text = (markdown.innerText || '').trim()
         if (text.length > 0) {
           aiMessages.push({ el: msg, markdown, text })
+          console.log(`[🧠 Agent] getLastAIMessage: 消息[${i}] 是 AI 消息，长度 ${text.length}`)
+        } else {
+          console.log(`[🧠 Agent] getLastAIMessage: 消息[${i}] 是 AI 消息但内容为空`)
         }
+      } else {
+        console.log(`[🧠 Agent] getLastAIMessage: 消息[${i}] 未找到 .ds-markdown，role="${role}"`)
       }
     }
     
@@ -2474,6 +2484,103 @@ function injectToolDetector() {
         } catch(e) {
           console.log(`[🧠 Agent] parseToolCalls: 宽松匹配 JSON 解析失败: ${e.message}`)
         }
+      }
+    }
+
+    // ========== 终极兜底：全页搜索 mymindmap 代码块 ==========
+    // 如果上面的方法都失败了，直接在整个页面里搜
+    if (calls.length === 0) {
+      try {
+        const fullText = document.body.innerText || ''
+        if (fullText.includes('mymindmap')) {
+          console.log(`[🧠 Agent] parseToolCalls: ⚠️ 消息元素内未找到，但全页文本包含 mymindmap！尝试全页提取...`)
+          // 用更宽松的正则，匹配 ```mymindmap 和后面的 JSON
+          const fullPattern = /```mymindmap\s*\n?([\s\S]*?)\n?```/g
+          let fm
+          while ((fm = fullPattern.exec(fullText)) !== null) {
+            try {
+              const codeStr = fm[1].trim()
+              const obj = JSON.parse(codeStr)
+              const name = obj.tool || obj.name
+              const params = obj.params || obj.arguments || obj.args || {}
+              if (name && typeof name === 'string' && name.length > 1) {
+                calls.push({ name, params })
+                console.log(`[🧠 Agent] parseToolCalls: ✅ 全页扫描匹配到工具: ${name}`)
+              }
+            } catch(e) {
+              // JSON 解析失败，尝试提取第一个完整的 JSON 对象
+              const jsonMatch = fm[1].match(/\{[\s\S]*\}/)
+              if (jsonMatch) {
+                try {
+                  const obj = JSON.parse(jsonMatch[0])
+                  const name = obj.tool || obj.name
+                  const params = obj.params || obj.arguments || obj.args || {}
+                  if (name && typeof name === 'string' && name.length > 1) {
+                    calls.push({ name, params })
+                    console.log(`[🧠 Agent] parseToolCalls: ✅ 全页扫描提取 JSON 匹配到工具: ${name}`)
+                  }
+                } catch(e2) {
+                  console.log(`[🧠 Agent] parseToolCalls: 全页扫描 JSON 解析失败: ${e2.message}`)
+                }
+              }
+            }
+          }
+          if (calls.length === 0) {
+            console.log(`[🧠 Agent] parseToolCalls: 全页扫描也没解析到。前 300 字上下文: ${fullText.substring(fullText.indexOf('mymindmap'), fullText.indexOf('mymindmap') + 300).replace(/\n/g, '\\n')}`)
+          }
+        } else {
+          // 连 mymindmap 这个词都没有
+          // 试试终极兜底：直接在全页文本里找包含 "tool" 字段的 JSON 对象
+          // 这是为了应对 DeepSeek 渲染代码块时去掉了 ``` 标记的情况
+          console.log('[🧠 Agent] parseToolCalls: 全文无 mymindmap 关键词，尝试终极兜底：搜索含 tool 字段的 JSON 对象...')
+          
+          // 找所有看起来像工具调用的 JSON（有 "tool" 字段和 "params" 字段）
+          const jsonPattern = /\{"tool"\s*:\s*"([^"]+)"[\s\S]*?\}/g
+          let jm
+          let foundFromJson = 0
+          while ((jm = jsonPattern.exec(fullText)) !== null && foundFromJson < 10) {
+            try {
+              // 尝试找完整的 JSON 对象（平衡大括号）
+              let depth = 0
+              let end = -1
+              for (let i = jm.index; i < fullText.length; i++) {
+                if (fullText[i] === '{') depth++
+                else if (fullText[i] === '}') {
+                  depth--
+                  if (depth === 0) { end = i; break }
+                }
+              }
+              if (end > jm.index) {
+                const jsonStr = fullText.substring(jm.index, end + 1)
+                const obj = JSON.parse(jsonStr)
+                const name = obj.tool || obj.name
+                const params = obj.params || obj.arguments || obj.args || {}
+                if (name && typeof name === 'string' && name.length > 1) {
+                  // 校验：必须是合理的工具名（避免误识别其他 JSON）
+                  if (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name) || /^[a-zA-Z][a-zA-Z0-9_]*_[a-zA-Z0-9_]+/.test(name)) {
+                    calls.push({ name, params })
+                    foundFromJson++
+                    console.log(`[🧠 Agent] parseToolCalls: ✅ 终极兜底 JSON 匹配到工具: ${name}`)
+                  }
+                }
+              }
+            } catch(e) {
+              // 跳过解析失败的
+            }
+          }
+          
+          if (calls.length === 0) {
+            // 还是没找到，打印调试信息
+            const htmlPreview = markdownEl.innerHTML ? markdownEl.innerHTML.substring(0, 500).replace(/\n/g, ' ') : '(无 innerHTML)'
+            console.log(`[🧠 Agent] parseToolCalls: ⚠️ 终极兜底也没找到。消息元素 HTML 前 500 字: ${htmlPreview}`)
+            // 也看看全页有多少个 code 元素
+            const allCodes = document.querySelectorAll('code')
+            const allPres = document.querySelectorAll('pre')
+            console.log(`[🧠 Agent] parseToolCalls: 全页 pre 元素: ${allPres.length} 个，code 元素: ${allCodes.length} 个`)
+          }
+        }
+      } catch(e) {
+        console.log(`[🧠 Agent] parseToolCalls: 全页扫描异常: ${e.message}`)
       }
     }
     
