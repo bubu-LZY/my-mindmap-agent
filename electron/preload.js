@@ -126,6 +126,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setEnabled: (enabled) => ipcRenderer.invoke('http-server:setEnabled', !!enabled),
     setQuality: (quality) => ipcRenderer.invoke('http-server:setQuality', quality),
     setLanAccess: (lanAccess) => ipcRenderer.invoke('http-server:setLanAccess', !!lanAccess),
+    setHttps: (https) => ipcRenderer.invoke('http-server:setHttps', !!https),
     resetToken: () => ipcRenderer.invoke('http-server:resetToken')
   },
 
@@ -461,6 +462,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     sendProcessMessageResult: (id, reply, error) => {
       ipcRenderer.send('feishuBot:processMessageResult', { id, reply, error })
+    }
+  },
+
+  // DeepSeek BrowserView（替代 webview 标签，彻底解决尺寸问题）
+  deepSeekView: {
+    create: (bounds) => ipcRenderer.invoke('deepseek-view:create', bounds),
+    setBounds: (bounds) => ipcRenderer.invoke('deepseek-view:setBounds', bounds),
+    show: () => ipcRenderer.invoke('deepseek-view:show'),
+    hide: () => ipcRenderer.invoke('deepseek-view:hide'),
+    destroy: () => ipcRenderer.invoke('deepseek-view:destroy'),
+    send: (channel, ...args) => ipcRenderer.invoke('deepseek-view:send', channel, ...args),
+    openDevTools: () => ipcRenderer.invoke('deepseek-view:openDevTools'),
+    // 监听来自 BrowserView 的消息（主进程转发）
+    onMessage: (channel, callback) => {
+      const handler = (event, ...args) => callback(...args)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
     }
   }
 })

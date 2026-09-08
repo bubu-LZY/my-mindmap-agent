@@ -64,7 +64,8 @@ export function renderMarkdown(markdown) {
     return `<pre class="md-code-block"><code>${code.trim()}</code></pre>`
   })
 
-  // 标题（# ~ ######）
+  // 标题（# ~ ######，7个及以上#也按深层标题处理）
+  html = html.replace(/^#{7,}\s+(.+)$/gm, '<h6 class="md-h-deep">$1</h6>')
   html = html.replace(/^#{6}\s+(.+)$/gm, '<h6>$1</h6>')
   html = html.replace(/^#{5}\s+(.+)$/gm, '<h5>$1</h5>')
   html = html.replace(/^#{4}\s+(.+)$/gm, '<h4>$1</h4>')
@@ -320,6 +321,13 @@ export function getMarkdownCSS() {
     .md-content h2 { font-size: 16px; }
     .md-content h3 { font-size: 15px; }
     .md-content h4, .md-content h5, .md-content h6 { font-size: 14px; }
+    .md-content h6.md-h-deep {
+      font-size: 13px;
+      font-weight: 500;
+      color: #666;
+      padding-left: 8px;
+      border-left: 2px solid #ddd;
+    }
     .md-content p { margin: 6px 0; line-height: 1.6; }
     .md-content strong { font-weight: 600; }
     .md-content em { font-style: italic; }

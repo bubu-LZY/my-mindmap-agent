@@ -1760,18 +1760,12 @@ const doSmartCloze = async (nodes, mode, onProgress, options = {}) => {
     }
   }
 
-  // ========== 步骤3：AI 快速审查 ==========
-  if (clozeList.length > 0 && !aiService.isAborted()) {
-    try {
-      if (onProgress) onProgress('AI正在审查并优化挖空质量…')
-      const reviewResult = await callAiForReviewBatched(nodes, clozeList, onProgress, applyReviewedItem)
-      reviewAdded = reviewResult.added
-      reviewRemoved = reviewResult.removed
-    } catch (e) {
-      flushRender()
-      console.warn('[AI挖空] AI审查失败，保留已有结果:', e)
-    }
-  }
+  // ========== 步骤3：AI 快速审查（已移除，提升速度） ==========
+  // 为了提升挖空速度，已移除 AI 审查步骤。
+  // 保留步骤1（机器兜底挖空）和步骤2（AI补挖遗漏节点），
+  // 去掉耗时最长的审查优化环节，以速度优先。
+  reviewAdded = 0
+  reviewRemoved = 0
 
   // 增量阶段已写入节点文本，这里统一刷新画布与样式一次
   flushRender()

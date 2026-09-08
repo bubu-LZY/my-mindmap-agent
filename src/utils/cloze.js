@@ -534,7 +534,8 @@ export const setupClozeClickHandler = (mindMap) => {
   container.addEventListener('click', state.clickHandler, true)
   container.addEventListener('dblclick', state.dblclickHandler, true)
   state.clickContainer = container
-  console.log('[cloze] click handler registered on container')
+  // 仅在开发调试时输出注册日志，避免生产环境重复打印造成困扰
+  // console.log('[cloze] click handler registered on container')
 }
 
 export const toggleNodeCloze = (node) => {

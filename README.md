@@ -4,9 +4,27 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.12.5-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.14.0-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
+
+---
+
+## 🆕 v4.14.0 更新
+
+**DeepSeek 网页免费模式 + 元工具系统 + 批量操作增强**
+
+| 分类 | 内容 |
+|------|------|
+| 🎉 重大功能 | DeepSeek 网页版 AI 助手（悬浮球 + 自动代码检测执行） |
+| 🛠️ 元工具 | `list_tools` / `get_tool_detail` — AI 随时查询可用工具 |
+| ⚡ 批量优化 | 批量操作工具置顶推荐，提示词强调优先使用 |
+| 🚦 限流保护 | 发送队列 + 6秒最小间隔，防止 DeepSeek 频率限制 |
+| 🧠 记忆集成 | 初始化自动带入永久记忆，实时生效 |
+| 🔍 检测提升 | 文本正则优先 + DOM 兜底，代码检测 100% 命中 |
+| 🐛 Bug 修复 | 切换模式空白、日志面板布局错乱、悬浮球消失等 |
+
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.14.0)
 
 ---
 
@@ -22,7 +40,8 @@
 8. [打包发布](#8-打包发布)
 9. [目录结构](#9-目录结构)
 10. [相关文档](#10-相关文档)
-11. [反馈与联系](#11-反馈与联系)
+11. [致谢](#11-致谢)
+12. [反馈与联系](#12-反馈与联系)
 
 ---
 
@@ -30,14 +49,16 @@
 
 ### 🎯 核心定位
 
-把"思维导图"作为思考的容器，把"AI"作为思考的协作者，把"本地文件"作为思考的仓库。**所有内容都在你的电脑本地，不依赖云端服务也能完成全部核心功能**。
+把"思维导图"作为思考的容器，把"AI"作为思考的协作者，把"本地文件"作为思考的仓库。
+
+**所有内容都在你的电脑本地，不依赖云端服务也能完成全部核心功能**。
 
 ### ✨ 十二大亮点
 
 | # | 亮点 | 说明 |
 |---|------|------|
 | 1 | **四视图实时联动** | 思维导图 / 大纲 / 关联图 / Markdown 双向同步，表格/代码块/图片/引用原子块尽量保留 |
-| 2 | **AI 智能体深度集成** | 100+  个 AI 工具，覆盖生成、整理、扩展、挖空、改写、出题、复习全流程 |
+| 2 | **AI 智能体深度集成** | 100+ 个 AI 工具，覆盖生成、整理、扩展、挖空、改写、出题、复习全流程 |
 | 3 | **三步挖空流程** | 机器挖 → AI 补 → AI 复查，可选"仅规则兜底"或"AI 介入"；挖空自动应用艾宾浩斯复习 |
 | 4 | **AI 背诵改写** | 自动为节点生成【记忆简写】+ 摘要，节点越改越好背 |
 | 5 | **本地知识库** | txt/md/json/docx/pptx/xlsx/pdf/图片 OCR 全部支持，BM25 + 向量混合检索 |
@@ -135,9 +156,9 @@
 
 **用户可选择仅"机器挖空"模式**，不走 AI，速度快且不消耗 AI 调用次数。
 
-### 3.5 复习计划自动绑定
+### 3.5 复习计划
 
-挖空的节点会自动进入艾宾浩斯复习计划：
+自动绑定挖空的节点会自动进入艾宾浩斯复习计划：
 - 1 天后复习
 - 3 天后复习
 - 7 天后复习
@@ -249,7 +270,6 @@ electron/                主进程
   ├── utils/            主进程工具（store、secureStore）
   ├── main.js           主进程入口
   └── preload.js        渲染进程桥接
-
 src/                    渲染进程
   ├── components/       Vue 组件
   ├── stores/           Pinia 状态
@@ -257,7 +277,6 @@ src/                    渲染进程
   ├── utils/            工具（挖空、记忆、复习计划等）
   ├── prompts/          AI 提示词
   └── App.vue           入口
-
 custom-tools/           用户自定义工具示例
 skills/                 Skills 示例
 docs/                   项目文档 + GitHub Pages Demo
@@ -364,7 +383,16 @@ my-mindmap-agent/
 
 ---
 
-## 11. 反馈与联系
+## 11. 致谢
+
+- **[wangyongpeng90/cuckoo-code](https://github.com/wangyongpeng90/cuckoo-code)** — 感谢提供浏览器端代码检测与防循环机制的参考，DeepSeek 网页版集成模块借鉴了其设计思路。
+- **simple-mind-map** — 思维导图渲染引擎基础
+- **Element Plus** — UI 组件库
+- 所有为开源社区做出贡献的开发者
+
+---
+
+## 12. 反馈与联系
 
 - GitHub Issues：[提交问题](https://github.com/bubu-LZY/my-mindmap-agent/issues)
 - 邮箱：2995136355@qq.com

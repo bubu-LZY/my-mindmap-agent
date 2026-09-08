@@ -1690,6 +1690,11 @@ const initMindMap = () => {
     nodeTextEditZIndex: 7000,
     // 节点图片缩放/删除按钮更紧凑
     imgResizeBtnSize: 18,
+    // 导出图片/PDF 清晰度提升：
+    // minExportImgCanvasScale: 导出图片的最小像素比，默认2，提高到3更清晰
+    // maxCanvasSize: canvas 最大像素上限，默认16384，提高到25000以支持更大导图
+    minExportImgCanvasScale: 3,
+    maxCanvasSize: 25000,
     // 进入编辑前把旧版内联 font-weight/font-style 等归一化为 Quill 语义标签，
     // 保证非编辑态加粗与编辑态加粗是同一状态，取消其一不会残留另一种状态
     transformRichTextOnEnterEdit: normalizeHtmlForQuill,
@@ -1788,16 +1793,25 @@ const initMindMap = () => {
           } catch (err) { /* 单节点失败不影响其余 */ }
         })
 
-        // 导出 PDF/SVG 时只在导出副本上显示全部挖空内容，不动前端实际 DOM。
-        // 前端画布仍保持用户当前的挖空显隐状态，不会出现闪烁或状态被改变。
+        // 导出时保留当前挖空显隐状态（由 setClozeStateForExport 在导出前设置）
+        // simple-mind-map 导出时会重新渲染 SVG，挖空元素上没有 smm-cloze-hidden 类
+        // 需要根据当前全局状态手动给所有 .smm-cloze 元素加上/移除 hidden 类
         try {
-          const rootEl = svg.node || svg
-          rootEl.querySelectorAll('.smm-cloze').forEach(el => {
-            el.classList.remove('smm-cloze-hidden')
-            el.style.removeProperty('color')
+          const hiddenAll = isClozeHiddenAll()
+          const allClozes = svg.node 
+            ? svg.node.querySelectorAll('.smm-cloze')
+            : svg.querySelectorAll('.smm-cloze')
+          allClozes.forEach(el => {
+            if (hiddenAll) {
+              el.classList.add('smm-cloze-hidden')
+              el.style.setProperty('color', 'transparent', 'important')
+            } else {
+              el.classList.remove('smm-cloze-hidden')
+              el.style.removeProperty('color')
+            }
           })
-        } catch (err) {
-          console.warn('export cloze show-all failed:', err)
+        } catch (e) {
+          console.warn('apply cloze state to export svg failed:', e)
         }
       } catch (e) {
         console.warn('export svg fidelity fix failed:', e)

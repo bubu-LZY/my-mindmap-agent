@@ -276,8 +276,28 @@ ${outlineHtml || '<div class="outline-empty">暂无数据</div>'}
   </div>
 </div>
 
-<script src="https://unpkg.com/force-graph@1.51.4/dist/force-graph.min.js"></script>
 <script>
+  // 关联图库：优先从 CDN 加载，失败时使用降级方案（静态文本列表）
+  // 兼容 file:// 本地打开（无网络或跨域限制时不报错）
+  var forceGraphLoaded = false;
+  function loadForceGraph(callback) {
+    if (typeof ForceGraph !== 'undefined') {
+      forceGraphLoaded = true;
+      callback();
+      return;
+    }
+    var script = document.createElement('script');
+    script.src = 'https://unpkg.com/force-graph@1.51.4/dist/force-graph.min.js';
+    script.onload = function() {
+      forceGraphLoaded = true;
+      callback();
+    };
+    script.onerror = function() {
+      forceGraphLoaded = false;
+      callback();
+    };
+    document.head.appendChild(script);
+  }
 (function() {
   'use strict';
   var COLORS = ${colors};
@@ -303,11 +323,16 @@ ${outlineHtml || '<div class="outline-empty">暂无数据</div>'}
       panes[k].classList.toggle('active', k === view);
     });
     if (view === 'graph' && !graphInited) {
-      initGraph();
-    }
-    if (view === 'graph') {
+      // 异步加载 force-graph 库，加载失败时显示降级方案
+      loadForceGraph(function() {
+        initGraph();
+        setTimeout(function() {
+          try { graph && graph.zoomToFit && graph.zoomToFit(300, 40); } catch(e) {}
+        }, 100);
+      });
+    } else if (view === 'graph') {
       setTimeout(function() {
-        try { graph.zoomToFit(300, 40); } catch(e) {}
+        try { graph && graph.zoomToFit && graph.zoomToFit(300, 40); } catch(e) {}
       }, 100);
     }
     updateZoomLabel();
@@ -331,8 +356,10 @@ ${outlineHtml || '<div class="outline-empty">暂无数据</div>'}
     for (var i = 0; i < svgClozes.length; i++) {
       if (show) {
         svgClozes[i].classList.remove('smm-cloze-hidden'); // 显示挖空效果 → 移除 hidden 类
+        svgClozes[i].style.removeProperty('color'); // 清理内联样式，让 CSS class 生效
       } else {
         svgClozes[i].classList.add('smm-cloze-hidden'); // 隐藏挖空效果 → 添加 hidden 类
+        svgClozes[i].style.setProperty('color', 'transparent', 'important'); // 同步内联样式
       }
     }
     // 大纲里的挖空：.hidden 表示文字被隐藏（挖空效果）
@@ -360,8 +387,36 @@ ${outlineHtml || '<div class="outline-empty">暂无数据</div>'}
     }
   });
 
-  // ===== 思维导图缩放平移 =====
+  // ===== SVG 思维导图挖空点击交互 =====
+  // 点击单个挖空词切换显示/隐藏（与应用内行为一致）
   var mmViewport = document.getElementById('mm-viewport');
+  if (mmViewport) {
+    mmViewport.addEventListener('click', function(e) {
+      // 向上查找最近的 .smm-cloze 元素
+      var target = e.target;
+      var clozeEl = null;
+      while (target && target !== mmViewport) {
+        if (target.classList && target.classList.contains('smm-cloze')) {
+          clozeEl = target;
+          break;
+        }
+        target = target.parentNode;
+      }
+      if (clozeEl) {
+        e.preventDefault();
+        e.stopPropagation();
+        clozeEl.classList.toggle('smm-cloze-hidden');
+        // 同步内联样式：确保 color: transparent 被正确切换
+        if (clozeEl.classList.contains('smm-cloze-hidden')) {
+          clozeEl.style.setProperty('color', 'transparent', 'important');
+        } else {
+          clozeEl.style.removeProperty('color');
+        }
+      }
+    });
+  }
+
+  // ===== 思维导图缩放平移 =====
   var mmSvg = mmViewport ? mmViewport.querySelector('svg') : null;
   var mmScale = 1;
   var mmTx = 0;
@@ -495,6 +550,33 @@ ${outlineHtml || '<div class="outline-empty">暂无数据</div>'}
     var w = container.clientWidth || window.innerWidth;
     var h = container.clientHeight || (window.innerHeight - 48);
 
+    // 库未加载成功：显示降级方案（静态节点列表）
+    if (!forceGraphLoaded || typeof ForceGraph === 'undefined') {
+      container.innerHTML = '<div style="padding:40px 20px;text-align:center;">' +
+        '<div style="font-size:14px;color:#666;margin-bottom:12px;">关联图需要联网加载组件</div>' +
+        '<div style="font-size:12px;color:#999;">' +
+        '当前为本地离线打开状态，关联图库无法加载。<br>' +
+        '您可以通过大纲视图或思维导图视图查看完整内容。' +
+        '</div>' +
+        '<div style="margin-top:20px;text-align:left;max-height:300px;overflow-y:auto;background:#f5f5f7;border-radius:8px;padding:12px;">' +
+        '<div style="font-size:12px;color:#888;margin-bottom:8px;">节点列表（共 ' + graphData.nodes.length + ' 个）：</div>' +
+        graphData.nodes.slice(0, 50).map(function(n) {
+          return '<div style="font-size:12px;padding:4px 8px;color:#333;">' +
+            '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + COLORS[(n.depth||0) % COLORS.length] + ';margin-right:6px;"></span>' +
+            (n.fullName || n.name || '') +
+            (n.hasNote ? ' 📝' : '') +
+            (n.hasImage ? ' 🖼️' : '') +
+            '</div>';
+        }).join('') +
+        (graphData.nodes.length > 50 ? '<div style="font-size:11px;color:#aaa;padding:4px 8px;">... 还有 ' + (graphData.nodes.length - 50) + ' 个节点</div>' : '') +
+        '</div></div>';
+      var stats = document.getElementById('graph-stats');
+      if (stats) {
+        stats.textContent = graphData.nodes.length + ' 个节点 · ' + graphData.links.length + ' 条连线';
+      }
+      return;
+    }
+
     try {
       graph = ForceGraph()(container)
         .width(w)
@@ -552,12 +634,24 @@ ${outlineHtml || '<div class="outline-empty">暂无数据</div>'}
             ctx.lineWidth = 1;
             ctx.stroke();
           }
-          if (globalScale >= 0.5 && node.name) {
-            var fontSize = 12 / globalScale;
-            ctx.font = fontSize + 'px "Microsoft YaHei", "PingFang SC", sans-serif';
+          // 文字显示策略：缩放 < 0.3 时只显示前 3 层（方便定位），根节点更大更醒目
+          var depth = node.depth || 0;
+          var showText = globalScale >= 0.3 || depth < 3;
+          if (showText && node.name) {
+            var baseSize = 12;
+            if (depth === 0) baseSize = 16;
+            else if (depth === 1) baseSize = 14;
+            else if (depth === 2) baseSize = 12;
+            else baseSize = 11;
+            var fontSize = baseSize / globalScale;
+            var fontWeight = depth === 0 ? 'bold ' : '';
+            ctx.font = fontWeight + fontSize + 'px "Microsoft YaHei", "PingFang SC", sans-serif';
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
-            ctx.fillStyle = 'rgba(40, 44, 52, 0.88)';
+            var textColor = depth === 0 ? 'rgba(0, 0, 0, 0.95)' : 
+                            depth === 1 ? 'rgba(40, 44, 52, 0.9)' : 
+                            'rgba(40, 44, 52, 0.88)';
+            ctx.fillStyle = textColor;
             ctx.fillText(node.name, node.x + r + 4, node.y);
           }
         })
@@ -570,11 +664,26 @@ ${outlineHtml || '<div class="outline-empty">暂无数据</div>'}
         .graphData(graphData);
 
       try {
-        graph.d3Force('charge').strength(-120);
+        // 优化布局：增加排斥力和连线距离，减少节点重叠
+        graph.d3Force('charge').strength(-180);
         graph.d3Force('link').distance(function(link) {
-          return link.type === 'assoc' ? 80 : 55;
+          return link.type === 'assoc' ? 120 : 70;
         });
-        graph.d3Force('center').strength(0.05);
+        graph.d3Force('center').strength(0.03);
+        graph.d3AlphaDecay(0.015);
+        graph.cooldownTicks(200);
+        // 碰撞检测：不同层级节点不同半径
+        try {
+          if (graph.d3Force && typeof graph.d3Force === 'function') {
+            var collisionForce = graph.d3Force('collision');
+            if (collisionForce && collisionForce.radius) {
+              collisionForce.radius(function(node) {
+                var d = node.depth || 0;
+                return d === 0 ? 30 : (d === 1 ? 20 : 12);
+              });
+            }
+          }
+        } catch(e2) {}
       } catch(e) {}
 
       // 统计

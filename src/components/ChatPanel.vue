@@ -20,14 +20,51 @@
         </div>
       </div>
       <div class="header-actions">
+        <!-- AI 模式切换 -->
+        <el-dropdown trigger="click" @command="onChatModeChange" @visible-change="(v) => onHeaderDropdownVisible(v, 'mode')">
+          <button class="header-icon-btn mode-btn" :title="`当前模式：${chatMode === 'api' ? 'API模式' : '网页免费模式'}`">
+            <svg v-if="chatMode === 'api'" viewBox="0 0 20 20" fill="none" width="16" height="16">
+              <path d="M10 2L3 6v6c0 4 3 7 7 8 4-1 7-4 7-8V6l-7-4z" stroke="currentColor" stroke-width="1.5" fill="none"/>
+              <path d="M7 10l2 2 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <svg v-else viewBox="0 0 20 20" fill="none" width="16" height="16">
+              <rect x="3" y="4" width="14" height="12" rx="2" stroke="currentColor" stroke-width="1.5" fill="none"/>
+              <path d="M3 7h14" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="6" cy="5.5" r="0.8" fill="currentColor"/>
+              <circle cx="8.5" cy="5.5" r="0.8" fill="currentColor"/>
+            </svg>
+          </button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="api" :class="{ 'is-selected': chatMode === 'api' }">
+                API 模式（稳定）
+              </el-dropdown-item>
+              <el-dropdown-item command="web" :class="{ 'is-selected': chatMode === 'web' }">
+                网页免费模式（DeepSeek）
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <button class="header-icon-btn log-btn" @click="toggleLogPanel" :class="{ active: logPanelVisible }" title="快速查看运行日志">
           <svg viewBox="0 0 20 20" fill="none" width="16" height="16">
             <path d="M4 5h12M4 10h12M4 15h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
+        <!-- 网页模式：打开 DeepSeek 调试工具 -->
+        <button
+          v-if="chatMode === 'web'"
+          class="header-icon-btn"
+          @click="openDeepSeekDevTools"
+          title="打开 DeepSeek 调试工具"
+        >
+          <svg viewBox="0 0 20 20" fill="none" width="16" height="16">
+            <path d="M10 2v4M10 14v4M2 10h4M14 10h4M4.9 4.9l2.8 2.8M12.3 12.3l2.8 2.8M4.9 15.1l2.8-2.8M12.3 7.7l2.8-2.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <circle cx="10" cy="10" r="3" stroke="currentColor" stroke-width="1.5" fill="none"/>
+          </svg>
+        </button>
         <div v-if="!compact" class="header-right">
           <span class="ai-bind-target-name" :title="aiBindTargetDisplay">{{ aiBindTargetDisplay }}</span>
-          <el-dropdown v-if="mindMapWindows.length" trigger="click" @command="onAiBindCommand">
+          <el-dropdown v-if="mindMapWindows.length" trigger="click" @command="onAiBindCommand" @visible-change="(v) => onHeaderDropdownVisible(v, 'bind')">
             <button
               class="header-icon-btn ai-bind-btn"
               :class="{ locked: aiBindLocked }"
@@ -58,8 +95,22 @@
       </div>
     </header>
 
+    <!-- DeepSeek 网页模式面板 -->
+    <DeepSeekWebPanel
+      v-if="chatMode === 'web'"
+      ref="deepseekWebRef"
+      class="chat-deepseek-panel"
+      :mind-map="mindMap"
+      :current-file-path="currentFilePath"
+      :current-file-name="currentFileName"
+      :permanent-memory="memoryText"
+      :ai-memory="formatMemoryText()"
+      @tool-call="onDeepSeekToolCall"
+      @switch-mode="onChatModeChange('api')"
+    />
+
     <!-- 消息区域 -->
-    <div class="chat-messages" ref="messagesRef" @scroll="onMessagesScroll">
+    <div v-show="chatMode === 'api'" class="chat-messages" ref="messagesRef" @scroll="onMessagesScroll">
       <!-- 欢迎消息 -->
       <div v-if="messages.length === 0" class="welcome-message">
         <div class="welcome-icon">
@@ -390,7 +441,7 @@
     </div>
 
     <!-- 工具栏：记忆设置 / 历史记录 / 新建对话 -->
-    <div class="chat-toolbar">
+    <div v-show="chatMode === 'api'" class="chat-toolbar">
       <button v-if="!compact" class="toolbar-btn" @click="showMemoryDialog = true" title="设置永久记忆，AI将严格遵守">
         <svg viewBox="0 0 20 20" fill="none" width="14" height="14">
           <path d="M10 2L3 5v5c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V5l-7-3z" stroke="currentColor" stroke-width="1.5" fill="none"/>
@@ -660,6 +711,7 @@
 
     <!-- 输入区域（支持拖入本地文件，drop 后生成文件胶囊随消息发送） -->
     <div
+      v-show="chatMode === 'api'"
       class="chat-input-area"
       :class="{ 'file-drag-over': fileDragActive }"
       @dragenter="onFileDragEnter"
@@ -1066,6 +1118,7 @@
 import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount, toRaw } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Setting } from '@element-plus/icons-vue'
+import DeepSeekWebPanel from './DeepSeekWebPanel.vue'
 import { treeToText, treeToSkeletonText, countNodes } from '../utils/treeUtils'
 import { parseMarkdownToTree } from '../utils/markdownParser'
 import { createUid } from 'simple-mind-map/src/utils'
@@ -1200,6 +1253,51 @@ const imageInputRef = ref(null)
 const messages = ref([])
 const inputText = ref('')
 const aiStatus = ref('idle')
+// AI 对话模式：'api' = API 模式（默认，稳定），'web' = 网页免费模式（DeepSeek 网页版）
+const chatMode = ref('api')
+const deepseekWebRef = ref(null)
+// 切换对话模式
+const onChatModeChange = (mode) => {
+  if (mode === chatMode.value) return
+  chatMode.value = mode
+  if (mode === 'web') {
+    ElMessage.info('已切换到 DeepSeek 网页免费模式')
+  } else {
+    ElMessage.info('已切换到 API 模式')
+  }
+}
+// 处理来自 DeepSeek 网页版的工具调用
+const deepSeekExtraHandlers = {
+  getMindMap: () => props.mindMap,
+  getActiveNode: () => props.activeNode,
+  getCurrentFilePath: () => props.currentFilePath,
+  getCurrentFileDir: () => props.currentFileDir,
+  setIsGenerating: () => {},
+  onEditNode: () => {},
+  onProgress: () => {},
+  onClozeChange: () => {}
+}
+const onDeepSeekToolCall = async (toolCall) => {
+  try {
+    const result = await handleToolCall(
+      { function: { name: toolCall.name, arguments: JSON.stringify(toolCall.params || {}) } },
+      props.mindMap,
+      null,
+      deepSeekExtraHandlers
+    )
+    // 将结果发送回 DeepSeek 网页版
+    if (deepseekWebRef.value) {
+      deepseekWebRef.value.sendToolResult(toolCall.toolId, result, null)
+    }
+    return result
+  } catch (e) {
+    console.error('DeepSeek 工具调用失败:', e)
+    if (deepseekWebRef.value) {
+      deepseekWebRef.value.sendToolResult(toolCall.toolId, null, e.message || String(e))
+    }
+    throw e
+  }
+}
 const planHover = ref(false)
 const activePlan = computed(() => {
   for (let i = messages.value.length - 1; i >= 0; i--) {
@@ -2438,6 +2536,34 @@ const onGlobalClick = (e) => {
 const toggleLogPanel = () => {
   logPanelVisible.value = !logPanelVisible.value
   emit('toggle-log-panel', logPanelVisible.value)
+  // 网页模式下，日志面板打开时隐藏 BrowserView（避免被遮挡）
+  if (chatMode.value === 'web') {
+    if (deepseekWebRef.value?.setOverlayVisible) {
+      deepseekWebRef.value.setOverlayVisible(!logPanelVisible.value)
+    }
+  }
+}
+
+// 顶部下拉菜单显示变化时控制 BrowserView（网页模式下避免下拉被遮挡）
+const headerDropdownCount = ref(0)
+const onHeaderDropdownVisible = (visible, name) => {
+  if (chatMode.value !== 'web') return
+  if (visible) {
+    headerDropdownCount.value++
+  } else {
+    headerDropdownCount.value = Math.max(0, headerDropdownCount.value - 1)
+  }
+  // 当有任何下拉打开时，隐藏 BrowserView；全部关闭时显示
+  if (deepseekWebRef.value?.setOverlayVisible) {
+    deepseekWebRef.value.setOverlayVisible(headerDropdownCount.value === 0)
+  }
+}
+
+// 打开 DeepSeek 调试工具
+const openDeepSeekDevTools = () => {
+  if (window.electronAPI?.deepSeekView?.openDevTools) {
+    window.electronAPI.deepSeekView.openDevTools()
+  }
 }
 
 /* ============================================================
@@ -2956,12 +3082,24 @@ const SYSTEM_PROMPT = `Mind-map AI assistant (.smm). Views: mindmap/outline/grap
 - Multi-step: emit <plan> first, then <step-done>N after each. Never skip/reorder.
 - Use DEDICATED tools. If inactive, call activate_tools(keyword="...") once, then use it.
 - **Tool discovery first**: Unsure if a capability exists? Call semantic_tool_search first — never assume "it cannot be done".
-- **Code for complex logic**: Batch ops, multi-step, conditionals/loops → use run_code to write JS (\`await tools.toolName()\`) instead of chaining many calls. Read-only runs auto; writes need user confirmation.
+- **Code for complex logic**: Batch ops, multi-step, conditionals/loops → use run_code to write JS (await tools.toolName()) instead of chaining many calls. Read-only runs auto; writes need user confirmation.
 - Reorder siblings → reorder_nodes(uid, index|before_uid|after_uid). NEVER expand_node + delete_node combos.
 - Editing EXISTING map: modify in-place (update_node_text / batch_node_actions / delete_node / merge_nodes). NEVER regenerate with generate_mindmap (writes new file).
 - Background/path-scoped .smm edits: after edits, AUTOMATICALLY save_mindmap (overwrite same path). Do NOT ask "是否保存". Include final absolute path in reply.
+- **File operations BEST PRACTICES** (critical — most bugs happen here):
+  - Before batch creating/modifying/deleting files, always make a <plan> first so the user can see what you'll do.
+  - NEVER write code or create files based on guesswork. If you're unsure about the content or structure, read existing files first to understand the pattern.
+  - When creating multiple files, do it in a logical order (dependencies first). Verify each file was created correctly before moving on.
+  - When modifying existing files, ALWAYS read the file first to see its current content — never assume what's in it.
+  - When deleting files, be extra careful. Confirm the file path is correct. Never delete files you didn't create unless explicitly asked.
+  - Use list_directory to verify the file structure before and after batch operations.
+  - For code files, always ensure syntax is correct before saving.
+- **Plan before acting**: For any non-trivial task (especially multi-step file operations, code writing, batch modifications), ALWAYS output a <plan> first with 3-8 clear steps. This helps you think through the approach and avoids wasted effort.
 - Review tasks: activate_tools("review") → get_today_review_status / get_review_schedule / complete_review_task / add_to_review. Never search nodes for review questions.
 - Recitation: ai_recite_rewrite. Quizzes: ai_quiz / ai_quiz_append. Exact cloze: mechanical_cloze. Smart cloze: ai_cloze. Cloze quality issues (bad blanks to remove / missing keywords to add, e.g. title-like nodes wrongly blanked): ai_cloze_review (targets incl. mode=all). Activate by keyword if not active.
+  - IMPORTANT: When user says "挖空" / "做挖空" / "添加挖空" etc., ALWAYS use the ai_cloze tool — this is the BUILT-IN cloze feature of the mind map app. NEVER try to implement cloze yourself by editing node text or adding custom formatting.
+  - ai_cloze has two modes: mode="ai" (AI-assisted, fills gaps) and mode="fast" (rule-based only, instant). If user does NOT specify which mode they want, you MUST ask them first using <ask> with options ["AI介入模式", "快速模式"].
+  - Never call ai_cloze multiple times in a loop — use targets (uids/keyword/mode=leaves) to batch everything in ONE call.
 - find_local_file returns absolute paths; open directly. merge_mindmap_files reads source in background. rename_mindmap_file in place.
 - **Batch tools**: split_mindmap (split one map into many .smm); export_to_markdown(file_paths=[...]) batch SMM→MD; merge_mindmap_files(sourceFilePaths=[...]) batch merge; import_file_as_mindmap(file_paths=[...]) batch MD→SMM. Prefer these ONE-call batch tools over looping a single-file tool.
 - **Finish the whole task**: Never stop mid-task and wait for the user to say "continue". If a step fails, self-recover (retry ≤2, or switch to an equivalent tool) and keep going until the goal is fully achieved. Only stop when the task is actually done or you truly need a user decision.
@@ -3347,14 +3485,20 @@ const manualCompress = async () => {
 // 问题根因：连续多次写操作（如多次 add_child_nodes）时，每次操作后都立即 reRender，
 // 前一次渲染还没完成后一次又开始，导致渲染状态叠加冲突、节点重叠。
 // 解决方案：所有写操作统一走 scheduleReRender，短时间内多次调用只做一次最终重绘。
+// 增强优化：
+// 1. AI 运行中（连续工具调用）延长防抖时间，避免每调用一个工具就重绘一次
+// 2. AI 运行结束后强制做一次完整重绘，确保布局最终正确
+// 3. 通过 watch aiStatus 自动判断 AI 运行状态，避免手动标记遗漏
 let reRenderTimer = null
 let pendingReRenderType = 'render' // 'render' 增量渲染 / 'reRender' 完全重绘
+let toolCallCount = 0 // 当前 AI 轮次中的工具调用计数
 /**
  * 调度补充重渲染（防抖）
  * @param {'render'|'reRender'} type 渲染类型
  * @param {number} delay 延迟时间（ms），默认 500ms
+ * @param {boolean} forceImmediate 是否立即执行（AI 一轮结束时用）
  */
-const scheduleReRender = (type = 'render', delay = 500) => {
+const scheduleReRender = (type = 'render', delay = 500, forceImmediate = false) => {
   if (!props.mindMap) return
   // 如果已有更高优先级的 reRender 请求，保持 reRender
   if (type === 'reRender') {
@@ -3362,8 +3506,12 @@ const scheduleReRender = (type = 'render', delay = 500) => {
   }
   if (reRenderTimer) {
     clearTimeout(reRenderTimer)
+    reRenderTimer = null
   }
-  reRenderTimer = setTimeout(() => {
+  // AI 运行中（thinking/calling）且非强制立即执行：延迟更久，等待批量操作完成
+  const aiRunning = aiStatus.value === 'thinking' || aiStatus.value === 'calling'
+  const actualDelay = forceImmediate ? 0 : (aiRunning ? Math.max(delay, 800) : delay)
+  const doRender = () => {
     reRenderTimer = null
     const useType = pendingReRenderType
     pendingReRenderType = 'render' // 重置为默认
@@ -3377,8 +3525,41 @@ const scheduleReRender = (type = 'render', delay = 500) => {
     } catch (e) {
       console.error('补充重渲染失败:', e)
     }
-  }, delay)
+  }
+  if (forceImmediate) {
+    // 立即执行，但用 rAF 确保在当前宏任务结束后
+    requestAnimationFrame(() => requestAnimationFrame(doRender))
+  } else {
+    reRenderTimer = setTimeout(doRender, actualDelay)
+  }
 }
+/**
+ * 工具调用计数 +1
+ */
+const incrementToolCallCount = () => {
+  toolCallCount++
+}
+// 监听 aiStatus 变化：从活跃态（thinking/calling）变为非活跃态（idle/done/error）时，
+// 如果本轮有过工具调用，则强制做一次完整重绘，确保布局最终正确
+watch(aiStatus, (newStatus, oldStatus) => {
+  const wasActive = oldStatus === 'thinking' || oldStatus === 'calling'
+  const isActiveNow = newStatus === 'thinking' || newStatus === 'calling'
+  // 从活跃态转为非活跃态（AI 一轮结束）
+  if (wasActive && !isActiveNow) {
+    if (toolCallCount > 0 && props.mindMap) {
+      // 延迟一点，确保工具调用后的 onToolCall 中的 scheduleReRender 已被调度
+      // 然后我们强制触发一次最终重绘
+      setTimeout(() => {
+        scheduleReRender('reRender', 0, true)
+      }, 50)
+    }
+    toolCallCount = 0
+  }
+  // 新一轮开始时重置计数
+  if (!wasActive && isActiveNow) {
+    toolCallCount = 0
+  }
+})
 
 // ========== 深度思考展开/收起与实时滚动 ==========
 
@@ -4348,6 +4529,8 @@ Output a JSON code block with EXACTLY this format. Put it FIRST in your reply:
 
           const toolStartTs = Date.now()
           try {
+            // 工具调用计数：用于判断 AI 一轮结束后是否需要强制重绘
+            incrementToolCallCount()
             const result = await handleToolCall(toolCall, taskMindMap, null, taskExtraHandlers)
             tcEntry.status = result && result.success === false ? 'error' : 'done'
             // 关键返回值留档：压缩成摘要时保留
@@ -6276,7 +6459,8 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
   }
 
   // ===== 前提流程：询问用户「仅兜底挖空」还是「AI 介入挖空」 =====
-  // 工具内调用（viaTool）不弹窗，默认走 AI 介入，避免打断工具链。
+  // 工具内调用（viaTool）且指定了 clozeMode 时，直接使用指定模式，不弹窗
+  // 工具内调用但未指定模式时，默认走 AI 介入（保持向后兼容）
   let aiEnabled = true
   if (!viaTool) {
     try {
@@ -6299,6 +6483,9 @@ const aiCloze = async (nodesOrNode, opts = {}) => {
         return '已取消挖空'
       }
     }
+  } else if (opts.clozeMode === 'fast') {
+    // 工具调用指定了快速模式
+    aiEnabled = false
   }
 
   // 初始化挖空模块（绑定 mindMap 引用）
@@ -7202,10 +7389,10 @@ const extraHandlers = {
     if (nodes.length === 0) return '没有选中节点'
     return aiRewrite(nodes, { viaTool: true, instruction })
   },
-  aiCloze: async () => {
+  aiCloze: async (mode = 'ai') => {
     const nodes = getActiveNodes()
     if (nodes.length === 0) return '没有选中节点'
-    return aiCloze(nodes, { viaTool: true })
+    return aiCloze(nodes, { viaTool: true, clozeMode: mode })
   },
   aiClozeFullMap: async () => {
     return aiCloze([], { viaTool: true, scope: 'root' })
@@ -8143,7 +8330,17 @@ defineExpose({
   setLogPanelVisible: (visible) => { logPanelVisible.value = visible },
   reloadModel: loadCurrentModel,
   listMcpTools,
-  callMcpTool
+  callMcpTool,
+  setDeepSeekVisible: (visible) => {
+    if (deepseekWebRef.value && deepseekWebRef.value.setOverlayVisible) {
+      deepseekWebRef.value.setOverlayVisible(visible)
+    }
+  },
+  openDeepSeekDevTools: () => {
+    if (window.electronAPI?.deepSeekView?.openDevTools) {
+      window.electronAPI.deepSeekView.openDevTools()
+    }
+  }
   // openThirdPartyPanel 已迁移到 SettingsView 内嵌的 ThirdPartyPanel 组件，不再需要
 })
 </script>
@@ -8163,6 +8360,15 @@ defineExpose({
      不会溢出并与其他功能面板的文字交错重叠 */
   isolation: isolate;
   overflow: hidden;
+}
+
+/* DeepSeek 网页模式面板 */
+.chat-deepseek-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ========== Header ========== */

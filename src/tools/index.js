@@ -33,12 +33,20 @@ export { registerLegacyTools } from './legacyBridge'
 // AI 类
 import { runCodeTool } from './ai/runCode'
 
+// 元工具类
+import { listToolsTool } from './meta/listTools'
+import { getToolDetailTool } from './meta/getToolDetail'
+
 export { runCodeTool }
+export { listToolsTool, getToolDetailTool }
 
 // 所有新版格式工具列表（用于批量注册）
 const newTools = [
   // AI 类
   runCodeTool,
+  // 元工具类
+  listToolsTool,
+  getToolDetailTool,
 ]
 
 /**

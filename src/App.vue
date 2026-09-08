@@ -65,11 +65,24 @@
     <!-- ============ Tab 标签栏 ============ -->
     <nav
       class="tab-bar"
+      :class="{ 'has-clear': layoutGroups.length >= 2 }"
       @dragover.prevent="onTabBarDragOver"
       @drop.prevent="onTabBarDrop"
       @wheel="onTabBarWheel"
     >
-      <!-- 标签组化：单 pane 组 = 普通文件标签；多 pane 组 = “多屏”组合标签 -->
+      <!-- 一键清空按钮（标签数>=2时，hover显示） -->
+      <button
+        v-if="layoutGroups.length >= 2"
+        class="tab-clear-all"
+        title="一键关闭所有标签"
+        @click="closeAllGroups"
+      >
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none">
+          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>清空</span>
+      </button>
+      <!-- 标签组化：单 pane 组 = 普通文件标签；多 pane 组 = "多屏"组合标签 -->
       <div
         v-for="g in layoutGroups"
         :key="g.id"
@@ -829,6 +842,13 @@ const toolCallStatus = ref('')
 // 设置弹窗
 const settingsVisible = ref(false)
 
+// 设置打开时隐藏 DeepSeek BrowserView（防止遮住设置弹窗）
+watch(settingsVisible, (val) => {
+  if (chatPanelRef.value && chatPanelRef.value.setDeepSeekVisible) {
+    chatPanelRef.value.setDeepSeekVisible(!val)
+  }
+})
+
 // 快捷键中心（悬浮小窗口）
 const shortcutCenterVisible = ref(false)
 
@@ -1439,6 +1459,24 @@ const closeGroup = async (groupId) => {
   for (const pid of paneIds) {
     const ok = await closePane(pid)
     if (!ok) break
+  }
+}
+
+// 一键关闭所有标签组（保留一个空标签页）
+const closeAllGroups = async () => {
+  if (layoutGroups.value.length < 2) return
+  // 从后往前关，保留第一个
+  const groups = [...layoutGroups.value]
+  for (let i = groups.length - 1; i >= 1; i--) {
+    await closeGroup(groups[i].id)
+  }
+  // 最后关第一个
+  if (layoutGroups.value.length > 0) {
+    await closeGroup(layoutGroups.value[0].id)
+  }
+  // 如果全部关完了，新建一个空标签
+  if (layoutGroups.value.length === 0) {
+    createEmptyGroup()
   }
 }
 
@@ -5086,6 +5124,33 @@ onBeforeUnmount(() => {
   scrollbar-width: thin;
 }
 .tab-bar::-webkit-scrollbar { height: 4px; }
+
+/* 一键清空按钮：默认隐藏，hover 标签栏时显示 */
+.tab-clear-all {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
+  margin-right: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--hover-bg, rgba(0,0,0,0.04));
+  color: var(--text-secondary, #6e6e73);
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.tab-clear-all:hover {
+  background: #fef0f0;
+  border-color: #fbc4c4;
+  color: #f56c6c;
+}
+.tab-bar:hover .tab-clear-all {
+  display: inline-flex;
+}
+
 .tab-item {
   display: flex;
   align-items: center;
@@ -5098,14 +5163,15 @@ onBeforeUnmount(() => {
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-  max-width: 220px;
+  width: 160px;
+  flex-shrink: 0;
   transition: background-color 0.12s, color 0.12s;
 }
 .tab-item:hover { background-color: var(--hover-bg, rgba(0,0,0,0.05)); color: var(--text-primary, #1d1d1f); }
 .tab-item.active { background-color: var(--active-bg, rgba(0,122,255,0.10)); color: var(--text-primary, #1d1d1f); font-weight: 600; }
 .tab-item.drag-over { border-left: 2px solid var(--apple-blue, #007aff); }
-.tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.multi-tab { max-width: 320px; }
+.tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.multi-tab { width: 200px; }
 .multi-name {
   display: inline-flex;
   align-items: center;
@@ -5382,7 +5448,9 @@ onBeforeUnmount(() => {
   backdrop-filter: var(--blur-amount) var(--blur-saturate);
   border-right: 1px solid var(--border-color);
   overflow: hidden;
-  transition: width 0.25s ease;
+  transition: width 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: width;
+  contain: layout paint;
 }
 
 .sidebar-content {
@@ -5391,6 +5459,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
   min-width: 0;
+  width: var(--sidebar-width);
 }
 
 .sidebar.collapsed,
@@ -5800,7 +5869,9 @@ onBeforeUnmount(() => {
   width: var(--ai-panel-width);
   flex-shrink: 0;
   overflow: hidden;
-  transition: width 0.15s ease;
+  transition: width 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: width;
+  contain: layout paint;
 }
 
 .ai-panel.collapsed {

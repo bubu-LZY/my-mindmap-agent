@@ -182,8 +182,10 @@ const MAX_RENDER_DEPTH = 2
 const LAST_LEVEL_LIMIT = 800
 // 节点数超过该阈值时不再逐字绘制文字，只绘制圆点，显著降低 Canvas 重绘开销
 const TEXT_RENDER_LIMIT = 700
-// 缩放到该倍率以下时不绘制文字，避免缩小后文字相对放大造成大量 overdraw
-const TEXT_ZOOM_MIN = 0.5
+// 缩放到该倍率以下时只绘制前几层的文字，避免缩小后文字相对放大造成大量 overdraw
+const TEXT_ZOOM_MIN = 0.3
+// 始终显示文字的最大层级（即使缩放很小也显示，方便定位）
+const ALWAYS_SHOW_TEXT_DEPTH = 3
 
 // 从导图实例提取节点 + 关联线
 const buildFromInstance = (mindMap) => {
@@ -575,17 +577,29 @@ const initGraph = async () => {
           ctx.lineWidth = 1
           ctx.stroke()
         }
-        // 文字显示：缩放过低时隐藏深层节点文字，但保留前几层层级节点文字，
-        // 让用户在缩到很小时仍能定位根与主分支位置；节点过多时进一步只保留前 2 层。
+        // 文字显示策略：
+        // 1. 缩放 >= TEXT_ZOOM_MIN：所有节点都显示文字
+        // 2. 缩放 < TEXT_ZOOM_MIN：只有前 ALWAYS_SHOW_TEXT_DEPTH 层显示文字（方便定位）
+        // 3. 节点数 > TEXT_RENDER_LIMIT：进一步减少，只显示前 2 层
+        // 4. 根节点和第1层字号更大，更容易识别
         const depth = node.depth || 0
         const showByZoom = globalScale >= TEXT_ZOOM_MIN
-        const showTopLevel = renderedCount.value > TEXT_RENDER_LIMIT ? depth < 2 : depth < 3
+        const showByDepth = depth < ALWAYS_SHOW_TEXT_DEPTH
+        const showTopLevel = renderedCount.value > TEXT_RENDER_LIMIT ? depth < 2 : showByDepth
         if (node.name && (showByZoom || showTopLevel)) {
-          const fontSize = 12 / globalScale
-          ctx.font = `${fontSize}px "Microsoft YaHei", "PingFang SC", sans-serif`
+          // 字号：根节点和主分支更大，深层小一些
+          let baseSize = 12
+          if (depth === 0) baseSize = 16
+          else if (depth === 1) baseSize = 14
+          else if (depth === 2) baseSize = 12
+          else baseSize = 11
+          const fontSize = baseSize / globalScale
+          ctx.font = `${depth === 0 ? 'bold ' : ''}${fontSize}px "Microsoft YaHei", "PingFang SC", sans-serif`
           ctx.textAlign = 'left'
           ctx.textBaseline = 'middle'
-          ctx.fillStyle = 'rgba(40, 44, 52, 0.88)'
+          ctx.fillStyle = depth === 0 ? 'rgba(0, 0, 0, 0.95)' : 
+                          depth === 1 ? 'rgba(40, 44, 52, 0.9)' : 
+                          'rgba(40, 44, 52, 0.88)'
           ctx.fillText(node.name, node.x + r + 4, node.y)
         }
       })
@@ -646,14 +660,24 @@ const initGraph = async () => {
     }
     setupMultiButtonPan()
 
-    // 力导向参数（默认值）
+    // 力导向参数（优化：减少节点重叠，让布局更舒展）
     try {
-      graph.d3Force('charge').strength(-120)
-      graph.d3Force('link').distance(link => (link.type === 'assoc' ? 80 : 55))
-      graph.d3Force('center').strength(0.05)
-      // 大量节点时降低模拟速度和迭代次数，优先保证可交互。
-      graph.d3AlphaDecay(0.02)
-      graph.cooldownTicks(120)
+      // 电荷力：节点间排斥力，越大越分散（负值=排斥）
+      graph.d3Force('charge').strength(-180)
+      // 连线距离：层级连线短一些，关联连线长一些
+      graph.d3Force('link').distance(link => (link.type === 'assoc' ? 120 : 70))
+      // 中心拉力：不要太强，让节点可以自由分布
+      graph.d3Force('center').strength(0.03)
+      // 碰撞检测：让节点之间保持最小距离（通过 nodeVal 影响碰撞半径）
+      try {
+        graph.d3Force('collision', graph.d3Force('collision')?.radius?.(node => {
+          const base = node.depth === 0 ? 30 : (node.depth === 1 ? 20 : 12)
+          return base
+        }))
+      } catch(e) { /* 没有 collision 力就跳过 */ }
+      // 模拟冷却：多迭代几次让布局更稳定
+      graph.d3AlphaDecay(0.015)
+      graph.cooldownTicks(200)
     } catch (e) {
       console.warn('[GraphView] d3Force 配置跳过:', e.message)
     }

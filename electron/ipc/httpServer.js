@@ -1,5 +1,6 @@
 const { ipcMain } = require('electron')
 const http = require('http')
+const https = require('https')
 const crypto = require('crypto')
 const os = require('os')
 const wsModule = require('ws')
@@ -50,14 +51,17 @@ const pendingAgentRequests = new Map()
 const pendingDeskCalendarRequests = new Map()
 const DESK_CALENDAR_REQUEST_TIMEOUT_MS = 8000
 
-// 登录限流：每个 IP 在时间窗口内最多失败 N 次，超过则锁定（主服务与仅查看服务独立计数）
+// 登录限流 + IP 封禁：每个 IP 在时间窗口内最多失败 N 次，超过则封禁
+// 两级防护：短期限流（快速失败）+ 长期封禁（暴力破解检测）
 const LOGIN_RATE_LIMIT = {
-  maxFailures: 10,      // 最大失败次数（放宽，避免误伤正常登录）
-  windowMs: 60 * 1000,  // 时间窗口（1分钟）
-  lockoutMs: 5 * 60 * 1000  // 锁定时长（5分钟）
+  maxFailures: 10,        // 短期限流：10 次失败触发 15 分钟锁定
+  windowMs: 5 * 60 * 1000,  // 短期时间窗口（5分钟）
+  lockoutMs: 15 * 60 * 1000, // 短期锁定时长（15分钟）
+  banThreshold: 30,       // 长期封禁：累计 30 次失败触发 24 小时封禁
+  banMs: 24 * 60 * 60 * 1000 // 长期封禁时长（24小时）
 }
-const loginFailures = new Map() // 主服务限流：ip -> { count, firstFail, lockedUntil }
-const viewOnlyLoginFailures = new Map() // 仅查看服务独立限流（与主服务隔离，避免互相累计）
+const loginFailures = new Map() // 主服务：ip -> { count, firstFail, lockedUntil, totalFailures, bannedUntil }
+const viewOnlyLoginFailures = new Map() // 仅查看服务独立计数
 
 // 获取客户端 IP
 const getClientIp = (req) => {
@@ -68,24 +72,34 @@ const getClientIp = (req) => {
   return req.socket?.remoteAddress || 'unknown'
 }
 
-// 检查是否被限流（map 参数化，主/仅查看独立）
+// 检查是否被限流/封禁（map 参数化，主/仅查看独立）
 const isLoginRateLimited = (ip, map = loginFailures) => {
   const record = map.get(ip)
   if (!record) return false
   const now = Date.now()
-  // 已锁定且未到期
+  // 长期封禁中
+  if (record.bannedUntil && now < record.bannedUntil) {
+    return true
+  }
+  // 封禁已到期，清除所有记录
+  if (record.bannedUntil && now >= record.bannedUntil) {
+    map.delete(ip)
+    return false
+  }
+  // 短期锁定中
   if (record.lockedUntil && now < record.lockedUntil) {
     return true
   }
-  // 锁定已到期，清除记录
+  // 短期锁定已到期，重置短期计数（保留累计计数用于封禁判定）
   if (record.lockedUntil && now >= record.lockedUntil) {
-    map.delete(ip)
-    return false
+    record.count = 0
+    record.firstFail = 0
+    record.lockedUntil = 0
   }
-  // 时间窗口已过，重置计数
-  if (now - record.firstFail > LOGIN_RATE_LIMIT.windowMs) {
-    map.delete(ip)
-    return false
+  // 时间窗口已过，重置短期计数
+  if (record.firstFail && now - record.firstFail > LOGIN_RATE_LIMIT.windowMs) {
+    record.count = 0
+    record.firstFail = 0
   }
   return false
 }
@@ -94,13 +108,25 @@ const isLoginRateLimited = (ip, map = loginFailures) => {
 const recordLoginFailure = (ip, map = loginFailures) => {
   const now = Date.now()
   let record = map.get(ip)
-  if (!record || now - record.firstFail > LOGIN_RATE_LIMIT.windowMs) {
-    record = { count: 0, firstFail: now, lockedUntil: 0 }
+  if (!record) {
+    record = { count: 0, firstFail: 0, lockedUntil: 0, totalFailures: 0, bannedUntil: 0 }
     map.set(ip, record)
   }
+  // 重置短期窗口（如果过期了）
+  if (record.firstFail === 0 || now - record.firstFail > LOGIN_RATE_LIMIT.windowMs) {
+    record.count = 0
+    record.firstFail = now
+  }
   record.count += 1
-  if (record.count >= LOGIN_RATE_LIMIT.maxFailures) {
+  record.totalFailures = (record.totalFailures || 0) + 1
+  
+  // 短期锁定
+  if (record.count >= LOGIN_RATE_LIMIT.maxFailures && !record.lockedUntil) {
     record.lockedUntil = now + LOGIN_RATE_LIMIT.lockoutMs
+  }
+  // 长期封禁（累计失败达到阈值）
+  if (record.totalFailures >= LOGIN_RATE_LIMIT.banThreshold && !record.bannedUntil) {
+    record.bannedUntil = now + LOGIN_RATE_LIMIT.banMs
   }
 }
 
@@ -127,6 +153,41 @@ const writeConfig = (config) => {
 }
 
 const generateToken = () => crypto.randomBytes(24).toString('base64url')
+
+// 生成自签名 TLS 证书（用于 HTTPS/WSS）
+const generateSelfSignedCert = () => {
+  const selfsigned = require('selfsigned')
+  const pems = selfsigned.generate([
+    { name: 'commonName', value: 'localhost' },
+    { name: 'organizationName', value: 'MyMindMap' }
+  ], {
+    keySize: 2048,
+    days: 365,
+    algorithm: 'sha256',
+    extensions: [
+      { name: 'basicConstraints', cA: true },
+      { name: 'keyUsage', keyCertSign: true, digitalSignature: true, nonRepudiation: true, keyEncipherment: true, dataEncipherment: true },
+      { name: 'extKeyUsage', serverAuth: true, clientAuth: true },
+      { name: 'subjectAltName', altNames: [
+        { type: 2, value: 'localhost' },
+        { type: 2, value: '127.0.0.1' }
+      ]}
+    ]
+  })
+  return {
+    key: pems.private,
+    cert: pems.cert
+  }
+}
+
+// 缓存证书，避免每次启动重新生成
+let cachedTlsCert = null
+const getTlsCert = () => {
+  if (!cachedTlsCert) {
+    cachedTlsCert = generateSelfSignedCert()
+  }
+  return cachedTlsCert
+}
 
 const ensureFreshToken = (config) => {
   if (!config.token || !config.tokenExpiresAt || Date.now() >= config.tokenExpiresAt) {
@@ -174,14 +235,15 @@ const viewOnlyTokenMatches = (value) => {
 
 const getLanAddresses = () => {
   const config = readConfig()
-  const addresses = [`http://127.0.0.1:${port}`]
+  const proto = config.https ? 'https' : 'http'
+  const addresses = [`${proto}://127.0.0.1:${port}`]
   // 未开启局域网访问时，只返回本机回环地址
   if (!config.lanAccess) return addresses
   const nets = os.networkInterfaces()
   for (const name of Object.keys(nets)) {
     for (const net of nets[name] || []) {
       if (net.family === 'IPv4' && !net.internal) {
-        addresses.push(`http://${net.address}:${port}`)
+        addresses.push(`${proto}://${net.address}:${port}`)
       }
     }
   }
@@ -200,7 +262,8 @@ const getStatus = () => {
     addresses: running ? getLanAddresses() : [],
     frameIntervalMs: FRAME_INTERVAL_MS,
     quality: config.quality || 'medium',
-    lanAccess: !!config.lanAccess
+    lanAccess: !!config.lanAccess,
+    https: !!config.https
   }
 }
 
@@ -920,7 +983,13 @@ const start = async () => {
   config.enabled = true
   writeConfig(config)
 
-  server = http.createServer(handleRequest)
+  // 根据配置选择 HTTP 或 HTTPS
+  if (config.https) {
+    const tls = getTlsCert()
+    server = https.createServer({ key: tls.key, cert: tls.cert }, handleRequest)
+  } else {
+    server = http.createServer(handleRequest)
+  }
   wss = new WebSocketServer({ noServer: true })
   server.on('upgrade', handleUpgrade)
 
@@ -1116,6 +1185,17 @@ const init = (getWindow) => {
     }
     return getStatus()
   })
+  // HTTPS 开关：修改后若服务运行中则重启以应用新协议
+  ipcMain.handle('http-server:setHttps', async (event, https) => {
+    const config = readConfig()
+    config.https = !!https
+    writeConfig(config)
+    if (server && server.listening) {
+      stop()
+      await start()
+    }
+    return getStatus()
+  })
   // 重置 HTTP 主 token：立即生成新 token，旧 token 失效
   ipcMain.handle('http-server:resetToken', async () => {
     const config = readConfig()
@@ -1286,15 +1366,17 @@ const REMOTE_PAGE = `<!DOCTYPE html>
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: value })
     }).then(function (r) {
-      if (r.ok) {
-        token = value;
-        localStorage.setItem('mm_http_token', token);
-        login.style.display = 'none';
-        stage.style.display = 'flex';
-        connect();
-      } else {
-        setStatus('Token 无效或已过期');
-      }
+      return r.json().then(function (data) {
+        if (r.ok) {
+          token = value;
+          localStorage.setItem('mm_http_token', token);
+          login.style.display = 'none';
+          stage.style.display = 'flex';
+          connect();
+        } else {
+          setStatus((data && data.error) ? data.error : 'Token 无效或已过期');
+        }
+      }).catch(function () { setStatus('Token 无效或已过期'); });
     }).catch(function () { setStatus('连接失败'); });
   };
 
@@ -1361,7 +1443,15 @@ const REMOTE_PAGE = `<!DOCTYPE html>
         } catch (err) {}
       }
     };
-    ws.onclose = function () { setStatus('连接断开'); };
+    ws.onclose = function () {
+      setStatus('连接断开，正在重连...');
+      // 自动重连：1.5 秒后尝试
+      setTimeout(function () {
+        if (!ws || ws.readyState === WebSocket.CLOSED) {
+          connect();
+        }
+      }, 1500);
+    };
     ws.onerror = function () { setStatus('连接错误'); };
   };
 
@@ -1601,10 +1691,22 @@ const REMOTE_PAGE = `<!DOCTYPE html>
     touchStartDistance = 0;
   });
 
+  // 启动时验证 token：有效才连接，无效显示登录界面
   if (token) {
-    login.style.display = 'none';
-    stage.style.display = 'flex';
-    connect();
+    fetch('/api/status?token=' + encodeURIComponent(token)).then(function (r) {
+      if (r.ok) {
+        login.style.display = 'none';
+        stage.style.display = 'flex';
+        connect();
+      } else {
+        // token 无效，清除并显示登录
+        localStorage.removeItem('mm_http_token');
+        token = '';
+        setStatus('Token 已过期，请重新输入');
+      }
+    }).catch(function () {
+      setStatus('连接失败');
+    });
   }
 })();
 </script>
@@ -1729,11 +1831,21 @@ const REMOTE_VIEW_PAGE = `<!DOCTYPE html>
     };
     ws.onerror = function () { setStatus('连接错误'); };
   };
-  // 已有有效 token 则直接连接，否则显示登录框
+  // 已有有效 token 则验证后连接，否则显示登录框
   if (token) {
-    login.style.display = 'none';
-    stage.style.display = 'flex';
-    connect();
+    fetch('/api/status?token=' + encodeURIComponent(token)).then(function (r) {
+      if (r.ok) {
+        login.style.display = 'none';
+        stage.style.display = 'flex';
+        connect();
+      } else {
+        localStorage.removeItem('mm_view_token');
+        token = '';
+        setStatus('Token 已过期，请重新输入');
+      }
+    }).catch(function () {
+      setStatus('连接失败');
+    });
   } else {
     setStatus('请输入访问 Token');
   }

@@ -21,7 +21,7 @@ process.on('unhandledRejection', (reason) => {
   try { console.error('[unhandledRejection]', reason) } catch (_) {}
 })
 
-const { app, BrowserWindow, shell, ipcMain, Tray, Menu, nativeImage } = require('electron')
+const { app, BrowserWindow, BrowserView, shell, ipcMain, Tray, Menu, nativeImage } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
@@ -32,11 +32,23 @@ const store = require('./utils/store')
 // 一旦渲染层被 XSS 注入，可在主进程统一拦截，避免任意文件读写/对外发送被滥用。
 const _origIpcHandle = ipcMain.handle.bind(ipcMain)
 const _origIpcOn = ipcMain.on.bind(ipcMain)
-function _isTrustedSender(event) {
+// DeepSeek BrowserView 专用白名单（这些通道只用于转发消息，不涉及高危操作）
+const DEEPSEEK_WHITELIST = [
+  'deepseek:request-context',
+  'deepseek:execute-tool',
+  'deepseek:open-devtools',
+  'deepseek:ping',
+  'deepseek:view-pong',
+]
+function _isTrustedSender(event, channel) {
   try {
     const url = (event.senderFrame && event.senderFrame.url) || ''
     if (url.startsWith('file://')) return true
     if (/^https?:\/\/(localhost|127\.0\.0\.1):\d+/.test(url)) return true
+    // DeepSeek BrowserView 白名单通道放行
+    if (DEEPSEEK_WHITELIST.includes(channel)) return true
+    // 所有 deepseek-view: 开头的（主窗口操作 BrowserView 的 API）
+    if (channel.startsWith('deepseek-view:')) return true
     return false
   } catch {
     return false
@@ -44,7 +56,7 @@ function _isTrustedSender(event) {
 }
 ipcMain.handle = function (channel, listener) {
   return _origIpcHandle(channel, async (event, ...args) => {
-    if (!_isTrustedSender(event)) {
+    if (!_isTrustedSender(event, channel)) {
       console.warn(`[security] 拦截未授权 IPC 调用: ${channel} (${event.senderFrame && event.senderFrame.url})`)
       throw new Error('未授权调用')
     }
@@ -53,7 +65,7 @@ ipcMain.handle = function (channel, listener) {
 }
 ipcMain.on = function (channel, listener) {
   return _origIpcOn(channel, (event, ...args) => {
-    if (!_isTrustedSender(event)) {
+    if (!_isTrustedSender(event, channel)) {
       console.warn(`[security] 拦截未授权 IPC 调用: ${channel} (${event.senderFrame && event.senderFrame.url})`)
       return
     }
@@ -629,6 +641,201 @@ ipcMain.handle('auto-launch:set', (event, enable) => {
   }
 })
 
+// === DeepSeek BrowserView 管理（替代 webview 标签，彻底解决尺寸问题）===
+let deepSeekView = null
+
+ipcMain.handle('deepseek-view:create', (event, { x, y, width, height }) => {
+  try {
+    if (deepSeekView) {
+      // 已存在则重新添加到窗口（可能之前被 removeBrowserView 了）+ 更新位置
+      if (mainWindow) {
+        // 先确保在窗口视图树中
+        try { mainWindow.addBrowserView(deepSeekView) } catch(e) { /* 已添加则忽略 */ }
+      }
+      deepSeekView.setBounds({ x, y, width, height })
+      return { success: true, created: false }
+    }
+    deepSeekView = new BrowserView({
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+        preload: path.join(__dirname, 'preload-deepseek.js'),
+        partition: 'persist:deepseek-web'
+      }
+    })
+    mainWindow.addBrowserView(deepSeekView)
+    deepSeekView.setBounds({ x, y, width, height })
+    deepSeekView.setAutoResize({ width: false, height: false })
+    deepSeekView.webContents.loadURL('https://chat.deepseek.com/')
+    
+    // 拦截新窗口，用系统浏览器打开
+    deepSeekView.webContents.setWindowOpenHandler(({ url }) => {
+      shell.openExternal(url)
+      return { action: 'deny' }
+    })
+    
+    // 转发 BrowserView 的控制台日志到主窗口（方便调试）
+    deepSeekView.webContents.on('console-message', (event, level, message, line, sourceId) => {
+      const levelMap = { 0: 'log', 1: 'warn', 2: 'error', 3: 'info' }
+      const levelStr = levelMap[level] || 'log'
+      // 转发所有日志，不过滤
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('deepseek:console-log', {
+          level: levelStr,
+          message,
+          line,
+          sourceId
+        })
+      }
+    })
+    
+    // BrowserView 加载完成后，主动发一条 ping 测试双向通信
+    deepSeekView.webContents.on('did-finish-load', () => {
+      debugLog('BrowserView 加载完成，发送 ping 测试...')
+      deepSeekView.webContents.send('deepseek:main-ping', { ts: Date.now() })
+    })
+    
+    return { success: true, created: true }
+  } catch (error) {
+    console.error('[DeepSeek BrowserView] create failed:', error)
+    return { success: false, error: error.message }
+  }
+})
+
+// === DeepSeek BrowserView 消息转发（ipcMain 方式） ===
+// BrowserView preload 发的 ipcRenderer.send，主进程用 ipcMain.on 接收
+// 然后转发给主窗口渲染进程
+
+// 调试：转发主进程 IPC 日志到主窗口
+function debugLog(msg) {
+  console.log('[DeepSeek IPC]', msg)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('deepseek:ipc-debug', msg)
+  }
+}
+
+// 请求导图上下文
+ipcMain.on('deepseek:request-context', (event) => {
+  debugLog(`收到 request-context, senderId: ${event.sender.id}`)
+  if (!deepSeekView) {
+    debugLog('deepSeekView 不存在，忽略')
+    return
+  }
+  debugLog(`deepSeekView webContents id: ${deepSeekView.webContents.id}`)
+  // 直接转发，不校验 senderId（避免 id 不匹配导致静默失败）
+  debugLog('转发给主窗口')
+  mainWindow.webContents.send('deepseek:request-context', {})
+  // 同时给 BrowserView 回个确认
+  event.sender.send('deepseek:ipc-ack', { channel: 'request-context', received: true })
+})
+
+// 执行工具
+ipcMain.on('deepseek:execute-tool', (event, data) => {
+  debugLog('收到 execute-tool, tool: ' + data?.name)
+  if (deepSeekView) {
+    mainWindow.webContents.send('deepseek:execute-tool', data)
+    event.sender.send('deepseek:ipc-ack', { channel: 'execute-tool', received: true })
+  }
+})
+
+// 打开 BrowserView 开发者工具
+ipcMain.on('deepseek:open-devtools', (event) => {
+  debugLog('收到 open-devtools')
+  if (deepSeekView) {
+    deepSeekView.webContents.openDevTools({ mode: 'detach' })
+  }
+})
+
+// BrowserView 回的 pong
+ipcMain.on('deepseek:view-pong', (event, data) => {
+  const latency = Date.now() - data.pingTs
+  debugLog(`收到 BrowserView pong，延迟: ${latency}ms`)
+})
+
+// invoke 测试（双向同步）
+ipcMain.handle('deepseek:ping', async (event, data) => {
+  debugLog(`收到 invoke ping: ${JSON.stringify(data)}`)
+  return { pong: true, received: data, ts: Date.now() }
+})
+
+ipcMain.handle('deepseek-view:setBounds', (event, { x, y, width, height }) => {
+  try {
+    if (!deepSeekView) return { success: false, error: 'not created' }
+    deepSeekView.setBounds({ x, y, width, height })
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('deepseek-view:show', () => {
+  try {
+    if (!deepSeekView || !mainWindow) return { success: false, error: 'not created' }
+    mainWindow.addBrowserView(deepSeekView)
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('deepseek-view:hide', () => {
+  try {
+    if (!deepSeekView || !mainWindow) return { success: false, error: 'not created' }
+    mainWindow.removeBrowserView(deepSeekView)
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('deepseek-view:destroy', () => {
+  try {
+    if (deepSeekView && mainWindow) {
+      mainWindow.removeBrowserView(deepSeekView)
+    }
+    if (deepSeekView) {
+      deepSeekView.webContents.destroy()
+      deepSeekView = null
+    }
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('deepseek-view:send', (event, channel, ...args) => {
+  try {
+    if (!deepSeekView) return { success: false, error: 'not created' }
+    deepSeekView.webContents.send(channel, ...args)
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+// 打开 BrowserView 的开发者工具
+ipcMain.handle('deepseek-view:openDevTools', () => {
+  try {
+    if (!deepSeekView) return { success: false, error: 'not created' }
+    deepSeekView.webContents.openDevTools({ mode: 'detach' })
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+// 主窗口 → BrowserView 的消息转发（渲染进程用 send 发，主进程转寄）
+ipcMain.on('deepseek-view:forward', (event, channel, ...args) => {
+  try {
+    if (deepSeekView) {
+      deepSeekView.webContents.send(channel, ...args)
+    }
+  } catch (error) {
+    console.error('[DeepSeek] forward to view failed:', error)
+  }
+})
+
 // 默认保存目录：固定到 C:\我的mindmap，不再提供修改入口。
 const DEFAULT_SAVE_DIR = 'C:\\我的mindmap'
 let defaultSaveDir = ''
@@ -750,11 +957,23 @@ function createWindow() {
 
   // 内置浏览器使用 <webview> 加载外部网页：强制关闭 preload / node 集成，只保留隔离的渲染环境，
   // 避免外部页面获得主进程能力。登录状态由 persist:ai-web-browser 分区单独保存。
-  mainWindow.webContents.on('will-attach-webview', (event, webPreferences) => {
-    delete webPreferences.preload
-    webPreferences.nodeIntegration = false
-    webPreferences.nodeIntegrationInSubFrames = false
-    webPreferences.contextIsolation = true
+  // 例外：DeepSeek 网页模式的 webview 使用专用 preload，只暴露有限的工具调用 IPC，
+  // 不暴露文件系统、Node 等敏感能力，仅用于检测 AI 输出中的工具调用。
+  mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    const isDeepSeek = params && params.partition === 'persist:deepseek-web'
+    if (isDeepSeek) {
+      // DeepSeek 专用：使用独立 preload，仅暴露工具调用相关的受限 IPC
+      webPreferences.preload = path.join(__dirname, 'preload-deepseek.js')
+      webPreferences.nodeIntegration = false
+      webPreferences.nodeIntegrationInSubFrames = false
+      webPreferences.contextIsolation = true
+      webPreferences.sandbox = false // preload 需要 contextBridge
+    } else {
+      delete webPreferences.preload
+      webPreferences.nodeIntegration = false
+      webPreferences.nodeIntegrationInSubFrames = false
+      webPreferences.contextIsolation = true
+    }
   })
 
   // 开发环境加载本地服务器，生产环境加载打包后的文件

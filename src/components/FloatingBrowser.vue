@@ -56,7 +56,7 @@
           v-for="s in sites"
           :key="s.url"
           class="fb-bookmark"
-          :class="{ active: activeTab && activeTab.url.startsWith(s.url) }"
+          :class="{ active: activeTab && typeof activeTab.url === 'string' && activeTab.url.startsWith(s.url) }"
           :title="s.name"
           @click="openBookmark(s, $event)"
         >
@@ -132,13 +132,14 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { treeToMarkdown } from '../utils/markdownParser'
 import { getDragFilePath, clearDragFilePath } from '../utils/dragState'
 
 const emit = defineEmits(['close'])
 
 const DEFAULT_SITES = [
+  { name: 'Bing', url: 'https://www.bing.com/' },
   { name: 'DeepSeek', url: 'https://chat.deepseek.com/' },
   { name: '豆包', url: 'https://www.doubao.com/chat/' },
   { name: 'Kimi', url: 'https://kimi.moonshot.cn/' },
@@ -248,7 +249,9 @@ const openBookmark = (site, e) => {
 }
 
 const newTab = (url) => {
-  const t = { id: genTabId(), url: url || DEFAULT_SITES[0].url, title: '', loading: false }
+  // 防止传入事件对象（比如 @click="newTab" 不带括号时会传 event）
+  const realUrl = (typeof url === 'string') ? url : DEFAULT_SITES[0].url
+  const t = { id: genTabId(), url: realUrl, title: '', loading: false }
   tabs.value.push(t)
   activeTabId.value = t.id
   addressInput.value = t.url
@@ -510,6 +513,11 @@ onBeforeUnmount(() => {
   for (const el of Object.values(webviewRefs)) {
     try { el?.stop?.() } catch (e) {}
   }
+})
+
+// 每次打开浏览器时，新建一个默认标签页（Bing）
+onMounted(() => {
+  newTab(DEFAULT_SITES[0].url)
 })
 </script>
 
