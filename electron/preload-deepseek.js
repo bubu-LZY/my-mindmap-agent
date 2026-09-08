@@ -1,6 +1,11 @@
 // DeepSeek 网页版专用 preload 脚本
 // 全自动 Agent 模式
 // 通过 ipcRenderer 与主进程通信，主进程转发到渲染进程
+//
+// 致谢：
+// 本模块的代码检测与防循环机制设计参考了 @wangyongpeng90 的开源项目
+// https://github.com/wangyongpeng90/cuckoo-code
+// 感谢开源社区的贡献！
 
 const { contextBridge, ipcRenderer } = require('electron')
 
