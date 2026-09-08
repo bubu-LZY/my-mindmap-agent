@@ -201,16 +201,17 @@
           </div>
           <!-- Markdown 渲染内容 -->
           <div v-if="msg.content" class="md-content" :class="{ 'show-raw': msg.showRaw }">
-            <div v-if="msg.showRaw" class="md-raw-text">{{ cleanMessageContent(msg.content) }}</div>
+            <!-- 流式输出期间 / 用户手动切原文：显示纯文本（pre-wrap 保留换行），不做 Markdown 渲染 -->
+            <div v-if="msg.showRaw || isStreamingMsg(msg)" class="md-streaming-text">{{ cleanMessageContent(msg.content) }}</div>
             <div
               v-else
-              v-html="renderMarkdown(cleanMessageContent(msg.content))"
+              v-html="renderMarkdownCached(msg)"
               @click="handleLinkClick"
               @contextmenu="handleMdContextMenu"
             ></div>
-            <!-- 显示原文/渲染切换按钮 -->
+            <!-- 显示原文/渲染切换按钮（流式期间隐藏，结束后恢复） -->
             <button
-              v-if="msg.content && msg.content.includes('\n')"
+              v-if="msg.content && msg.content.includes('\n') && !isStreamingMsg(msg)"
               class="md-toggle-raw"
               @click="msg.showRaw = !msg.showRaw"
             >
@@ -1062,7 +1063,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount, toRaw } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Setting } from '@element-plus/icons-vue'
 import { treeToText, treeToSkeletonText, countNodes } from '../utils/treeUtils'
@@ -1976,6 +1977,30 @@ const scrollToBottom = (force = false) => {
       messagesRef.value.scrollTop = messagesRef.value.scrollHeight
     }
   })
+}
+
+// Markdown 渲染缓存：按消息对象（原始引用）缓存 content → HTML。
+// 历史消息 content 不变时直接返回同一 HTML 字符串引用，v-html 的 diff 判定未变化即跳过 DOM 更新；
+// 避免流式输出期间每帧对会话内全部消息重跑 20+ 趟 markdown 正则解析（长会话下 UI 严重卡顿的根源）
+const _mdHtmlCache = new WeakMap()
+const renderMarkdownCached = (msg) => {
+  if (!msg || !msg.content) return ''
+  const raw = toRaw(msg)
+  let entry = _mdHtmlCache.get(raw)
+  if (!entry || entry.src !== msg.content) {
+    entry = { src: msg.content, html: renderMarkdown(cleanMessageContent(msg.content)) }
+    _mdHtmlCache.set(raw, entry)
+  }
+  return entry.html
+}
+
+// 判断消息是否正在流式输出（AI 运行中且是最后一条 assistant 消息）
+// 流式期间只显示纯文本、结束后再渲染 Markdown，避免高频追加内容时反复全量解析 markdown
+const isStreamingMsg = (msg) => {
+  if (!msg || msg.role !== 'assistant') return false
+  const last = messages.value[messages.value.length - 1]
+  if (last !== msg) return false
+  return aiStatus.value === 'thinking' || aiStatus.value === 'calling'
 }
 
 /* ============================================================
@@ -3909,7 +3934,7 @@ const sendMessage = async (overrideText = null) => {
     // 用户直接粘贴完整导图 JSON/Markdown 数据时，明确告诉模型这是本次任务的显式数据源，
     // 不要再去询问“先打开文件”，也不要把它当历史消息忽略；同时必须判断格式是否合法。
     const looksLikeMindMapJson = /"smmVersion"\s*:|"root"\s*:\s*\{|"theme"\s*:\s*\{/.test(fullContent)
-    const looksLikeMindMapMarkdown = /(^|\n)#{1,6}\s+\S/.test(fullContent) && /(^|\n)\s*[-*+]\s+\S/.test(fullContent)
+    const looksLikeMindMapMarkdown = /(^|\n)#{1,}\s+\S/.test(fullContent) && /(^|\n)\s*[-*+]\s+\S/.test(fullContent)
     if (looksLikeMindMapJson || looksLikeMindMapMarkdown) {
       dynamicContext += `\n\n## Pasted mindmap data detected\nThe user pasted data in this message. Treat it as EXPLICIT context/source, but ALWAYS follow the user's actual request: only create/save a mindmap if the user asked to create/save one; otherwise analyze, edit, summarize, or answer based on it. Before using it, validate whether the data is well-formed JSON/outline/Markdown. If invalid, incomplete, or ambiguous, ask the user to correct or complete it.`
     }
@@ -4171,6 +4196,9 @@ Output a JSON code block with EXACTLY this format. Put it FIRST in your reply:
       // 流式 chunk 的 rAF 节流：合并高频 chunk，每帧最多重渲染一次 content，
       // 避免长响应时每个 chunk 都触发整段 markdown 重解析导致 UI 卡顿
       let chunkRaf = null
+      // 深度思考 chunk 的 rAF 批量缓冲：每帧最多写一次 reasoning + 滚动
+      let _reasoningBuf = ''
+      let reasoningRaf = null
       await aiService.chatWithCallbacks(
       {
         messages: msgs,
@@ -4221,21 +4249,38 @@ Output a JSON code block with EXACTLY this format. Put it FIRST in your reply:
           // 流式输出过程中定时保存，防止中途关闭丢失
           saveConversationThrottled()
         },
-        // 深度思考流式回调：实时累积思考内容
+        // 深度思考流式回调：rAF 批量合并高频 chunk，每帧最多写一次响应式状态 + 滚动，
+        // 避免深度思考模型每个 token 都触发整组件重渲染与布局读取（滚动卡顿）
         onReasoning: (chunk, isEnd) => {
           if (!isCurrentRun(runToken)) return
           if (chunk) {
-            aiMsg.reasoning = (aiMsg.reasoning || '') + chunk
-            aiMsg.reasoningThinking = true
-            // 如果用户已经展开了深度思考，自动滚动到底部
-            if (aiMsg.reasoningExpanded) {
-              nextTick(() => scrollReasoningToBottom(aiMsg.id))
+            _reasoningBuf += chunk
+            if (!reasoningRaf) {
+              reasoningRaf = requestAnimationFrame(() => {
+                reasoningRaf = null
+                if (!isCurrentRun(runToken)) return
+                if (_reasoningBuf) {
+                  aiMsg.reasoning = (aiMsg.reasoning || '') + _reasoningBuf
+                  _reasoningBuf = ''
+                }
+                aiMsg.reasoningThinking = true
+                // 如果用户已经展开了深度思考，自动滚动到底部
+                if (aiMsg.reasoningExpanded) {
+                  nextTick(() => scrollReasoningToBottom(aiMsg.id))
+                }
+                scrollToBottom()
+              })
             }
           }
           if (isEnd) {
+            if (reasoningRaf) { cancelAnimationFrame(reasoningRaf); reasoningRaf = null }
+            if (_reasoningBuf) {
+              aiMsg.reasoning = (aiMsg.reasoning || '') + _reasoningBuf
+              _reasoningBuf = ''
+            }
             aiMsg.reasoningThinking = false
+            scrollToBottom()
           }
-          scrollToBottom()
         },
         // 自动工具发现兜底：清空已流式输出的首答，模型带新激活的工具重答
         onBeforeRetry: (hits) => {
@@ -6661,7 +6706,7 @@ const buildFallbackMarkdown = (fullText, base) => {
   let count = 0
   for (const line of lines) {
     if (count >= MAX) { out.push('- …（内容过多，其余部分已省略）'); break }
-    if (/^#{1,6}\s+/.test(line) || /^([-*+]|\d+[.)])\s+/.test(line)) {
+    if (/^#{1,}\s+/.test(line) || /^([-*+]|\d+[.)])\s+/.test(line)) {
       out.push(line)
     } else {
       out.push(`- ${line}`)
@@ -6721,10 +6766,9 @@ const mergeMarkdownParts = (parts) => {
   if (!valid.length) return ''
   if (valid.length === 1) return valid[0]
   const demote = (md) => md.split('\n').map(line => {
-    const m = line.match(/^(#{1,6})\s+/)
+    const m = line.match(/^(#{1,})\s+/)
     if (!m) return line
-    const lv = m[1].length
-    return '#'.repeat(Math.min(lv + 1, 6)) + line.slice(m[1].length)
+    return '#' + line
   }).join('\n')
   return [valid[0], ...valid.slice(1).map(demote)].join('\n')
 }
@@ -6737,10 +6781,9 @@ const mergeMultiDocMarkdown = (markdownParts, rootTitle) => {
     .replace(/[\r\n]/g, '')
   const root = `# ${safeRoot}`
   const demote = (md) => String(md || '').split('\n').map(line => {
-    const m = line.match(/^(#{1,6})\s+/)
+    const m = line.match(/^(#{1,})\s+/)
     if (!m) return line
-    const lv = m[1].length
-    return '#'.repeat(Math.min(lv + 1, 6)) + line.slice(m[1].length)
+    return '#' + line
   }).join('\n')
   const sections = markdownParts.map(({ md }) => demote(md))
   return [root, ...sections].join('\n\n')
@@ -8990,6 +9033,16 @@ defineExpose({
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-secondary);
+}
+
+/* 流式输出期间的纯文本：pre-wrap 保留换行，普通字体（非等宽），与渲染后视觉衔接自然 */
+.assistant-content :deep(.md-streaming-text) {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  min-height: 1.6em;
 }
 
 /* ========== Markdown Table ========== */

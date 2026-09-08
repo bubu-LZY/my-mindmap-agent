@@ -36,7 +36,7 @@ function clonePlainValue(value, seen) {
   return out
 }
 
-export function clonePlainTree(node, seen = new WeakMap()) {
+export function clonePlainTree(node, seen = new WeakMap(), transform = null) {
   if (!node || typeof node !== 'object') return node
   if (seen.has(node)) return seen.get(node)
   const out = {}
@@ -49,11 +49,14 @@ export function clonePlainTree(node, seen = new WeakMap()) {
     // data 的字段一律按纯数据深拷贝，不能再走 clonePlainTree（会把数组毁成 { data: {} }）
     out.data[key] = clonePlainValue(data[key], seen)
   }
+  // 可选归一化回调：在深拷贝后对每个节点执行（如 uid 去重、文本归一化），
+  // 让「深拷贝 + 归一化」合并为一次遍历，大图打开时减少一轮全树递归
+  if (typeof transform === 'function') transform(out)
 
   if (Array.isArray(node.children)) {
     out.children = node.children
       .filter(child => child && child.data)
-      .map(child => clonePlainTree(child, seen))
+      .map(child => clonePlainTree(child, seen, transform))
   }
   return out
 }

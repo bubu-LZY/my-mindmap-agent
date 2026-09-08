@@ -117,8 +117,9 @@ function parseLines(lines, indentUnit) {
       continue
     }
 
-    // # 标题（允许前面有缩进）
-    const hMatch = line.match(/^[ \t]*(#{1,6})[ \t]+(.+)/)
+    // # 标题（允许前面有缩进；井号数量不限——本应用导出深层节点会产生 7+ 个井号，
+    // 标准 Markdown 仅定义 1~6 级，超过部分按实际数量解析层级，保证往返不丢失）
+    const hMatch = line.match(/^[ \t]*(#{1,})[ \t]+(.+)/)
     if (hMatch) {
       currentHeadingDepth = hMatch[1].length
       nodes.push({ depth: currentHeadingDepth, text: hMatch[2].trim() })

@@ -642,10 +642,9 @@ function cleanCorruptedArrayFields(data) {
   }
 }
 
-function normalizeNodeData(node, uidSet) {
-  if (!node) return null
-  if (!uidSet) uidSet = new Set()
-  if (!node.data) node.data = {}
+// 单节点字段归一化（不含递归）：供 cloneAndNormalize 在深拷贝时逐节点调用
+function normalizeNodeFields(node, uidSet) {
+  if (!node || !node.data) return node
   if (!node.data.uid) node.data.uid = createUid()
   // uid 去重：数据层可能因 AI 并发/组合操作产生重复 uid 的节点，
   // 重复 uid 会让渲染层 findNodeByUid / 节点定位串节点，表现为节点覆盖、重复出现。
@@ -671,10 +670,15 @@ function normalizeNodeData(node, uidSet) {
   if (!node.data.text) {
     node.data.text = '<p><span></span></p>'
   }
-  if (node.children) {
-    node.children.forEach(c => normalizeNodeData(c, uidSet))
-  }
   return node
+}
+
+// 深拷贝 + 归一化合并为一次遍历：大图打开时减少一轮全树递归，缓解「打开大图卡顿」
+function cloneAndNormalize(node) {
+  const uidSet = new Set()
+  return clonePlainTree(node, new WeakMap(), (outNode) => {
+    normalizeNodeFields(outNode, uidSet)
+  })
 }
 
 const props = defineProps({
@@ -732,6 +736,9 @@ let mindMapViewSaveTimer = null
 let miniMapUpdateTimer = null
 let miniMapGeneration = 0
 let miniMapViewBoxDrag = null
+// 蓝框拖动 rAF 节流：每帧最多执行一次画布平移 + 蓝框位置更新，消除高频 mousemove 导致的卡顿
+let miniMapViewBoxMoveRaf = null
+let miniMapViewBoxPending = null
 // 全局注册表：AI 工具（toolHandler）经 store 惰性获取实例，
 // 避免父组件一次性快照为 null 后所有导图类工具永久报"实例未初始化"
 const mindMapStore = useMindMapStore()
@@ -1006,23 +1013,6 @@ const applyMiniMapViewBoxData = (data) => {
   }
 }
 
-// 拖动蓝框期间，只同步蓝框位置，不重新生成整张缩略图，避免卡顿。
-let miniMapViewBoxSyncQueued = false
-const queueMiniMapViewBoxSync = () => {
-  if (miniMapViewBoxSyncQueued) return
-  miniMapViewBoxSyncQueued = true
-  requestAnimationFrame(() => {
-    miniMapViewBoxSyncQueued = false
-    if (!mindMap?.miniMap || !miniMapVisible.value) return
-    try {
-      const data = mindMap.miniMap.calculationMiniMap(MINIMAP_WIDTH, MINIMAP_HEIGHT)
-      applyMiniMapViewBoxData(data)
-    } catch (e) {
-      console.warn('[MindMapEditor] 小地图蓝框同步失败:', e)
-    }
-  })
-}
-
 // 刷新左下角小地图：用 MiniMap 插件计算缩略图与当前视口框，并异步取图
 const updateMiniMap = () => {
   if (!mindMap || !mindMap.miniMap || !miniMapVisible.value) return
@@ -1097,19 +1087,45 @@ const onMiniMapViewBoxMousemove = (e) => {
   if (!miniMapViewBoxDrag || !mindMap) return
   e.preventDefault()
   e.stopPropagation()
-  const dx = e.clientX - miniMapViewBoxDrag.clientX
-  const dy = e.clientY - miniMapViewBoxDrag.clientY
-  const scale = miniMapViewBoxDrag.miniMapBoxScale || 1
-  try {
-    mindMap.view.translateXTo(miniMapViewBoxDrag.viewX - dx / scale)
-    mindMap.view.translateYTo(miniMapViewBoxDrag.viewY - dy / scale)
-  } catch (err) {
-    console.warn('[MindMapEditor] 小地图视口框拖动失败:', err)
-  }
+  // 只记录最新鼠标位置，rAF 里统一执行，避免高频 mousemove 每帧多次平移画布导致卡顿
+  miniMapViewBoxPending = { clientX: e.clientX, clientY: e.clientY }
+  if (miniMapViewBoxMoveRaf) return
+  miniMapViewBoxMoveRaf = requestAnimationFrame(() => {
+    miniMapViewBoxMoveRaf = null
+    const p = miniMapViewBoxPending
+    miniMapViewBoxPending = null
+    if (!miniMapViewBoxDrag || !mindMap || !p) return
+    const dx = p.clientX - miniMapViewBoxDrag.clientX
+    const dy = p.clientY - miniMapViewBoxDrag.clientY
+    const scale = miniMapViewBoxDrag.miniMapBoxScale || 1
+    try {
+      // 平移画布：鼠标右移 dx，视口左移 dx/scale（与官方 MiniMap 换算一致）
+      mindMap.view.translateXTo(miniMapViewBoxDrag.viewX - dx / scale)
+      mindMap.view.translateYTo(miniMapViewBoxDrag.viewY - dy / scale)
+      // 直接更新蓝框位置（严格跟随鼠标），不在拖动中反算 calculationMiniMap，兼顾跟手与精度
+      const w = miniMapViewBoxDrag.width
+      const h = miniMapViewBoxDrag.height
+      const left = Math.min(Math.max(0, miniMapViewBoxDrag.startLeft + dx), Math.max(0, MINIMAP_WIDTH - w))
+      const top = Math.min(Math.max(0, miniMapViewBoxDrag.startTop + dy), Math.max(0, MINIMAP_HEIGHT - h))
+      miniMapViewStyle.value = {
+        left: left + 'px',
+        top: top + 'px',
+        width: w + 'px',
+        height: h + 'px'
+      }
+    } catch (err) {
+      console.warn('[MindMapEditor] 小地图视口框拖动失败:', err)
+    }
+  })
 }
 const onMiniMapViewBoxDragEnd = () => {
   if (!miniMapViewBoxDrag) return
   miniMapViewBoxDrag = null
+  if (miniMapViewBoxMoveRaf) {
+    cancelAnimationFrame(miniMapViewBoxMoveRaf)
+    miniMapViewBoxMoveRaf = null
+  }
+  miniMapViewBoxPending = null
   window.removeEventListener('mousemove', onMiniMapViewBoxMousemove)
   window.removeEventListener('mouseup', onMiniMapViewBoxDragEnd)
   if (mindMap?.miniMap) {
@@ -1159,7 +1175,8 @@ const setupMindMapViewListeners = () => {
   mindMap.on('view_data_change', (viewData) => {
     saveViewState(viewData)
     if (miniMapViewBoxDrag) {
-      queueMiniMapViewBoxSync()
+      // 拖动期间蓝框位置由 onMiniMapViewBoxMousemove 直接更新，这里不反算，
+      // 避免每帧 calculationMiniMap（大图遍历节点边界）造成卡顿与对不准
     } else {
       updateMiniMap()
     }
@@ -1610,7 +1627,7 @@ const initMindMap = () => {
     return
   }
 
-  const normalizedData = normalizeNodeData(clonePlainTree(props.data))
+  const normalizedData = cloneAndNormalize(props.data)
   const savedViewData = readMindMapViewState()
 
   // 确定初始化容器：真实容器 0 尺寸时（大纲/关联图模式被 v-show 隐藏为 display:none），
@@ -3947,7 +3964,7 @@ defineExpose({
           mindMap.renderer.textEdit.hideEditTextBox()
         }
       } catch (e) { /* 忽略 */ }
-      const normalized = normalizeNodeData(clonePlainTree(data))
+      const normalized = cloneAndNormalize(data)
       isSettingData = true
       // setData 内部已走 reRender（clearDraw+clearCache+render），无需再 render，避免产生重影
       mindMap.setData(normalized)

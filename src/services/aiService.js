@@ -1199,11 +1199,19 @@ class AIService {
           if (!isStale() && onDone) onDone()
           return
         }
-        // 轮次控制：用尽时若模型仍在调工具则放宽，否则收尾
+        // 轮次控制：用尽时优先放宽并续跑（工具链长任务/推理模型易超轮次），真正耗尽才收尾
         if (round >= maxRounds) {
-          if (lastRoundHadTools && extensions < 2) {
+          if (extensions < 4) {
             extensions++
             maxRounds += 3
+            // 上一轮未调用工具（纯文字说明，如"接下来我要做 XXX"）：任务很可能还没执行完，
+            // 注入续跑指令避免"说着话就停"。若确有工具调用则无需指令，模型自然继续。
+            if (!lastRoundHadTools) {
+              currentMessages.push({
+                role: 'system',
+                content: '【系统续跑指令】对话轮次接近上限，用户任务可能尚未完成。若还有剩余步骤，请立即调用必要的工具继续执行；若确已完成，请用不超过200字简要收尾。不要输出思考过程、不要重复已做内容。'
+              })
+            }
           } else {
             break
           }
@@ -1410,26 +1418,31 @@ class AIService {
         const shouldRunTools = toolCalls.length > 0 &&
           (finishReason === 'tool_calls' || argsComplete)
 
-        // 没有可执行的工具调用：尝试自动工具发现兜底（一次），否则完成（过期运行不再回调，静默退出）
+        // 没有可执行的工具调用：按"截断续跑 → 空回复恢复 → 自动工具发现"顺序兜底，否则完成（过期运行不再回调，静默退出）
         if (!shouldRunTools) {
+          // 输出被 max_tokens 截断（finish_reason=length）：任务很可能还没完成。
+          // 尤其推理模型第一轮"思考+输出"就可能触顶，此时尚未调用任何工具——这是"做着做着就中断"的高频场景。
+          // 因此不再要求 anyToolCalled，只要被截断就续跑，最多 2 次。
+          if (finishReason === 'length' && lengthRetryCount < 2 && !this._aborted && !isStale()) {
+            lengthRetryCount++
+            // 把被截断的这轮输出放回上下文，让模型知道自己说到哪了，续跑更连贯
+            if (rawContent) {
+              currentMessages.push({ role: 'assistant', content: rawContent })
+            }
+            currentMessages.push({
+              role: 'system',
+              content: '【系统续跑指令】上一轮输出因长度限制被截断，用户任务尚未完成。请立刻从被截断处继续执行剩余步骤：调用必要的工具、不要输出思考过程、不要重复已做过的内容，直到任务全部完成再给出最终结果。'
+            })
+            lastRoundHadTools = false
+            continue
+          }
           // 推理型模型可能把输出预算耗在 <think> 中，工具已执行但最终可见内容为空。
-          // 这里注入极简恢复指令并只重试一次，避免界面表现为“运行完但停止/无回复”。
+          // 这里注入极简恢复指令并只重试一次，避免界面表现为"运行完但停止/无回复"。
           if (anyToolCalled && !rawContent && !emptyResponseRetryTried && !this._aborted && !isStale()) {
             emptyResponseRetryTried = true
             currentMessages.push({
               role: 'system',
               content: '【系统恢复指令】上一轮工具已执行成功，但没有产生任何可见回复。不要输出思考过程，不要重复解释。若用户要求修改导图且下一步工具明确，请立即调用该工具；否则用不超过200字中文汇报工具结果。'
-            })
-            lastRoundHadTools = false
-            continue
-          }
-          // 输出被 max_tokens 截断（finish_reason=length）且之前调用过工具：任务很可能还没完成，
-          // 注入一条续跑指令让 AI 接着往下做，避免用户手动说“继续”。最多自动续跑 2 次。
-          if (finishReason === 'length' && anyToolCalled && lengthRetryCount < 2 && !this._aborted && !isStale()) {
-            lengthRetryCount++
-            currentMessages.push({
-              role: 'system',
-              content: '【系统续跑指令】输出因长度限制被截断，但用户任务尚未完成。请立刻继续执行剩余步骤：调用必要的工具、不要输出思考过程、不要重复解释已做过的事，直到任务全部完成再给出最终结果。'
             })
             lastRoundHadTools = false
             continue

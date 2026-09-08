@@ -96,6 +96,13 @@ const disposeClozeState = (mindMap) => {
 
 export const initCloze = (mindMap) => {
   if (!mindMap) return
+  // 幂等：同一实例已初始化（已注册点击监听）时直接复用，避免 AI 挖空/全文挖空等重复调用
+  // 反复 dispose+重建 state、重复注册监听，导致日志里 [cloze] click handler 刷屏、监听反复解绑重绑
+  const existing = instanceStates.get(mindMap)
+  if (existing && existing.clickHandler) {
+    mindMapRef = mindMap
+    return
+  }
   disposeClozeState(mindMap)
   getClozeState(mindMap)
   mindMapRef = mindMap

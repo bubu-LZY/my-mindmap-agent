@@ -594,10 +594,10 @@ const renderMarkdownPreview = (content) => {
   const lines = content.split('\n').slice(0, 20)
   const html = lines
     .map(line => {
-      const match = line.match(/^(#{1,6})\s+(.+)/)
+      const match = line.match(/^(#{1,})\s+(.+)/)
       if (match) {
         const level = match[1].length
-        return `<div class="md-line md-h${level}">${escapeHtml(match[2])}</div>`
+        return `<div class="md-line md-h${Math.min(level, 6)}">${escapeHtml(match[2])}</div>`
       }
       return `<div class="md-line">${line ? escapeHtml(line) : '&nbsp;'}</div>`
     })

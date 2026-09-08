@@ -87,8 +87,19 @@ const extractNodesFromList = (nodeList) => {
 
 /* ==================== System Prompts ==================== */
 
+// 安全分类：导图渲染/重建中间态时，getData() 内部遍历渲染树可能抛
+// "Cannot read properties of null (reading 'children')"，此处容错降级为通用类型，
+// 避免挖空审查等批量流程因一个分类调用失败而整批报错跳过
+const safeClassifyMindMap = () => {
+  try {
+    return classifyMindMap(getMindMapRef()?.renderer?.root || getMindMapRef()?.getData?.() || '')
+  } catch (e) {
+    return null // mindMapTypePrompt(null) 会降级为通用知识类型
+  }
+}
+
 const buildSmartSystemPrompt = () => {
-  const mapType = classifyMindMap(getMindMapRef()?.renderer?.root || getMindMapRef()?.getData?.() || '')
+  const mapType = safeClassifyMindMap()
   return `你是一个思维导图智能挖空助手。请根据思维导图节点内容，智能选择适合挖空（隐藏）的关键词，用于辅助记忆和复习。
 
 ${mindMapTypePrompt(mapType, 'cloze')}
@@ -162,7 +173,7 @@ ${mindMapTypePrompt(mapType, 'cloze')}
 }
 
 const buildAggressiveSystemPrompt = () => {
-  const mapType = classifyMindMap(getMindMapRef()?.renderer?.root || getMindMapRef()?.getData?.() || '')
+  const mapType = safeClassifyMindMap()
   return `你是一个思维导图激进挖空助手。请根据思维导图节点内容，尽可能多地选择关键词进行挖空，用于高强度记忆测试。优先挖重点（考点/术语/数字/因果结论），其次才挖一般内容词，不要为了数量挖无关紧要的词。
 
 ${mindMapTypePrompt(mapType, 'cloze')}
@@ -1163,7 +1174,7 @@ const callAiForClozeBatched = async (nodes, mode, onProgress, onBatchResult) => 
 // 比从头开始挖空快很多，因为已有基础结果
 
 const buildReviewSystemPrompt = () => {
-  const mapType = classifyMindMap(getMindMapRef()?.renderer?.root || getMindMapRef()?.getData?.() || '')
+  const mapType = safeClassifyMindMap()
   return `你是一个思维导图挖空质量审查助手。以下节点已经做了初步挖空（由本地规则生成），你的任务是双向修补：
 1. 移除不合理的挖空：不该挖的被挖了 → 移除（重点！）
 2. 补充遗漏的挖空：该挖的没挖 → 补充
@@ -1265,7 +1276,7 @@ const parseReviewResponse = (content) => {
   }
 }
 
-const callAiForReview = async (items, timeoutMs = 90000) => {
+const callAiForReview = async (items, timeoutMs = 150000) => {
   const choice = await Promise.race([
     aiService.chat(buildReviewUserMessage(items), buildReviewSystemPrompt(), null, { thinking: false }),
     new Promise((_, reject) => setTimeout(() => reject(new Error('AI审查超时')), timeoutMs))
@@ -1343,7 +1354,7 @@ const callAiForReviewBatched = async (nodes, clozeList, onProgress, onBatchRevie
   if (itemsToReview.length === 0) return { reviewed: 0, added: 0, removed: 0 }
 
   const BATCH_SIZE = 20
-  const MAX_CONCURRENCY = 3 // 3路并行
+  const MAX_CONCURRENCY = 2 // 2路并行：降低并发请求数，减少慢网络/API 限流导致的超时与竞态
 
   // 分批
   const batches = []

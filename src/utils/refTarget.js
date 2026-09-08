@@ -95,7 +95,7 @@ export async function parseMindMapLikeOutline(mdText) {
     walk(tree, 1)
 
     // 至少 3 个节点，且具备真正的层级（三级以上结构，或含 2 个以上标题）
-    const headings = (text.match(/^[ \t]{0,3}#{1,6}[ \t]+\S/gm) || []).length
+    const headings = (text.match(/^[ \t]{0,3}#{1,}[ \t]+\S/gm) || []).length
     if (nodes >= 3 && (maxDepth >= 3 || headings >= 2)) return tree
     return null
   } catch {

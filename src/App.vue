@@ -4262,7 +4262,14 @@ const onScheduledTaskTrigger = async (taskId, opts = {}) => {
     const task = allTasks[taskId]
     if (!task) {
       console.warn('[定时任务] 未找到任务元数据:', taskId)
-      ElMessage.warning('定时任务触发，但未找到任务配置')
+      // 孤儿任务：本地元数据已丢失但 Windows 计划任务仍在（如升级/重装后 store 数据丢失），
+      // 自动清理系统任务，避免每次到点反复触发"未找到配置"的无效告警；不弹窗打扰用户
+      try {
+        await taskSchedulerService.delete(taskId)
+        console.warn('[定时任务] 已清理孤儿计划任务:', taskId)
+      } catch (e) {
+        console.warn('[定时任务] 清理孤儿计划任务失败:', taskId, e?.message)
+      }
       return
     }
 

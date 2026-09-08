@@ -50,7 +50,7 @@
                 <div
                   v-if="msg.role === 'assistant' && msg.content"
                   class="md-content"
-                  v-html="renderMarkdown(stripThinkBlocks(msg.content))"
+                  v-html="renderMarkdownCached(msg)"
                   @click="onContentClick"
                 ></div>
                 <div v-else-if="msg.content" class="tp-text">{{ msg.content }}</div>
@@ -81,7 +81,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick, watch } from 'vue'
+import { ref, nextTick, watch, toRaw } from 'vue'
 import { renderMarkdown } from '../utils/markdownRenderer'
 import { stripThinkBlocks } from '../utils/thinkFilter'
 import PanelRunLog from './PanelRunLog.vue'
@@ -91,6 +91,20 @@ import {
   selectThirdPartyChannel,
   formatTpTime
 } from '../utils/thirdPartyStore'
+
+// Markdown 渲染缓存：content 不变的消息直接复用 HTML 字符串引用，
+// 避免流式输出期间每帧重跑全部消息的 markdown 解析（与 ChatPanel 同源的性能问题）
+const _mdHtmlCache = new WeakMap()
+const renderMarkdownCached = (msg) => {
+  if (!msg || !msg.content) return ''
+  const raw = toRaw(msg)
+  let entry = _mdHtmlCache.get(raw)
+  if (!entry || entry.src !== msg.content) {
+    entry = { src: msg.content, html: renderMarkdown(stripThinkBlocks(msg.content)) }
+    _mdHtmlCache.set(raw, entry)
+  }
+  return entry.html
+}
 
 const activeChannel = ref('wechat')
 const messagesRef = ref(null)
