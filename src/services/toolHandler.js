@@ -150,6 +150,110 @@ const targetNodesProps = {
 
 const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
+// ========== 纯数据操作辅助函数（支持后台文件操作，不依赖 mindMap 对象） ==========
+
+// 从文件读取导图数据（纯 JSON）
+async function loadTreeFromFile(filePath) {
+  if (!filePath) return { error: '文件路径为空' }
+  if (!window.electronAPI?.fs?.readFile) return { error: '文件系统不可用' }
+  const content = await window.electronAPI.fs.readFile(filePath)
+  if (!content) return { error: `无法读取文件：${filePath}` }
+  let treeData
+  try {
+    treeData = JSON.parse(content)
+  } catch {
+    return { error: `文件格式错误（不是有效的 .smm 文件）：${filePath}` }
+  }
+  treeData = Array.isArray(treeData) ? treeData[0] : treeData
+  if (!treeData || !treeData.data) return { error: '导图数据为空' }
+  return { treeData }
+}
+
+// 保存导图数据到文件
+async function saveTreeToFile(filePath, treeData) {
+  if (!window.electronAPI?.saveFile) return { error: '文件保存功能不可用' }
+  const saveData = JSON.stringify(treeData, null, 2)
+  const result = await window.electronAPI.saveFile(filePath, saveData, { overwrite: true })
+  if (!result || !result.success) return { error: result?.error || '保存失败' }
+  return { success: true, filePath: result.filePath }
+}
+
+// 在纯数据树中按 uid 查找节点（返回 node 和 parent）
+function findNodeInTree(treeData, uid) {
+  if (!treeData || !uid) return null
+  const search = (node, parent) => {
+    if (!node || !node.data) return null
+    if (node.data.uid === uid) return { node, parent }
+    for (const child of node.children || []) {
+      const r = search(child, node)
+      if (r) return r
+    }
+    return null
+  }
+  return search(treeData, null)
+}
+
+// 在纯数据树中按关键词搜索节点
+function searchNodesInTree(treeData, keyword) {
+  if (!treeData || !keyword) return []
+  const results = []
+  const kw = String(keyword).toLowerCase()
+  const walk = (node, parent = null) => {
+    if (!node || !node.data) return
+    const text = nodePlainText(node.data.text || '')
+    if (text.toLowerCase().includes(kw)) {
+      results.push({
+        uid: node.data.uid,
+        text,
+        parentText: parent?.data ? nodePlainText(parent.data.text || '') : '',
+        hasChildren: (node.children || []).length > 0,
+        level: 0 // 简化，暂时不计算层级
+      })
+    }
+    for (const child of node.children || []) {
+      walk(child, node)
+    }
+  }
+  walk(treeData)
+  return results
+}
+
+// 在纯数据节点下批量添加子节点（支持嵌套 children）
+function addChildrenToNode(parentNode, children) {
+  if (!parentNode || !Array.isArray(children)) return { added: 0, uids: [] }
+  if (!parentNode.children) parentNode.children = []
+  const uids = []
+
+  const buildChild = (item) => {
+    const text = String(item?.text ?? '').trim()
+    if (!text) return null
+    const uid = createUid()
+    uids.push(uid)
+    const child = {
+      data: {
+        text: `<p><span>${escHtml(text)}</span></p>`,
+        uid,
+        richText: true
+      },
+      children: []
+    }
+    if (Array.isArray(item?.children) && item.children.length > 0) {
+      for (const sub of item.children) {
+        const built = buildChild(sub)
+        if (built) child.children.push(built)
+      }
+    }
+    return child
+  }
+
+  for (const item of children) {
+    const built = buildChild(item)
+    if (built) parentNode.children.push(built)
+  }
+
+  return { added: uids.length, uids }
+}
+
 function ensureRichText(node) {
   if (!node) return
   if (!node.data) node.data = {}
@@ -4243,39 +4347,15 @@ ${mindMapTypePrompt(mapType, 'organize')}
       try {
         const rootText = String(args.root_text || args.rootText || '中心主题').trim()
 
-        // 如果有打开的导图，直接重置为空白（原行为）
-        if (mindMap) {
-          const treeData = {
-            data: { text: `<p><span>${escHtml(rootText)}</span></p>`, uid: createUid(), richText: true },
-            children: []
-          }
-          mindMap.setData(treeData)
-
-          // 如果指定了保存路径，同时保存到文件
-          if (args.save_dir || args.saveDir || args.file_name || args.fileName) {
-            let saveDir = String(args.save_dir || args.saveDir || '').trim() || 'C:\\我的mindmap'
-            saveDir = saveDir.replace(/[\\/]+$/, '')
-            let fileName = String(args.file_name || args.fileName || '').trim()
-            if (!fileName) {
-              const safeName = rootText.replace(/[<>:"/\\|?*]/g, '_').slice(0, 50)
-              fileName = /\.smm$/i.test(safeName) ? safeName : `${safeName}.smm`
-            } else if (!/\.smm$/i.test(fileName)) {
-              fileName = `${fileName}.smm`
-            }
-            const sep = saveDir.includes('\\') ? '\\' : '/'
-            const filePath = saveDir + sep + fileName
-            const saveData = JSON.stringify(treeData, null, 2)
-            if (window.electronAPI?.saveFile) {
-              const result = await window.electronAPI.saveFile(filePath, saveData, { overwrite: false })
-              if (result && result.success) {
-                return { success: true, message: `已创建新思维导图并保存：${filePath}\n根节点：${rootText}`, filePath: result.filePath, fileName, rootText, rootUid: treeData.data.uid }
-              }
-            }
-          }
-          return { success: true, message: `已创建新思维导图，根节点：${rootText}` }
+        // 生成默认的思维导图数据结构
+        const rootUid = createUid()
+        const treeData = {
+          data: { text: `<p><span>${escHtml(rootText)}</span></p>`, uid: rootUid, richText: true },
+          children: []
         }
+        const saveData = JSON.stringify(treeData, null, 2)
 
-        // 没有打开的导图 → 直接在磁盘上创建文件
+        // 处理保存路径
         let saveDir = String(args.save_dir || args.saveDir || '').trim()
         let fileName = String(args.file_name || args.fileName || '').trim()
 
@@ -4293,32 +4373,45 @@ ${mindMapTypePrompt(mapType, 'organize')}
           fileName = `${fileName}.smm`
         }
 
-        // 生成默认的思维导图数据结构
-        const rootUid = createUid()
-        const treeData = {
-          data: { text: `<p><span>${escHtml(rootText)}</span></p>`, uid: rootUid, richText: true },
-          children: []
-        }
-        const saveData = JSON.stringify(treeData, null, 2)
-
         const sep = saveDir.includes('\\') ? '\\' : '/'
         const filePath = saveDir + sep + fileName
 
-        if (window.electronAPI?.saveFile) {
-          const result = await window.electronAPI.saveFile(filePath, saveData, { overwrite: false })
-          if (result && result.success) {
-            return {
-              success: true,
-              message: `已创建新思维导图文件：${filePath}\n\n根节点：${rootText}\n根节点 UID：${rootUid}\n\n> 💡 请在应用中打开该文件后，我才能继续编辑节点。`,
-              filePath: result.filePath,
-              fileName,
-              rootText,
-              rootUid
-            }
-          }
+        // 写入文件
+        if (!window.electronAPI?.saveFile) {
+          return { success: false, message: '创建失败：无法访问文件系统' }
+        }
+        const result = await window.electronAPI.saveFile(filePath, saveData, { overwrite: false })
+        if (!result || !result.success) {
           return { success: false, message: `创建失败：${result?.error || '无法写入文件'}` }
         }
-        return { success: false, message: '创建失败：无法访问文件系统' }
+
+        // 如果当前有打开的导图，直接重置为空白（同步数据）
+        if (mindMap) {
+          mindMap.setData(treeData)
+        }
+
+        // 尝试自动打开文件（让 AI 能继续操作）
+        let autoOpened = false
+        if (window.electronAPI?.openFile) {
+          try {
+            await window.electronAPI.openFile(result.filePath)
+            autoOpened = true
+          } catch (e) {
+            console.warn('[new_mindmap] 自动打开文件失败:', e)
+          }
+        }
+
+        return {
+          success: true,
+          message: autoOpened
+            ? `已创建并打开思维导图：${result.filePath}\n\n根节点：${rootText}\n根节点 UID：${rootUid}\n\n> 💡 文件已自动打开，可以直接添加子节点了！`
+            : `已创建新思维导图文件：${result.filePath}\n\n根节点：${rootText}\n根节点 UID：${rootUid}\n\n> 💡 请在应用中打开该文件后，我才能继续编辑节点。`,
+          filePath: result.filePath,
+          fileName,
+          rootText,
+          rootUid,
+          autoOpened
+        }
       } catch (e) {
         return { success: false, message: `创建失败: ${e.message}` }
       }
@@ -4383,11 +4476,115 @@ ${mindMapTypePrompt(mapType, 'organize')}
 
     case 'add_child_nodes': {
       try {
-        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
+        const filePath = String(args.file_path || args.filePath || '').trim()
+
+        // ========== 后台文件模式（纯数据操作，不依赖 mindMap） ==========
+        if (filePath) {
+          const loaded = await loadTreeFromFile(filePath)
+          if (loaded.error) return { success: false, message: loaded.error }
+          const treeData = loaded.treeData
+
+          // 解析 children
+          let rawChildren = args.children
+          if (typeof rawChildren === 'string') {
+            const parsedChildren = parseToolCallArgs(rawChildren)
+            if (Array.isArray(parsedChildren)) rawChildren = parsedChildren
+            else if (parsedChildren && Array.isArray(parsedChildren.children)) rawChildren = parsedChildren.children
+            else rawChildren = []
+          }
+          rawChildren = Array.isArray(rawChildren) ? rawChildren : []
+          if (rawChildren.length === 0) return { success: false, message: '请提供 children（要添加的子节点树）' }
+
+          // 解析目标父节点（支持 uids 数组或 targets.uids）
+          let targetUids = []
+          if (args.targets) {
+            if (Array.isArray(args.targets)) {
+              targetUids = args.targets
+            } else if (args.targets.uids) {
+              targetUids = args.targets.uids
+            }
+          }
+          if (args.uid) targetUids.push(args.uid)
+          if (args.parent_uid) targetUids.push(args.parent_uid)
+
+          // 如果没指定目标，就用根节点
+          let parentNodes = []
+          if (targetUids.length === 0) {
+            parentNodes = [treeData]
+          } else {
+            for (const uid of targetUids) {
+              const found = findNodeInTree(treeData, uid)
+              if (found) parentNodes.push(found.node)
+            }
+          }
+
+          if (parentNodes.length === 0) {
+            return { success: false, message: `没有找到目标父节点（uids: ${targetUids.join(', ')}）` }
+          }
+
+          // 构建子节点树（复用 buildChildList 的逻辑）
+          const buildChildList = (items) => {
+            const out = []
+            for (const item of items) {
+              const text = String(item?.text ?? '').trim()
+              const kids = Array.isArray(item?.children) ? item.children : []
+              if (!text && kids.length > 0) {
+                out.push(...buildChildList(kids))
+                continue
+              }
+              if (!text) continue
+              out.push({
+                data: {
+                  text: `<p><span>${escHtml(text)}</span></p>`,
+                  uid: createUid(),
+                  richText: true
+                },
+                children: buildChildList(kids)
+              })
+            }
+            return out
+          }
+
+          let totalAdded = 0
+          const firstChildUids = []
+          for (const parent of parentNodes) {
+            const childrenToAdd = buildChildList(rawChildren)
+            if (childrenToAdd.length === 0) continue
+            if (!parent.children) parent.children = []
+            for (const child of childrenToAdd) {
+              parent.children.push(child)
+            }
+            totalAdded += childrenToAdd.length
+            if (childrenToAdd[0]) firstChildUids.push(childrenToAdd[0].data.uid)
+          }
+
+          // 保存回文件
+          const saved = await saveTreeToFile(filePath, treeData)
+          if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
+
+          return {
+            success: true,
+            message: `已为 ${parentNodes.length} 个父节点添加 ${totalAdded} 个子节点（后台文件模式）\n文件：${saved.filePath}\n新增的一级子节点 UID：${firstChildUids.join(', ')}`,
+            added: totalAdded,
+            parentCount: parentNodes.length,
+            firstChildUids,
+            filePath: saved.filePath
+          }
+        }
+
+        // ========== 正常模式（基于当前打开的导图） ==========
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。可以传入 file_path 参数直接操作指定文件，或先调用 find_local_file(exts=["smm"]) 搜索本地导图文件。' }
         // 父节点：优先 targets（uids/keyword/mode），否则当前选中节点；多父节点在一次调用内全部处理
         let parents
-        if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
-          const { nodes, error } = resolveTargetNodes(mindMap, args.targets)
+        // 兼容两种格式：
+        // 1. 对象格式: targets: { uids: ["uid1", "uid2"] }
+        // 2. 数组格式: targets: ["uid1", "uid2"]（AI 常用，向后兼容）
+        let targetsArg = args.targets
+        if (Array.isArray(targetsArg)) {
+          targetsArg = { uids: targetsArg }
+        }
+        if (targetsArg && (targetsArg.uids || targetsArg.keyword || targetsArg.mode)) {
+          const { nodes, error } = resolveTargetNodes(mindMap, targetsArg)
           if (error) return { success: false, message: `父节点解析失败：${error}` }
           parents = nodes.filter(n => !n.isGeneralization)
         } else {
@@ -4508,6 +4705,63 @@ ${mindMapTypePrompt(mapType, 'organize')}
 
     case 'update_node_text': {
       try {
+        const filePath = String(args.file_path || args.filePath || '').trim()
+
+        // ========== 后台文件模式 ==========
+        if (filePath) {
+          const loaded = await loadTreeFromFile(filePath)
+          if (loaded.error) return { success: false, message: loaded.error }
+          const treeData = loaded.treeData
+
+          // 模式1：updates=[{uid,text}] 批量不同文本
+          if (Array.isArray(args.updates) && args.updates.length > 0) {
+            let updated = 0
+            const missing = []
+            for (const u of args.updates) {
+              if (!u || !u.uid || u.text == null) continue
+              const found = findNodeInTree(treeData, String(u.uid))
+              if (found) {
+                found.node.data.text = `<p><span>${escHtml(String(u.text))}</span></p>`
+                updated++
+              } else {
+                missing.push(String(u.uid).slice(0, 8))
+              }
+            }
+            const saved = await saveTreeToFile(filePath, treeData)
+            if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
+            let msg = updated > 0 ? `已更新 ${updated} 个节点的文本（后台文件模式）` : 'updates 中没有命中的节点'
+            if (missing.length) msg += `；未找到 uid：${missing.join('、')}`
+            return { success: updated > 0, message: msg, updated }
+          }
+
+          // 模式2：同一文本更新多个节点（通过 uids 数组或单个 uid）
+          if (args.text == null || String(args.text) === '') {
+            return { success: false, message: '请提供 text 或 updates=[{uid,text}]' }
+          }
+          let targetUids = []
+          if (args.uid) targetUids.push(args.uid)
+          if (args.targets) {
+            if (Array.isArray(args.targets)) targetUids = args.targets
+            else if (args.targets.uids) targetUids = args.targets.uids
+          }
+          if (targetUids.length === 0) {
+            return { success: false, message: '后台文件模式请提供 uid 或 uids 数组' }
+          }
+          let updated = 0
+          for (const uid of targetUids) {
+            const found = findNodeInTree(treeData, String(uid))
+            if (found) {
+              found.node.data.text = `<p><span>${escHtml(String(args.text))}</span></p>`
+              updated++
+            }
+          }
+          const saved = await saveTreeToFile(filePath, treeData)
+          if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
+          return { success: updated > 0, message: `已更新 ${updated} 个节点的文本（后台文件模式）`, updated }
+        }
+
+        // ========== 正常模式 ==========
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。可以传入 file_path 参数直接操作指定文件。' }
         // 模式1：updates=[{uid,text}] 一次调用逐节点设置不同文本（批量改名首选，禁止逐节点循环调用本工具）
         if (Array.isArray(args.updates) && args.updates.length > 0) {
           let updated = 0
@@ -4552,6 +4806,46 @@ ${mindMapTypePrompt(mapType, 'organize')}
 
     case 'delete_node': {
       try {
+        const filePath = String(args.file_path || args.filePath || '').trim()
+
+        // ========== 后台文件模式 ==========
+        if (filePath) {
+          const loaded = await loadTreeFromFile(filePath)
+          if (loaded.error) return { success: false, message: loaded.error }
+          const treeData = loaded.treeData
+
+          // 收集要删除的 uid
+          let targetUids = []
+          if (args.uid) targetUids.push(args.uid)
+          if (args.targets) {
+            if (Array.isArray(args.targets)) targetUids = args.targets
+            else if (args.targets.uids) targetUids = args.targets.uids
+          }
+          if (targetUids.length === 0) {
+            return { success: false, message: '后台文件模式请提供 uid 或 uids 数组' }
+          }
+
+          let deleted = 0
+          for (const uid of targetUids) {
+            const found = findNodeInTree(treeData, String(uid))
+            if (!found || !found.parent) continue // 根节点不能删除
+            // 从父节点的 children 中移除
+            if (found.parent.children) {
+              const idx = found.parent.children.findIndex(c => c.data?.uid === uid)
+              if (idx >= 0) {
+                found.parent.children.splice(idx, 1)
+                deleted++
+              }
+            }
+          }
+
+          const saved = await saveTreeToFile(filePath, treeData)
+          if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
+          return { success: true, message: `已删除 ${deleted} 个节点（后台文件模式）`, deleted }
+        }
+
+        // ========== 正常模式 ==========
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。可以传入 file_path 参数直接操作指定文件。' }
         // targets 直达批量删除（避免先 select_node 再删的低效循环）；省略则删除当前选中
         let targetNodes
         if (args.targets && (args.targets.uids || args.targets.keyword || args.targets.mode)) {
@@ -4722,9 +5016,133 @@ ${mindMapTypePrompt(mapType, 'organize')}
 
     case 'batch_node_actions': {
       try {
+        const filePath = String(args.file_path || args.filePath || '').trim()
         const steps = Array.isArray(args.steps) ? args.steps : []
         if (steps.length === 0) return { success: false, message: '请提供 steps 操作步骤列表' }
         if (steps.length > 50) return { success: false, message: '步骤过多（单次最多 50 步），请拆分为多次调用' }
+
+        // ========== 后台文件模式 ==========
+        if (filePath) {
+          const loaded = await loadTreeFromFile(filePath)
+          if (loaded.error) return { success: false, message: loaded.error }
+          const treeData = loaded.treeData
+
+          const stepResults = []
+          let allOk = true
+          let totalActions = 0
+
+          for (let i = 0; i < steps.length; i++) {
+            const step = steps[i] || {}
+            const action = step.action || step.type || ''
+
+            // 解析目标 uid
+            let targetUids = []
+            if (step.uid) targetUids.push(step.uid)
+            if (step.uids) targetUids = step.uids
+            if (step.targets) {
+              if (Array.isArray(step.targets)) targetUids = step.targets
+              else if (step.targets.uids) targetUids = step.targets.uids
+            }
+
+            switch (action) {
+              case 'update_text':
+              case 'updateText': {
+                let updated = 0
+                for (const uid of targetUids) {
+                  const found = findNodeInTree(treeData, String(uid))
+                  if (found && step.text != null) {
+                    found.node.data.text = `<p><span>${escHtml(String(step.text))}</span></p>`
+                    updated++
+                  }
+                }
+                totalActions += updated
+                stepResults.push(`第${i + 1}步(update_text): 更新了 ${updated} 个节点`)
+                break
+              }
+              case 'add_child':
+              case 'addChild': {
+                let added = 0
+                for (const uid of targetUids) {
+                  const found = findNodeInTree(treeData, String(uid))
+                  if (!found) continue
+                  if (!found.node.children) found.node.children = []
+                  const text = String(step.text || '').trim()
+                  if (!text) continue
+                  const newNode = {
+                    data: {
+                      text: `<p><span>${escHtml(text)}</span></p>`,
+                      uid: createUid(),
+                      richText: true
+                    },
+                    children: []
+                  }
+                  // 支持嵌套 children
+                  if (Array.isArray(step.children) && step.children.length > 0) {
+                    const buildNested = (items) => {
+                      const out = []
+                      for (const item of items) {
+                        const t = String(item?.text ?? '').trim()
+                        if (!t) continue
+                        const node = {
+                          data: { text: `<p><span>${escHtml(t)}</span></p>`, uid: createUid(), richText: true },
+                          children: []
+                        }
+                        if (Array.isArray(item?.children) && item.children.length > 0) {
+                          node.children = buildNested(item.children)
+                        }
+                        out.push(node)
+                      }
+                      return out
+                    }
+                    newNode.children = buildNested(step.children)
+                  }
+                  found.node.children.push(newNode)
+                  added++
+                }
+                totalActions += added
+                stepResults.push(`第${i + 1}步(add_child): 为 ${targetUids.length} 个节点添加了子节点`)
+                break
+              }
+              case 'delete':
+              case 'remove': {
+                let deleted = 0
+                for (const uid of targetUids) {
+                  const found = findNodeInTree(treeData, String(uid))
+                  if (!found || !found.parent) continue
+                  if (found.parent.children) {
+                    const idx = found.parent.children.findIndex(c => c.data?.uid === uid)
+                    if (idx >= 0) {
+                      found.parent.children.splice(idx, 1)
+                      deleted++
+                    }
+                  }
+                }
+                totalActions += deleted
+                stepResults.push(`第${i + 1}步(delete): 删除了 ${deleted} 个节点`)
+                break
+              }
+              default: {
+                allOk = false
+                stepResults.push(`第${i + 1}步跳过：后台文件模式暂不支持 "${action}" 操作`)
+                break
+              }
+            }
+          }
+
+          const saved = await saveTreeToFile(filePath, treeData)
+          if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
+
+          return {
+            success: allOk,
+            message: `批量操作完成（后台文件模式）：共 ${steps.length} 步，执行了 ${totalActions} 个操作\n${stepResults.join('\n')}`,
+            stepResults,
+            totalActions,
+            filePath: saved.filePath
+          }
+        }
+
+        // ========== 正常模式 ==========
+        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。可以传入 file_path 参数直接操作指定文件。' }
 
         if (args.dry_run === true) {
           const plannedChanges = []
@@ -5020,28 +5438,40 @@ ${mindMapTypePrompt(mapType, 'organize')}
 
     case 'search_nodes': {
       try {
-        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
-        const treeData = mindMap.getData()
         const rawKeywords = []
         if (args.keyword) rawKeywords.push(String(args.keyword))
         if (Array.isArray(args.keywords)) args.keywords.forEach((k) => rawKeywords.push(String(k)))
         const keywords = [...new Set(rawKeywords.map((k) => normalizeForMatch(k)).filter(Boolean))]
         if (!keywords.length) return { success: false, message: '请至少提供一个 keyword 或 keywords 参数' }
+
+        const filePath = String(args.file_path || args.filePath || '').trim()
+        let treeData
+        let fromFile = false
+
+        if (filePath) {
+          // 后台文件模式：从磁盘读取
+          const loaded = await loadTreeFromFile(filePath)
+          if (loaded.error) return { success: false, message: loaded.error }
+          treeData = loaded.treeData
+          fromFile = true
+        } else {
+          // 当前打开的导图
+          if (!mindMap) return { success: false, message: '当前没有打开的思维导图。可以传入 file_path 参数直接搜索指定文件，或先调用 find_local_file(exts=["smm"]) 搜索本地导图文件。' }
+          treeData = mindMap.getData()
+        }
+
         const mode = args.mode === 'all' ? 'all' : 'any'
         const maxResults = Math.min(Math.max(Number(args.max_results) || 200, 1), 1000)
         const results = []
         function traverse(node, parents) {
           const rawText = node.data?.text || node.text || ''
           const plain = rawText.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim()
-          // 关键词已被 normalizeForMatch 去掉全部空白，节点文本也必须同样归一化后匹配，
-          // 否则含空格的检索词（如“第一章 世界的物质性及发展规律”）会因空格差异而漏配
           const text = normalizeForMatch(rawText)
           const matched = mode === 'all'
             ? keywords.every((keyword) => text.includes(keyword))
             : keywords.some((keyword) => text.includes(keyword))
           if (matched && results.length < maxResults) {
             const uid = node.data?.uid || node.uid
-            // 直接用递归路径拼接，避免命中多时 getNodePath 全树 O(n) 遍历导致 O(n²)
             const path = parents.map(p => p.text).concat([plain]).join(' > ')
             const parentPath = parents.length ? parents.map(p => p.text).join(' / ') : ''
             const parentUid = parents.length ? parents[parents.length - 1].uid : ''
@@ -5054,9 +5484,10 @@ ${mindMapTypePrompt(mapType, 'organize')}
         return {
           success: true,
           message: results.length
-            ? `找到 ${results.length} 个匹配节点${results.length >= maxResults ? '（已达 max_results 上限）' : ''}：\n${results.map((r, i) => `${i + 1}. ${r.path}${r.uid ? `（uid: ${r.uid}）` : ''}`).join('\n')}`
-            : '未找到匹配的节点',
-          results
+            ? `找到 ${results.length} 个匹配节点${results.length >= maxResults ? '（已达 max_results 上限）' : ''}${fromFile ? '（文件模式）' : ''}：\n${results.map((r, i) => `${i + 1}. ${r.path}${r.uid ? `（uid: ${r.uid}）` : ''}`).join('\n')}`
+            : `未找到匹配的节点${fromFile ? '（文件模式）' : ''}`,
+          results,
+          fromFile
         }
       } catch (e) {
         return { success: false, message: `搜索节点失败: ${e.message}` }
@@ -5366,7 +5797,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const sheet = { id: 'sheet1', class: 'sheet', title: rootText, rootTopic: toTopic(treeData) }
           const zip = new JSZip()
           zip.file('content.json', JSON.stringify([sheet]))
-          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.15.0' } }))
+          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.16.0' } }))
           const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
           if (!window.electronAPI?.saveBinaryFile) return { success: false, message: '文件保存功能不可用' }
           const r = await window.electronAPI.saveBinaryFile(fileName, base64)
