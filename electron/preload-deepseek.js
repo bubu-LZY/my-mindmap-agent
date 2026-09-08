@@ -1935,16 +1935,51 @@ ipcRenderer.on('tool-result', (event, data) => {
 
 // ========== 系统提示词 + 上下文 ==========
 function buildInitMessage(context) {
-  return `你是一个专业的思维导图 AI 助手，运行在「我的思维导图」桌面应用中。你可以调用工具来操作当前绑定的思维导图文件。
-
-## 📌 当前绑定文件信息
-
-${context || '（暂无打开的文件）'}
-
-## 🔧 如何调用工具
-
-请使用 \`\`\`mymindmap 代码块来输出工具调用，格式如下：
-
+  // 根据文件类型动态调整身份描述
+  const ctx = context || ''
+  let roleDesc = '你是一个专业的 AI 助手，运行在「我的思维导图」桌面应用中。你可以调用工具来操作当前文件。'
+  let capabilityHint = ''
+  
+  if (ctx.includes('文件类型：思维导图')) {
+    roleDesc = '你是一个专业的思维导图 AI 助手，运行在「我的思维导图」桌面应用中。你可以调用工具来操作当前绑定的思维导图文件。'
+  } else if (ctx.includes('文件类型：PDF')) {
+    roleDesc = '你是一个专业的文档分析 AI 助手，运行在「我的思维导图」桌面应用中。当前绑定了一个 PDF 文档，你可以阅读、分析、总结这份文档，也可以调用工具进行其他操作。'
+    capabilityHint = '> 💡 当前是 PDF 文档，**只读不可直接编辑**。你可以分析、总结、问答，或把内容转成思维导图。'
+  } else if (ctx.includes('文件类型：Word') || ctx.includes('文件类型：docx')) {
+    roleDesc = '你是一个专业的文档分析 AI 助手，运行在「我的思维导图」桌面应用中。当前绑定了一个 Word 文档，你可以阅读、分析、总结这份文档，也可以调用工具进行其他操作。'
+    capabilityHint = '> 💡 当前是 Word 文档，**只读不可直接编辑**。你可以分析、总结、问答，或把内容转成思维导图。'
+  } else if (ctx.includes('文件类型：Excel') || ctx.includes('文件类型：CSV') || ctx.includes('表格')) {
+    roleDesc = '你是一个专业的数据处理 AI 助手，运行在「我的思维导图」桌面应用中。当前绑定了一个表格文件，你可以分析数据、总结规律，也可以调用工具进行其他操作。'
+    capabilityHint = '> 💡 当前是表格文件，**只读不可直接编辑**。你可以数据分析、统计汇总，或把内容转成思维导图。'
+  } else if (ctx.includes('文件类型：PowerPoint') || ctx.includes('pptx')) {
+    roleDesc = '你是一个专业的演示文稿分析 AI 助手，运行在「我的思维导图」桌面应用中。当前绑定了一个 PPT 文档，你可以阅读、分析、总结这份演示文稿，也可以调用工具进行其他操作。'
+    capabilityHint = '> 💡 当前是 PPT 文档，**只读不可直接编辑**。你可以分析、总结、问答，或把内容转成思维导图。'
+  } else if (ctx.includes('文件类型：Markdown') || ctx.includes('文件类型：纯文本') || ctx.includes('md') || ctx.includes('txt')) {
+    roleDesc = '你是一个专业的文本处理 AI 助手，运行在「我的思维导图」桌面应用中。当前绑定了一个文本文档，你可以阅读、分析、编辑、改写这份文档。'
+    capabilityHint = '> 💡 当前是文本文档，你可以直接分析内容并给出建议，也可以把内容转成思维导图。'
+  }
+  
+  const lines = [
+    roleDesc,
+    '',
+    '## 📌 当前绑定文件信息',
+    '',
+    ctx || '（暂无打开的文件）',
+    '',
+  ]
+  
+  if (capabilityHint) {
+    lines.push(capabilityHint)
+    lines.push('')
+  }
+  
+  lines.push(
+    '## 🔧 如何调用工具',
+    '',
+    '请使用 ```mymindmap 代码块来输出工具调用，格式如下：'
+  )
+  
+  return lines.join('\n') + `
 \`\`\`mymindmap
 {
   "tool": "工具名",
@@ -2056,7 +2091,28 @@ ${context || '（暂无打开的文件）'}
 
 ### 文件操作
 
+> 📁 **默认保存目录**：C:\我的mindmap
+> - 创建新文件时，如果用户没有指定路径，**直接用默认目录，不要问用户**
+> - 保存思维导图时也是保存到这个目录
+> - 你可以先调用 list_directory("C:\\我的mindmap") 查看当前目录结构
+> - 文件名如果用户没指定，就根据内容自动起一个合适的中文名
+> - **不要用相对路径**（如 "文件名.smm"），那样会保存到安装目录，没有写入权限
+
+**new_mindmap** - 新建思维导图（无需先打开文件，直接创建并保存）
+- 参数:
+  - root_text (字符串，可选): 根节点文本，默认"中心主题"
+  - file_name (字符串，可选): 文件名，默认用根节点文本
+  - save_dir (字符串，可选): 保存目录，默认 C:\我的mindmap
+- 示例（创建到默认目录）: \`{ "tool": "new_mindmap", "params": { "root_text": "登录流程" } }\`
+- 示例（指定文件名和目录）: \`{ "tool": "new_mindmap", "params": { "root_text": "登录流程", "file_name": "登录流程.smm", "save_dir": "C:\\\\我的mindmap" } }\`
+- 说明: 创建后返回根节点 UID。如果当前有打开的导图，会重置为空白；如果没有，直接保存为文件。**用户需要在应用中打开该文件后，你才能继续编辑节点。**
+
 **save_mindmap** - 保存当前导图
+- 参数:
+  - file_name (字符串，可选): 文件名（不含路径），默认用根节点文本
+  - save_dir (字符串，可选): 保存目录，默认 C:\我的mindmap
+- 示例（保存到默认目录）: \`{ "tool": "save_mindmap", "params": { "file_name": "登录流程.smm" } }\`
+- 示例（保存到指定目录）: \`{ "tool": "save_mindmap", "params": { "file_name": "登录流程.smm", "save_dir": "C:\\\\我的mindmap" } }\`
 
 **export_mindmap_html** - 导出 HTML
 
@@ -2072,11 +2128,13 @@ ${context || '（暂无打开的文件）'}
   - recursive (布尔，是否递归)
 - 示例: \`{ "tool": "list_directory", "params": { "path": "C:\\\\我的mindmap", "recursive": false } }\`
 
-**find_local_file** - 查找本地文件
+**find_local_file** - 查找本地文件（自动搜索桌面/文档/下载/默认目录）
 - 参数:
-  - keyword (字符串，文件名关键词)
-  - path (字符串，可选，搜索目录)
-- 示例: \`{ "tool": "find_local_file", "params": { "keyword": "导论", "path": "C:\\\\我的mindmap" } }\`
+  - keyword (字符串，可选): 文件名关键词，不传则搜所有文件
+  - path (字符串，可选): 指定搜索目录
+  - exts (数组，可选): 按扩展名筛选，如 ["smm", "md", "pdf"]
+- 示例（搜索所有导图文件）: \`{ "tool": "find_local_file", "params": { "exts": ["smm"] } }\`
+- 示例（按关键词搜索）: \`{ "tool": "find_local_file", "params": { "keyword": "导论", "exts": ["smm", "md"] } }\`
 
 ### 视图/搜索
 

@@ -4241,14 +4241,84 @@ ${mindMapTypePrompt(mapType, 'organize')}
 
     case 'new_mindmap': {
       try {
-        if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先调用 find_local_file(exts=["smm"]) 搜索本地导图文件（自动覆盖桌面/文档/下载/默认保存目录），再用 read_mindmap_file(filePath=...) 直接读取文件内容后继续。' }
-        const rootText = args.rootText || '中心主题'
+        const rootText = String(args.root_text || args.rootText || '中心主题').trim()
+
+        // 如果有打开的导图，直接重置为空白（原行为）
+        if (mindMap) {
+          const treeData = {
+            data: { text: `<p><span>${escHtml(rootText)}</span></p>`, uid: createUid(), richText: true },
+            children: []
+          }
+          mindMap.setData(treeData)
+
+          // 如果指定了保存路径，同时保存到文件
+          if (args.save_dir || args.saveDir || args.file_name || args.fileName) {
+            let saveDir = String(args.save_dir || args.saveDir || '').trim() || 'C:\\我的mindmap'
+            saveDir = saveDir.replace(/[\\/]+$/, '')
+            let fileName = String(args.file_name || args.fileName || '').trim()
+            if (!fileName) {
+              const safeName = rootText.replace(/[<>:"/\\|?*]/g, '_').slice(0, 50)
+              fileName = /\.smm$/i.test(safeName) ? safeName : `${safeName}.smm`
+            } else if (!/\.smm$/i.test(fileName)) {
+              fileName = `${fileName}.smm`
+            }
+            const sep = saveDir.includes('\\') ? '\\' : '/'
+            const filePath = saveDir + sep + fileName
+            const saveData = JSON.stringify(treeData, null, 2)
+            if (window.electronAPI?.saveFile) {
+              const result = await window.electronAPI.saveFile(filePath, saveData, { overwrite: false })
+              if (result && result.success) {
+                return { success: true, message: `已创建新思维导图并保存：${filePath}\n根节点：${rootText}`, filePath: result.filePath, fileName, rootText, rootUid: treeData.data.uid }
+              }
+            }
+          }
+          return { success: true, message: `已创建新思维导图，根节点：${rootText}` }
+        }
+
+        // 没有打开的导图 → 直接在磁盘上创建文件
+        let saveDir = String(args.save_dir || args.saveDir || '').trim()
+        let fileName = String(args.file_name || args.fileName || '').trim()
+
+        // 默认保存目录：C:\我的mindmap
+        if (!saveDir) {
+          saveDir = 'C:\\我的mindmap'
+        }
+        saveDir = saveDir.replace(/[\\/]+$/, '')
+
+        // 文件名处理
+        if (!fileName) {
+          const safeName = rootText.replace(/[<>:"/\\|?*]/g, '_').slice(0, 50)
+          fileName = /\.smm$/i.test(safeName) ? safeName : `${safeName}.smm`
+        } else if (!/\.smm$/i.test(fileName)) {
+          fileName = `${fileName}.smm`
+        }
+
+        // 生成默认的思维导图数据结构
+        const rootUid = createUid()
         const treeData = {
-          data: { text: `<p><span>${escHtml(rootText)}</span></p>`, uid: createUid(), richText: true },
+          data: { text: `<p><span>${escHtml(rootText)}</span></p>`, uid: rootUid, richText: true },
           children: []
         }
-        mindMap.setData(treeData)
-        return { success: true, message: `已创建新思维导图，根节点：${rootText}` }
+        const saveData = JSON.stringify(treeData, null, 2)
+
+        const sep = saveDir.includes('\\') ? '\\' : '/'
+        const filePath = saveDir + sep + fileName
+
+        if (window.electronAPI?.saveFile) {
+          const result = await window.electronAPI.saveFile(filePath, saveData, { overwrite: false })
+          if (result && result.success) {
+            return {
+              success: true,
+              message: `已创建新思维导图文件：${filePath}\n\n根节点：${rootText}\n根节点 UID：${rootUid}\n\n> 💡 请在应用中打开该文件后，我才能继续编辑节点。`,
+              filePath: result.filePath,
+              fileName,
+              rootText,
+              rootUid
+            }
+          }
+          return { success: false, message: `创建失败：${result?.error || '无法写入文件'}` }
+        }
+        return { success: false, message: '创建失败：无法访问文件系统' }
       } catch (e) {
         return { success: false, message: `创建失败: ${e.message}` }
       }
@@ -5296,7 +5366,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const sheet = { id: 'sheet1', class: 'sheet', title: rootText, rootTopic: toTopic(treeData) }
           const zip = new JSZip()
           zip.file('content.json', JSON.stringify([sheet]))
-          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.12.5' } }))
+          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.15.0' } }))
           const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
           if (!window.electronAPI?.saveBinaryFile) return { success: false, message: '文件保存功能不可用' }
           const r = await window.electronAPI.saveBinaryFile(fileName, base64)

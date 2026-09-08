@@ -17,6 +17,7 @@
 import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
+import { parseDocument } from '../services/docParseService.js'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
@@ -118,8 +119,8 @@ const getPlainText = (html) => {
   return tmp.textContent || tmp.innerText || ''
 }
 
-// 生成上下文文本（只给前 3 层框架，AI 按需用工具查询更深层）
-const buildContextText = () => {
+// 生成上下文文本（根据文件类型自动选择格式）
+const buildContextText = async () => {
   // 每次构建时直接从 localStorage 读最新的永久记忆，不依赖 props 缓存
   // 防止用户在设置面板修改后，ChatPanel 的 memoryText 没有及时同步
   let latestPermanentMemory = props.permanentMemory
@@ -145,87 +146,165 @@ const buildContextText = () => {
   } catch(e) {
     console.warn('[DeepSeekWebPanel] 读取 localStorage AI 记忆失败:', e)
   }
-  
-  if (!props.mindMap) {
-    return '（当前没有打开的思维导图）'
+
+  const filePath = props.currentFilePath || ''
+  const fileName = props.currentFileName || '未命名'
+  const ext = fileName.split('.').pop()?.toLowerCase() || ''
+
+  // 记忆部分（所有类型通用）
+  const memoryLines = []
+  if (latestPermanentMemory && latestPermanentMemory.trim()) {
+    memoryLines.push('', '## 🔒 永久记忆（严格遵守）', latestPermanentMemory.trim())
   }
-  
-  try {
-    let nodeCount = 0
-    let leafCount = 0
-    let maxDepth = 0
-    let rootText = ''
-    let selectedText = ''
-    const outlineLines = []
-    const PREVIEW_DEPTH = 3 // 只预览前 3 层
-    
-    if (props.mindMap?.getData) {
-      const root = props.mindMap.getData()
-      if (root) {
-        // 根节点文本
-        rootText = getPlainText(root.data?.text || root.text || '') || '未命名'
-        
-        const walk = (node, level = 0) => {
-          if (!node) return
-          nodeCount++
-          if (level > maxDepth) maxDepth = level
-          const text = getPlainText(node.data?.text || node.text || '')
-          const hasChildren = node.children && node.children.length > 0
-          if (!hasChildren) leafCount++
-          
-          // 只输出前 PREVIEW_DEPTH 层
-          if (level < PREVIEW_DEPTH && text) {
-            const prefix = '#'.repeat(level + 1)
-            const moreHint = (level === PREVIEW_DEPTH - 1 && hasChildren) ? ' （还有子节点，可按需查询）' : ''
-            outlineLines.push(prefix + ' ' + text + moreHint)
-          }
-          
-          if (node.children) {
-            node.children.forEach(child => walk(child, level + 1))
-          }
-        }
-        walk(root)
-      }
-    }
-    
-    // 获取当前选中节点
+  if (latestAiMemory && latestAiMemory.trim()) {
+    memoryLines.push('', '## 📝 长期记忆（自然遵循）', latestAiMemory.trim(),
+      '> 只有在用户明确表示需要长期记住的偏好/事实时，才用 save_memory 工具保存。')
+  }
+
+  // 没有文件的情况
+  if (!filePath && !props.mindMap) {
+    return '（当前没有打开的文件）' + memoryLines.join('\n')
+  }
+
+  // ========== .smm 思维导图文件 ==========
+  if (ext === 'smm' || props.mindMap) {
     try {
-      const activeNode = props.mindMap.execCommand?.('GetActiveNodeCommand')
-      if (activeNode) {
-        selectedText = getPlainText(activeNode.data?.text || activeNode.text || '')
+      let nodeCount = 0
+      let leafCount = 0
+      let maxDepth = 0
+      let rootText = ''
+      let selectedText = ''
+      const outlineLines = []
+      const PREVIEW_DEPTH = 3
+      
+      if (props.mindMap?.getData) {
+        const root = props.mindMap.getData()
+        if (root) {
+          rootText = getPlainText(root.data?.text || root.text || '') || '未命名'
+          
+          const walk = (node, level = 0) => {
+            if (!node) return
+            nodeCount++
+            if (level > maxDepth) maxDepth = level
+            const text = getPlainText(node.data?.text || node.text || '')
+            const hasChildren = node.children && node.children.length > 0
+            if (!hasChildren) leafCount++
+            
+            if (level < PREVIEW_DEPTH && text) {
+              const prefix = '#'.repeat(level + 1)
+              const moreHint = (level === PREVIEW_DEPTH - 1 && hasChildren) ? ' （还有子节点，可按需查询）' : ''
+              outlineLines.push(prefix + ' ' + text + moreHint)
+            }
+            
+            if (node.children) {
+              node.children.forEach(child => walk(child, level + 1))
+            }
+          }
+          walk(root)
+        }
       }
-    } catch(e) {}
+      
+      try {
+        const activeNode = props.mindMap.execCommand?.('GetActiveNodeCommand')
+        if (activeNode) {
+          selectedText = getPlainText(activeNode.data?.text || activeNode.text || '')
+        }
+      } catch(e) {}
+      
+      const fileInfo = [
+        '## 当前绑定文件',
+        `- 文件名：${fileName}`,
+        `- 文件路径：${filePath || '（未保存）'}`,
+        `- 文件类型：思维导图 (.smm)`,
+        `- 主题：${rootText || '未命名'}`,
+        `- 节点总数：${nodeCount}`,
+        `- 叶子节点：${leafCount}`,
+        `- 最大层级：${maxDepth + 1} 层`,
+        selectedText ? `- 当前选中：「${selectedText}」` : '',
+        '',
+        `## 导图框架概览（前 ${PREVIEW_DEPTH} 层）`,
+        outlineLines.length > 0 ? outlineLines.join('\n') : '（空）',
+        '',
+        '> 💡 如需查看更深层内容或具体节点信息，请调用 search_nodes、list_directory 等工具按需查询。'
+      ].filter(Boolean)
+      
+      return fileInfo.join('\n') + memoryLines.join('\n')
+    } catch (e) {
+      console.error('获取导图上下文失败:', e)
+      return '获取上下文失败：' + (e.message || e)
+    }
+  }
+
+  // ========== 其他文档类型（PDF / Word / Excel / PPT / 文本等） ==========
+  try {
+    console.log(`[DeepSeekWebPanel] 解析文档: ${fileName}`)
+    const parsed = await parseDocument(filePath)
     
+    if (!parsed.success) {
+      return [
+        '## 当前绑定文件',
+        `- 文件名：${fileName}`,
+        `- 文件路径：${filePath}`,
+        `- 文件类型：${ext.toUpperCase()}`,
+        `- ⚠️ 解析失败：${parsed.error || '未知错误'}`,
+        '',
+        '> 💡 你可以调用 list_directory 浏览文件目录，或调用工具进行其他操作。'
+      ].join('\n') + memoryLines.join('\n')
+    }
+
+    const fullText = parsed.text || ''
+    const totalChars = fullText.length
+    const MAX_PREVIEW_CHARS = 8000 // 预览上限 8000 字
+    const previewText = totalChars > MAX_PREVIEW_CHARS 
+      ? fullText.substring(0, MAX_PREVIEW_CHARS) + `\n\n...（内容过长，已截断，共 ${totalChars} 字，仅显示前 ${MAX_PREVIEW_CHARS} 字）`
+      : fullText
+
+    const typeNames = {
+      pdf: 'PDF 文档',
+      docx: 'Word 文档 (.docx)',
+      xlsx: 'Excel 表格 (.xlsx)',
+      xls: 'Excel 表格 (.xls)',
+      pptx: 'PowerPoint 演示 (.pptx)',
+      csv: 'CSV 表格',
+      tsv: 'TSV 表格',
+      md: 'Markdown 文档',
+      txt: '纯文本文档',
+      json: 'JSON 数据',
+      html: 'HTML 文档',
+      xml: 'XML 文档',
+      log: '日志文件'
+    }
+    const typeName = typeNames[parsed.type] || typeNames[ext] || `${ext.toUpperCase()} 文档`
+
     const fileInfo = [
       '## 当前绑定文件',
-      `- 文件名：${props.currentFileName || '未命名'}`,
-      `- 文件路径：${props.currentFilePath || '（未保存）'}`,
-      `- 主题：${rootText || '未命名'}`,
-      `- 节点总数：${nodeCount}`,
-      `- 叶子节点：${leafCount}`,
-      `- 最大层级：${maxDepth + 1} 层`,
-      selectedText ? `- 当前选中：「${selectedText}」` : '',
+      `- 文件名：${fileName}`,
+      `- 文件路径：${filePath}`,
+      `- 文件类型：${typeName}`,
+      `- 字符总数：${totalChars} 字`,
+      parsed.meta?.pages ? `- 总页数：${parsed.meta.pages} 页` : '',
       '',
-      `## 导图框架概览（前 ${PREVIEW_DEPTH} 层）`,
-      outlineLines.length > 0 ? outlineLines.join('\n') : '（空）',
+      '## 📄 文件内容预览',
+      '```',
+      previewText,
+      '```',
       '',
-      '> 💡 如需查看更深层内容或具体节点信息，请调用 search_nodes、list_directory 等工具按需查询。'
+      `> 💡 以上是文件内容的${totalChars > MAX_PREVIEW_CHARS ? '前 ' + MAX_PREVIEW_CHARS + ' 字' : '全部内容'}。`,
+      `> 💡 你可以基于此文件内容进行分析、总结、问答等操作。如需查询更多内容或转成思维导图，请调用对应工具。`
     ].filter(Boolean)
-    
-    // 添加永久记忆（用户手动设置的，严格遵守）
-    if (latestPermanentMemory && latestPermanentMemory.trim()) {
-      fileInfo.push('', '## 🔒 永久记忆（严格遵守）', latestPermanentMemory.trim())
-    }
-    
-    // 添加 AI 长期记忆（自然遵循）
-    if (latestAiMemory && latestAiMemory.trim()) {
-      fileInfo.push('', '## 📝 长期记忆（自然遵循）', latestAiMemory.trim(), '> 只有在用户明确表示需要长期记住的偏好/事实时，才用 save_memory 工具保存。')
-    }
-    
-    return fileInfo.join('\n')
+
+    return fileInfo.join('\n') + memoryLines.join('\n')
   } catch (e) {
-    console.error('获取导图上下文失败:', e)
-    return '获取上下文失败：' + (e.message || e)
+    console.error('解析文档失败:', e)
+    return [
+      '## 当前绑定文件',
+      `- 文件名：${fileName}`,
+      `- 文件路径：${filePath}`,
+      `- 文件类型：${ext.toUpperCase()}`,
+      `- ⚠️ 解析出错：${e.message || e}`,
+      '',
+      '> 💡 你可以调用 list_directory 浏览文件目录，或调用工具进行其他操作。'
+    ].join('\n') + memoryLines.join('\n')
   }
 }
 
@@ -233,8 +312,11 @@ const buildContextText = () => {
 let lastSentContextHash = ''
 let lastSentContextTime = 0
 
-const sendMindMapContext = (context) => {
+// context 可以是字符串或 Promise<string>
+const sendMindMapContext = async (contextOrPromise) => {
   if (!window.electronAPI?.deepSeekView) return
+  
+  const context = await contextOrPromise
   
   // 去重：1秒内相同内容的上下文只发一次（防止重试 + watcher 双重触发）
   const now = Date.now()
@@ -247,18 +329,28 @@ const sendMindMapContext = (context) => {
   lastSentContextTime = now
   
   try {
-    console.log('[DeepSeekWebPanel] 发送导图上下文，长度:', context?.length || 0)
+    console.log('[DeepSeekWebPanel] 发送上下文，长度:', context?.length || 0)
     // 发送到 BrowserView 的 preload（通道名不带 deepseek: 前缀）
     window.electronAPI.deepSeekView.send('mindmap-context', context)
   } catch (e) {
-    console.error('发送导图上下文失败:', e)
+    console.error('发送上下文失败:', e)
   }
 }
 
 // 处理导图上下文请求（带重试：如果 mindMap 暂时为 null，等一下再试）
 let contextRetryTimer = null
-const handleRequestContext = () => {
+const handleRequestContext = async () => {
   console.log('[DeepSeekWebPanel] 收到上下文请求，props.mindMap:', !!props.mindMap)
+  
+  // 如果有文件路径但不是 smm，直接发送（不需要等 mindMap）
+  const filePath = props.currentFilePath || ''
+  const ext = (props.currentFileName || '').split('.').pop()?.toLowerCase() || ''
+  
+  if (filePath && ext !== 'smm') {
+    console.log('[DeepSeekWebPanel] 非思维导图文件，直接解析发送')
+    sendMindMapContext(buildContextText())
+    return
+  }
   
   // 如果 mindMap 为 null，重试几次（等组件挂载完成）
   if (!props.mindMap) {
@@ -275,7 +367,7 @@ const handleRequestContext = () => {
       }
       if (retryCount >= maxRetries) {
         console.warn('[DeepSeekWebPanel] 重试次数用尽，仍无 mindMap，返回空上下文')
-        sendMindMapContext('（当前没有打开的思维导图）')
+        sendMindMapContext('（当前没有打开的文件）')
         return
       }
       console.log(`[DeepSeekWebPanel] 第 ${retryCount} 次重试，mindMap 仍为 null，继续等待...`)
