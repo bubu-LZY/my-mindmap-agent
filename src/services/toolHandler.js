@@ -254,6 +254,27 @@ function addChildrenToNode(parentNode, children) {
   return { added: uids.length, uids }
 }
 
+// 如果后台修改的文件正好是当前打开的文件，自动刷新界面数据
+async function refreshIfCurrentFile(filePath, treeData, mindMap, extraHandlers) {
+  if (!filePath || !mindMap || !extraHandlers) return false
+  try {
+    const curPath = typeof extraHandlers.currentFilePath === 'function'
+      ? extraHandlers.currentFilePath()
+      : (extraHandlers.currentFilePath || '')
+    if (!curPath) return false
+    // 路径归一化比较（不区分大小写和斜杠方向）
+    const normalize = (p) => p.replace(/\\/g, '/').toLowerCase()
+    if (normalize(curPath) !== normalize(filePath)) return false
+    // 当前打开的就是这个文件，刷新数据
+    mindMap.setData(JSON.parse(JSON.stringify(treeData)))
+    console.log('[后台文件模式] 检测到当前文件被修改，已自动刷新界面')
+    return true
+  } catch (e) {
+    console.warn('[后台文件模式] 自动刷新失败:', e)
+    return false
+  }
+}
+
 function ensureRichText(node) {
   if (!node) return
   if (!node.data) node.data = {}
@@ -4562,6 +4583,9 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const saved = await saveTreeToFile(filePath, treeData)
           if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
 
+          // 如果当前打开的就是这个文件，自动刷新界面
+          await refreshIfCurrentFile(saved.filePath, treeData, mindMap, extraHandlers)
+
           return {
             success: true,
             message: `已为 ${parentNodes.length} 个父节点添加 ${totalAdded} 个子节点（后台文件模式）\n文件：${saved.filePath}\n新增的一级子节点 UID：${firstChildUids.join(', ')}`,
@@ -4729,6 +4753,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
             }
             const saved = await saveTreeToFile(filePath, treeData)
             if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
+            await refreshIfCurrentFile(saved.filePath, treeData, mindMap, extraHandlers)
             let msg = updated > 0 ? `已更新 ${updated} 个节点的文本（后台文件模式）` : 'updates 中没有命中的节点'
             if (missing.length) msg += `；未找到 uid：${missing.join('、')}`
             return { success: updated > 0, message: msg, updated }
@@ -4757,6 +4782,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           }
           const saved = await saveTreeToFile(filePath, treeData)
           if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
+          await refreshIfCurrentFile(saved.filePath, treeData, mindMap, extraHandlers)
           return { success: updated > 0, message: `已更新 ${updated} 个节点的文本（后台文件模式）`, updated }
         }
 
@@ -4841,6 +4867,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
 
           const saved = await saveTreeToFile(filePath, treeData)
           if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
+          await refreshIfCurrentFile(saved.filePath, treeData, mindMap, extraHandlers)
           return { success: true, message: `已删除 ${deleted} 个节点（后台文件模式）`, deleted }
         }
 
@@ -5131,6 +5158,8 @@ ${mindMapTypePrompt(mapType, 'organize')}
 
           const saved = await saveTreeToFile(filePath, treeData)
           if (saved.error) return { success: false, message: `保存失败：${saved.error}` }
+
+          await refreshIfCurrentFile(saved.filePath, treeData, mindMap, extraHandlers)
 
           return {
             success: allOk,
