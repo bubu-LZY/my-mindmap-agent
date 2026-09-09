@@ -57,8 +57,20 @@ export const getToolDetailTool = {
       }
     }
 
-    const props = tool.parameters?.properties || {}
-    const required = tool.required || []
+    // 兼容两种参数格式：
+    // 新格式: parameters = { type: 'object', properties: { ... }, required: [...] }
+    // 老格式: parameters = { param1: { type, description, ... }, param2: ... }
+    let props = {}
+    let required = []
+    if (tool.parameters?.properties) {
+      // 新格式
+      props = tool.parameters.properties
+      required = tool.parameters.required || tool.required || []
+    } else if (tool.parameters && typeof tool.parameters === 'object') {
+      // 老格式：parameters 本身就是参数映射
+      props = tool.parameters
+      required = tool.required || []
+    }
     const paramNames = Object.keys(props)
 
     const lines = []
@@ -82,23 +94,51 @@ export const getToolDetailTool = {
     lines.push('')
 
     if (paramNames.length === 0) {
-      lines.push('（无参数）')
+      lines.push('（无参数，直接调用即可）')
     } else {
-      for (const pName of paramNames) {
-        const p = props[pName]
-        const isRequired = required.includes(pName)
+      // 递归渲染参数（支持嵌套对象）
+      function renderParam(name, param, depth = 0, reqList = []) {
+        const indent = '  '.repeat(depth)
+        const isRequired = reqList.includes(name)
         const reqMark = isRequired ? '**(必填)**' : '(可选)'
-        lines.push(`- **${pName}** ${reqMark}`)
-        lines.push(`  - 类型: ${p.type || 'any'}`)
-        if (p.description) {
-          lines.push(`  - 说明: ${p.description}`)
+        lines.push(`${indent}- **${name}** ${reqMark}`)
+        lines.push(`${indent}  - 类型: ${param.type || 'any'}`)
+        if (param.description) {
+          lines.push(`${indent}  - 说明: ${param.description}`)
         }
-        if (p.enum) {
-          lines.push(`  - 可选值: ${p.enum.join(' | ')}`)
+        if (param.enum) {
+          lines.push(`${indent}  - 可选值: ${param.enum.join(' | ')}`)
         }
-        if (p.default !== undefined) {
-          lines.push(`  - 默认值: ${JSON.stringify(p.default)}`)
+        if (param.default !== undefined) {
+          lines.push(`${indent}  - 默认值: ${JSON.stringify(param.default)}`)
         }
+        // 嵌套对象属性
+        if (param.properties && typeof param.properties === 'object') {
+          const subReq = param.required || []
+          const subNames = Object.keys(param.properties)
+          if (subNames.length > 0) {
+            lines.push(`${indent}  - 子字段:`)
+            for (const subName of subNames) {
+              renderParam(subName, param.properties[subName], depth + 2, subReq)
+            }
+          }
+        }
+        // 数组元素类型
+        if (param.type === 'array' && param.items?.properties) {
+          lines.push(`${indent}  - 元素类型: object`)
+          const subReq = param.items.required || []
+          const subNames = Object.keys(param.items.properties)
+          if (subNames.length > 0) {
+            lines.push(`${indent}  - 元素字段:`)
+            for (const subName of subNames) {
+              renderParam(subName, param.items.properties[subName], depth + 2, subReq)
+            }
+          }
+        }
+      }
+
+      for (const pName of paramNames) {
+        renderParam(pName, props[pName], 0, required)
       }
     }
 

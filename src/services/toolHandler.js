@@ -417,6 +417,7 @@ const toolCatalog = [
   { name: 'reorder_nodes', category: 'Node Ops', desc: 'Move a node to a specific position among its siblings (same parent). Provide index (0-based target index) OR before_uid OR after_uid. Use this to insert/reorder a node in the MIDDLE of siblings — cross-branch move is move_node / batch_move_nodes.' },
   { name: 'read_node_subtree', category: 'Node Ops', desc: 'Read the full subtree content of one node as indented text (uid or keyword)' },
   { name: 'get_node_detail', category: 'Query', desc: 'Inspect one node: text/uid/parent/children/styles/note/cloze/summary' },
+  { name: 'get_all_nodes', category: 'Query', desc: 'Get ALL nodes at once (uid, text, depth, parentUid). Supports file_path for background file mode. Use when you need all node uids for batch operations.' },
   { name: 'rename_mindmap_file', category: 'File', desc: 'Rename the currently open .smm file on disk' },
   { name: 'merge_nodes', category: 'Node Ops', desc: 'Merge multiple nodes into one (text concat, children merged); NOT undoable with Ctrl+Z' },
   { name: 'focus_node', category: 'Node Ops', desc: 'Locate a node on the canvas (scroll to center and highlight); param uid or keyword' },
@@ -2335,6 +2336,21 @@ export const aiTools = [
         properties: {
           uid: { type: 'string', description: 'Node uid' },
           keyword: { type: 'string', description: 'Alternative: first node whose text contains this keyword' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_all_nodes',
+      description: 'Get ALL nodes in the mindmap at once, including uid, text, depth, parentUid, and leaf status. Supports file_path for background file mode. Use this when you need all node uids for batch operations (ai_cloze, batch updates, etc.) — much faster than searching one by one.',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Optional: path to .smm file for background mode (no need to open the file)' },
+          include_text: { type: 'boolean', description: 'Whether to include node text in results (default true)' },
+          max_depth: { type: 'number', description: 'Max depth to traverse (0 = unlimited, default 0)' }
         }
       }
     }
@@ -5330,7 +5346,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
               parts.push(ok ? `挖空完成：${String(result || '').split('\n')[0]}` : `挖空未完成：${result}`)
             } else {
               allOk = false
-              parts.push('AI挖空功能不可用')
+              parts.push('AI挖空功能不可用：请检查是否已配置 AI API 密钥（设置 → AI服务），以及网络连接是否正常。')
             }
           }
 
@@ -5826,7 +5842,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const sheet = { id: 'sheet1', class: 'sheet', title: rootText, rootTopic: toTopic(treeData) }
           const zip = new JSZip()
           zip.file('content.json', JSON.stringify([sheet]))
-          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.16.0' } }))
+          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.16.1' } }))
           const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
           if (!window.electronAPI?.saveBinaryFile) return { success: false, message: '文件保存功能不可用' }
           const r = await window.electronAPI.saveBinaryFile(fileName, base64)
@@ -6450,7 +6466,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const ok = result && !/失败|没有选中|正在处理/.test(result)
           return { success: !!ok, message: result || 'AI挖空完成' }
         }
-        return { success: false, message: 'AI挖空功能不可用' }
+        return { success: false, message: 'AI挖空功能不可用：请检查是否已配置 AI API 密钥（设置 → AI服务），以及网络连接是否正常。' }
       } catch (e) {
         return { success: false, message: `AI挖空失败: ${e.message}` }
       }
@@ -8822,6 +8838,88 @@ ${block}`
         return { success: true, message: JSON.stringify(detail, null, 2) }
       } catch (e) {
         return { success: false, message: `获取节点详情失败: ${e.message}` }
+      }
+    }
+
+    case 'get_all_nodes': {
+      try {
+        const { file_path, include_text = true, max_depth = 0 } = args || {}
+
+        let rootData = null
+        let totalCount = 0
+
+        if (file_path) {
+          // 后台文件模式
+          const treeData = await loadTreeFromFile(file_path)
+          if (!treeData) return { success: false, message: `读取文件失败: ${file_path}` }
+          rootData = treeData
+        } else {
+          // 当前打开的导图
+          if (!mindMap) return { success: false, message: '当前没有打开的思维导图。请先打开文件或传入 file_path 参数。' }
+          rootData = mindMap.getData()
+        }
+
+        // 递归收集所有节点
+        const allNodes = []
+
+        function walk(node, depth = 0, parentUid = '') {
+          if (!node) return
+          const uid = node.uid || node.data?.uid || ''
+          const text = nodePlainText(node.text || node.data?.text || '')
+          const isRoot = depth === 0 && !parentUid
+
+          const nodeInfo = { uid, depth, parentUid, isRoot }
+          if (include_text) nodeInfo.text = text.slice(0, 200)
+
+          allNodes.push(nodeInfo)
+          totalCount++
+
+          // 限制深度（0 = 不限制）
+          if (max_depth > 0 && depth >= max_depth) return
+
+          const children = node.children || node.data?.children || []
+          for (const child of children) {
+            if (child.isGeneralization) continue
+            walk(child, depth + 1, uid)
+          }
+        }
+
+        walk(rootData)
+
+        const leafCount = allNodes.filter(nodeInfo => {
+          // 检查是否叶子节点
+          const findNode = (data, uid) => {
+            if ((data.uid || data.data?.uid) === uid) return data
+            const children = data.children || data.data?.children || []
+            for (const c of children) {
+              const found = findNode(c, uid)
+              if (found) return found
+            }
+            return null
+          }
+          const nodeData = findNode(rootData, nodeInfo.uid)
+          const children = nodeData?.children || nodeData?.data?.children || []
+          return children.filter(c => !c.isGeneralization).length === 0
+        }).length
+
+        const maxLevel = allNodes.reduce((m, n) => Math.max(m, n.depth), 0) + 1
+
+        const result = {
+          total: totalCount,
+          leafCount,
+          maxLevel,
+          rootUid: allNodes[0]?.uid || '',
+          nodes: allNodes
+        }
+
+        const summary = `共 ${totalCount} 个节点（${leafCount} 个叶子），最大层级 ${maxLevel} 层`
+        return {
+          success: true,
+          message: `${summary}\n\n${JSON.stringify(result, null, 2)}`,
+          ...result
+        }
+      } catch (e) {
+        return { success: false, message: `获取全部节点失败: ${e.message}` }
       }
     }
 

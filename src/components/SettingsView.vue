@@ -937,7 +937,7 @@
       <div style="margin-bottom: 12px;">
         <el-button size="small" type="primary" :loading="checkingUpdate" @click="checkUpdate">检查更新</el-button>
       </div>
-      <p>my-mindmap agent v4.16.0</p>
+      <p>my-mindmap agent v4.16.1</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>

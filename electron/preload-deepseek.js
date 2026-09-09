@@ -2023,7 +2023,7 @@ function buildInitMessage(context) {
 {
   "tool": "add_child_nodes",
   "params": {
-    "targets": ["节点uid"],
+    "targets": { "uids": ["节点uid"] },
     "children": [
       { "text": "子节点1" },
       { "text": "子节点2" }
@@ -2037,51 +2037,68 @@ function buildInitMessage(context) {
 ### ⭐ 批量操作（优先使用，效率最高）
 
 **batch_node_actions** - 批量节点操作（强烈推荐，一次执行多个操作，效率最高）
-- 支持的 action 类型: update_text（更新文本）、add_child（添加子节点，支持嵌套 children）、delete（删除）
 - 参数:
-  - steps (数组): 操作步骤列表，每个元素有 action+uid+对应参数
-  - file_path (字符串，可选): 指定文件路径，后台操作该文件，无需打开
-- 示例（批量添加 6 个子节点到根节点）:
+  - steps (数组，必填): 操作步骤列表，每步有 targets + 操作类型
+    - targets (对象): 该步骤的目标节点（uids/keyword/mode）
+    - set_style (对象): 批量设置节点样式（fillColor / textColor / bold / italic / shape / fontSize 等）
+    - text_style (对象): 仅设置匹配的文本片段样式（color/regex/text + style）
+    - ai_cloze (布尔): true = 对目标节点执行 AI 智能挖空
+    - update_texts (数组): 每个节点不同的文本 [{uid, text}, ...]
+    - wrap_text (对象): 用前缀/后缀包裹文本 {prefix, suffix}
+    - replace_text (对象): 查找替换文本 {find, replacement, regex, flags}
+    - clear_cloze (对象): 清除挖空 {before, after}
+    - condition (对象): 额外筛选条件（textContains / hasCloze / minDepth 等）
+  - dry_run (布尔，可选): true = 预览不修改，大规模操作前先预览
+- 示例（批量设置叶子父节点红色 + 叶子节点挖空）:
 \`\`\`
 { "tool": "batch_node_actions", "params": { "steps": [
-  { "action": "add_child", "uid": "根节点uid", "text": "子节点1" },
-  { "action": "add_child", "uid": "根节点uid", "text": "子节点2" },
-  { "action": "add_child", "uid": "根节点uid", "text": "子节点3" }
-], "file_path": "C:\\我的mindmap\\笔记.smm" } }
+  { "targets": { "mode": "leaf_parents" }, "set_style": { "textColor": "#ff3b30" } },
+  { "targets": { "mode": "leaves" }, "ai_cloze": true }
+], "dry_run": true } }
 \`\`\`
 - 示例（批量更新 2 个节点文本）:
 \`\`\`
 { "tool": "batch_node_actions", "params": { "steps": [
-  { "action": "update_text", "uid": "uid1", "text": "新文本1" },
-  { "action": "update_text", "uid": "uid2", "text": "新文本2" }
+  { "targets": { "uids": ["uid1", "uid2"] }, "update_texts": [
+    { "uid": "uid1", "text": "新文本1" },
+    { "uid": "uid2", "text": "新文本2" }
+  ] }
 ] } }
 \`\`\`
 
 ### 节点操作
 
-> 💡 **后台文件模式**：所有节点工具都支持 file_path 参数，传入文件路径即可直接操作磁盘上的 .smm 文件，**不需要先打开文件**！
-> - 示例：{ "tool": "search_nodes", "params": { "keyword": "第一章", "file_path": "C:\\我的mindmap\\test.smm" } }
-> - 支持的工具：search_nodes、add_child_nodes、update_node_text、delete_node、batch_node_actions、read_mindmap_file
-> - 操作完成后会自动保存回文件
+> 💡 **targets 参数说明**：大多数节点工具都使用 targets 对象来选择目标节点，支持三种方式：
+> - uids: 指定 UID 列表，如 { "uids": ["uid1", "uid2"] }
+> - keyword: 按关键词匹配，如 { "keyword": "第一章" }
+> - mode: 按结构模式，可选 "leaves"（所有叶子）、"leaf_parents"（叶子的父节点）、"all"（所有节点）
+> - **不传 targets 则操作当前选中的节点**
 
 **search_nodes** - 搜索节点（获取 uid，操作前必用）
 - 参数:
-  - keyword (字符串，搜索关键词)
-  - file_path (字符串，可选): 指定文件路径，后台搜索该文件，无需打开
-- 示例（搜索当前打开的导图）: \`{ "tool": "search_nodes", "params": { "keyword": "心理学" } }\`
-- 示例（后台搜索指定文件）: \`{ "tool": "search_nodes", "params": { "keyword": "第一章", "file_path": "C:\\我的mindmap\\笔记.smm" } }\`
+  - keyword (字符串): 单个搜索关键词
+  - keywords (数组，可选): 多个关键词（推荐，避免重复调用）
+  - mode (字符串，可选): "any"=匹配任意一个（默认）、"all"=匹配所有
+  - max_results (数字，可选): 最大返回数，默认 200
+- 示例: \`{ "tool": "search_nodes", "params": { "keyword": "心理学" } }\`
+- 示例（多关键词）: \`{ "tool": "search_nodes", "params": { "keywords": ["第一章", "导论"], "mode": "any" } }\`
 
 **add_child_nodes** - 批量添加子节点（支持嵌套，一次性创建整棵子树！）
 - 参数:
-  - targets: 数组，目标父节点 uid 列表，例如 ["uid1", "uid2"]
-  - children: 数组，子节点树（支持嵌套 children，一次性创建多层）
-  - file_path (字符串，可选): 指定文件路径，后台操作该文件
+  - targets (对象，可选): 目标父节点集合，**不传则对当前选中节点操作**
+    - uids (数组): 节点 UID 列表
+    - keyword (字符串): 按关键词匹配节点
+    - mode (字符串): 按模式匹配，可选 "leaves"、"leaf_parents"
+  - children (数组，必填): 子节点树（支持嵌套 children，一次性创建多层）
+    - text (字符串): 节点文本（必填）
+    - children (数组): 下一级子节点（递归嵌套）
+  - afterInsert (字符串，可选): 插入后行为："select" / "focus" / "none"，默认 select
 - 示例（一次性创建 3 层结构）:
 \`\`\`
 {
   "tool": "add_child_nodes",
   "params": {
-    "targets": ["根节点uid"],
+    "targets": { "uids": ["根节点uid"] },
     "children": [
       {
         "text": "1. 用户输入",
@@ -2102,36 +2119,93 @@ function buildInitMessage(context) {
   }
 }
 \`\`\`
-- 💡 **重要技巧**：children 里可以继续嵌套 children，一次性创建完整的多层结构，不用一层一层加！
+- 💡 **重要技巧**：children 里可以继续嵌套 children，一次性创建完整的多层结构！
 
-**update_node_text** - 更新单个节点文本
-- 参数: uid (字符串), text (字符串，新文本)
-- 示例: \`{ "tool": "update_node_text", "params": { "uid": "abc123", "text": "更新后的内容" } }\`
+**update_node_text** - 更新节点文本（支持批量）
+- 参数（三选一）:
+  - updates (数组): 每个节点不同的文本，格式 [{uid, text}, ...]
+  - text + targets: 相同文本应用到 targets 指定的所有节点
+  - 都不传: 更新当前选中的节点
+- 示例（批量更新多个节点）:
+\`\`\`
+{ "tool": "update_node_text", "params": { "updates": [
+  { "uid": "uid1", "text": "新文本1" },
+  { "uid": "uid2", "text": "新文本2" }
+] } }
+\`\`\`
+- 示例（对选中节点设置相同文本）: \`{ "tool": "update_node_text", "params": { "text": "新内容" } }\`
 
 **delete_node** - 删除节点
-- 参数: uid (字符串)
-- 示例: \`{ "tool": "delete_node", "params": { "uid": "abc123" } }\`
+- 参数:
+  - targets (对象，可选): 要删除的节点集合，**不传则删除当前选中节点**
+    - uids (数组): 节点 UID 列表
+    - keyword (字符串): 按关键词匹配节点
+    - mode (字符串): 按模式匹配，可选 "leaves"、"leaf_parents"、"all"
+- ⚠️ 删除多个节点前请确认
+- 示例: \`{ "tool": "delete_node", "params": { "targets": { "uids": ["uid1"] } } }\`
 
-**select_node** - 选中节点
-- 参数: uid (字符串)
-- 示例: \`{ "tool": "select_node", "params": { "uid": "abc123" } }\`
+**select_node** - 批量选中节点
+- 参数（任选其一）:
+  - keyword (字符串): 选中所有文本包含该关键词的节点
+  - uids (数组): 选中指定 UID 列表的节点
+  - mode (字符串): 按结构模式选择："leaves" / "leaf_parents" / "level_range"
+  - minDepth / maxDepth (数字): mode=level_range 时使用（root=0）
+  - includeChildren (布尔): 是否同时选中所有子节点，默认 false
+- 示例: \`{ "tool": "select_node", "params": { "mode": "leaves" } }\`
+- 示例: \`{ "tool": "select_node", "params": { "keyword": "马克思主义" } }\`
 
-**focus_node** - 聚焦节点（滚动到视野中心）
-- 参数: uid (字符串)
+**focus_node** - 聚焦节点（滚动到视野中心并高亮）
+- 参数（二选一）:
+  - uid (字符串): 节点 UID
+  - keyword (字符串): 关键词（第一个匹配的节点）
 - 示例: \`{ "tool": "focus_node", "params": { "uid": "abc123" } }\`
+- 示例: \`{ "tool": "focus_node", "params": { "keyword": "重点内容" } }\`
 
 ### 挖空工具
 
-**ai_cloze** - 智能挖空
+> ⚠️ **注意**：挖空工具（ai_cloze、ai_cloze_review 等）**不支持 file_path 后台模式**，必须打开文件后才能操作。它们依赖 AI 模型调用，需要配置 AI API。
+
+**ai_cloze** - 智能挖空（关键词挖空，保留上下文线索）
 - 参数:
-  - mode (字符串): 挖空模式，可选 "keyword"（关键词）、"important"（重要内容）
-  - targets (数组): 目标节点 uid 列表
-- 示例: \`{ "tool": "ai_cloze", "params": { "mode": "keyword", "targets": ["abc123"] } }\`
+  - targets (对象，可选): 目标节点集合，**不传则对当前选中的节点操作**
+    - uids (数组): 节点 UID 列表
+    - keyword (字符串): 按关键词匹配节点
+    - mode (字符串): 按模式匹配，可选 "leaves"（所有叶子节点）、"leaf_parents"（所有叶子的父节点）
+- 示例（对指定 UID 列表挖空）:
+\`\`\`
+{ "tool": "ai_cloze", "params": { "targets": { "uids": ["uid1", "uid2"] } } }
+\`\`\`
+- 示例（对所有叶子节点挖空）:
+\`\`\`
+{ "tool": "ai_cloze", "params": { "targets": { "mode": "leaves" } } }
+\`\`\`
+- 示例（按关键词匹配节点挖空）:
+\`\`\`
+{ "tool": "ai_cloze", "params": { "targets": { "keyword": "马克思" } } }
+\`\`\`
+- 💡 **全文挖空技巧**：用 ai_cloze_full_map 一键全文挖空，或用 get_all_nodes + ai_cloze
 
-**ai_cloze_review** - 审查挖空质量
-- 参数: targets (数组，目标节点 uid 列表)
+**ai_cloze_full_map** - 全文挖空（对整个导图所有节点挖空，一键完成）
+- 说明：直接对当前打开的导图所有节点执行智能挖空，不需要手动传 UID 列表
+- 示例: \`{ "tool": "ai_cloze_full_map", "params": {} }\`
+- 💡 **这是全文挖空最快的方式**
 
-**clear_cloze** - 清除所有挖空
+**ai_cloze_review** - 审查挖空质量（移除不合理的挖空，补充遗漏的关键词）
+- 参数:
+  - targets (对象，可选): 目标节点集合，不传则审查当前选中节点
+    - uids (数组): 节点 UID 列表
+    - keyword (字符串): 按关键词匹配节点
+    - mode (字符串): 按模式匹配，可选 "leaves"、"leaf_parents"、"all"
+
+**clear_cloze** - 清除挖空标记
+- 参数:
+  - targets (对象，必填): 要清除挖空的节点集合
+    - uids (数组): 节点 UID 列表
+    - keyword (字符串): 按关键词匹配节点
+    - mode (字符串): 按模式匹配，"all"=清除整张图
+  - before (字符串，可选): 只清除分隔符之前的挖空
+  - after (字符串，可选): 只清除分隔符之后的挖空
+- 示例（清除整张图的挖空）: \`{ "tool": "clear_cloze", "params": { "targets": { "mode": "all" } } }\`
 
 ### 文件操作
 
@@ -2144,16 +2218,11 @@ function buildInitMessage(context) {
 
 **new_mindmap** - 新建思维导图（创建并自动打开，默认保存到 C:\我的mindmap）
 - 参数:
-  - root_text (字符串，可选): 根节点文本，默认"中心主题"
-  - file_name (字符串，可选): 文件名，默认用根节点文本
+  - rootText (字符串，可选): 根节点文本，默认"中心主题"
   - save_dir (字符串，可选): 保存目录，默认 C:\我的mindmap
 - 示例（最简单用法）:
 \`\`\`
-{ "tool": "new_mindmap", "params": { "root_text": "登录流程" } }
-\`\`\`
-- 示例（指定文件名和目录）:
-\`\`\`
-{ "tool": "new_mindmap", "params": { "root_text": "登录流程", "file_name": "登录流程.smm", "save_dir": "C:\\我的mindmap" } }
+{ "tool": "new_mindmap", "params": { "rootText": "登录流程" } }
 \`\`\`
 - 返回字段:
   - filePath: 创建的文件完整路径
@@ -2163,14 +2232,22 @@ function buildInitMessage(context) {
 
 **save_mindmap** - 保存当前导图
 - 参数:
-  - file_name (字符串，可选): 文件名（不含路径），默认用根节点文本
-  - save_dir (字符串，可选): 保存目录，默认 C:\我的mindmap
-- 示例（保存到默认目录）: \`{ "tool": "save_mindmap", "params": { "file_name": "登录流程.smm" } }\`
-- 示例（保存到指定目录）: \`{ "tool": "save_mindmap", "params": { "file_name": "登录流程.smm", "save_dir": "C:\\\\我的mindmap" } }\`
+  - fileName (字符串，可选): 新文件名（不含扩展名），不传则覆盖当前文件
+  - save_dir (字符串，可选): 保存目录，默认当前文件所在目录
+  - new_file (布尔，可选): true=强制另存为新文件
+- 示例（另存为新文件）: \`{ "tool": "save_mindmap", "params": { "fileName": "副本", "new_file": true } }\`
 
-**export_mindmap_html** - 导出 HTML
+**export_mindmap_html** - 导出交互式 HTML
+- 参数:
+  - mode (字符串，可选): "single"=单导图视图（默认）、"full"=全视图三模式
+  - file_name (字符串，可选): 文件名（不含扩展名），默认用根节点文本
+  - file_path (字符串，可选): 指定 .smm 文件路径，后台导出无需打开
 
 **export_to_markdown** - 导出 Markdown
+- 参数:
+  - file_name (字符串，可选): 文件名（不含扩展名）
+  - file_path (字符串，可选): 指定单个 .smm 文件路径，后台导出
+  - file_paths (数组，可选): 多个 .smm 文件路径，批量导出
 
 **read_mindmap_file** - 读取 .smm 文件
 - 参数: file_path (字符串，文件完整路径)
@@ -2190,11 +2267,33 @@ function buildInitMessage(context) {
 - 示例（搜索所有导图文件）: \`{ "tool": "find_local_file", "params": { "exts": ["smm"] } }\`
 - 示例（按关键词搜索）: \`{ "tool": "find_local_file", "params": { "keyword": "导论", "exts": ["smm", "md"] } }\`
 
-### 视图/搜索
+### 查询工具
 
-**zoom_in** - 放大视图
+**get_all_nodes** - 获取全部节点（一键拿到所有节点的 UID 和文本）
+- 参数:
+  - file_path (字符串，可选): 指定 .smm 文件路径，后台模式，无需打开文件
+  - include_text (布尔，可选): 是否包含节点文本，默认 true
+  - max_depth (数字，可选): 最大深度，0=不限制，默认 0
+- 示例（获取当前导图全部节点）: \`{ "tool": "get_all_nodes", "params": {} }\`
+- 示例（后台获取指定文件全部节点）:
+\`\`\`
+{ "tool": "get_all_nodes", "params": { "file_path": "C:\\我的mindmap\\笔记.smm" } }
+\`\`\`
+- 返回字段:
+  - total: 节点总数
+  - leafCount: 叶子节点数
+  - maxLevel: 最大层级
+  - rootUid: 根节点 UID
+  - nodes: 节点数组，每个元素含 uid/text/depth/parentUid/isRoot
+- 💡 **使用场景**：批量操作前获取所有 UID、全文挖空、统计分析、遍历整个导图结构
 
-**zoom_out** - 缩小视图
+### 视图操作
+
+**zoom_control** - 视图缩放控制
+- 参数:
+  - action (字符串，必填): "in"=放大、"out"=缩小、"fit"=适应屏幕、"reset"=重置
+- 示例: \`{ "tool": "zoom_control", "params": { "action": "in" } }\`
+- 示例: \`{ "tool": "zoom_control", "params": { "action": "fit" } }\`
 
 **semantic_search** - 语义搜索
 - 参数: query (字符串，搜索查询)
@@ -2204,11 +2303,13 @@ function buildInitMessage(context) {
 
 1. 先了解当前文件结构（已在上方提供）
 2. 需要操作节点时，先用 search_nodes 搜索获取 uid
-3. **构建导图时尽量一次性创建多层结构**：add_child_nodes 的 children 支持嵌套，不要一层一层地加
-4. **优先使用批量工具**：batch_node_actions 一次可以执行多个操作
-5. 输出 mymindmap 代码块调用工具（可以一次输出多个，按顺序执行）
-6. 等待工具执行结果自动返回
-7. 基于结果继续分析，如需更多操作继续输出 mymindmap 代码块
+3. **需要所有节点 UID 时用 get_all_nodes**：一键获取全部节点，比逐个搜索快 100 倍
+4. **构建导图时尽量一次性创建多层结构**：add_child_nodes 的 children 支持嵌套，不要一层一层地加
+5. **优先使用批量工具**：batch_node_actions 一次可以执行多个操作
+6. **全文挖空用 ai_cloze_full_map**：一键对整个导图挖空，不要一个个节点挖
+7. 输出 mymindmap 代码块调用工具（可以一次输出多个，按顺序执行）
+8. 等待工具执行结果自动返回
+9. 基于结果继续分析，如需更多操作继续输出 mymindmap 代码块
 
 现在请确认你已理解以上规则，并简要回复你能做什么。`
 }
