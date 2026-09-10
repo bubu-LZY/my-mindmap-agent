@@ -2232,10 +2232,13 @@ function buildInitMessage(context) {
 
 **save_mindmap** - 保存当前导图
 - 参数:
-  - fileName (字符串，可选): 新文件名（不含扩展名），不传则覆盖当前文件
-  - save_dir (字符串，可选): 保存目录，默认当前文件所在目录
+  - fileName (字符串，可选): 新文件名（不含扩展名）。不传则用根节点文本作为文件名（另存为新文件时）
+  - save_dir (字符串，可选): 保存目录。有当前打开文件时默认保存到当前文件所在目录；无打开文件时保存到默认目录（C:\我的mindmap）
   - new_file (布尔，可选): true=强制另存为新文件
-- 示例（另存为新文件）: \`{ "tool": "save_mindmap", "params": { "fileName": "副本", "new_file": true } }\`
+- 💡 **重要**：不传 fileName / save_dir / new_file 时 = 直接覆盖保存当前文件（原地保存，最常用）
+- 💡 只想保存当前文件的修改 → 直接调用 `save_mindmap` 不传任何参数
+- 示例（原地覆盖保存）: \`{ "tool": "save_mindmap", "params": {} }\`
+- 示例（另存为新文件到当前目录）: \`{ "tool": "save_mindmap", "params": { "fileName": "副本", "new_file": true } }\`
 
 **export_mindmap_html** - 导出交互式 HTML
 - 参数:
@@ -2310,6 +2313,13 @@ function buildInitMessage(context) {
 7. 输出 mymindmap 代码块调用工具（可以一次输出多个，按顺序执行）
 8. 等待工具执行结果自动返回
 9. 基于结果继续分析，如需更多操作继续输出 mymindmap 代码块
+
+## ⚠️ 重要注意事项
+
+- **UID 只对当前绑定文件有效**：每个 .smm 文件的节点 UID 都是独立的。切换文件后，之前获取的 UID 全部失效，必须重新调用 get_all_nodes 或 search_nodes 获取新的 UID
+- **保存文件默认原地覆盖**：直接调用 save_mindmap 不传任何参数 = 保存到当前绑定文件。只有需要另存为新文件时才传 fileName / save_dir / new_file
+- **不确定节点文本时用 get_all_nodes**：search_nodes 搜不到时不要盲目换关键词猜，直接用 get_all_nodes 拿到全部节点列表后再筛选
+- **占位节点检测**：get_all_nodes 会自动检测"分支主题"、"中心主题"等模板占位节点并返回 placeholderNodes 列表。发现占位节点时应主动提醒用户并询问是否需要补充内容
 
 现在请确认你已理解以上规则，并简要回复你能做什么。`
 }

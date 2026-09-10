@@ -3224,7 +3224,12 @@ function resolveTargetNodes(mindMap, targets = {}) {
     if (baseNodes.length === 0) {
       const active = (mindMap?.renderer?.activeNodeList || []).filter(n => n && !n.isGeneralization)
       if (active.length > 0) return { nodes: active, error: null }
-      return { nodes: [], error: keywordRaw ? `未找到包含"${keywordRaw}"的节点` : '未找到对应 uid 的节点' }
+      const uidListStr = uidList.length > 0 ? `uids: [${uidList.slice(0, 3).join(', ')}${uidList.length > 3 ? '...' : ''}]` : ''
+      const hint = `请先调用 get_all_nodes 获取当前导图的全部节点 UID 列表，再从中选择正确的 UID 使用。注意：UID 只对当前绑定的文件有效，切换文件后必须重新获取。`
+      if (keywordRaw) {
+        return { nodes: [], error: `未找到包含"${keywordRaw}"的节点。${hint}` }
+      }
+      return { nodes: [], error: `未找到对应 uid 的节点（${uidListStr}）。${hint}` }
     }
 
     // 显式 targets 与结构范围组合：uids/keyword 先定位基点，再按 mode 展开
@@ -4358,17 +4363,27 @@ ${mindMapTypePrompt(mapType, 'organize')}
         // 避免模型传了“文件名.smm”时再次追加 .smm，形成 .smm.smm。
         const fileName = /\.smm$/i.test(safeName) ? safeName : `${safeName}.smm`
         if (window.electronAPI?.saveFile) {
+          // 确定保存目录：
+          // 1. 传了 save_dir → 用指定目录
+          // 2. 没传 save_dir 但有当前打开文件 → 保存到当前文件所在目录
+          // 3. 都没有 → 保存到默认目录（C:\我的mindmap）
+          let saveDir = ''
           if (args.save_dir) {
-            const dir = String(args.save_dir).replace(/[\\/]+$/, '')
-            const sep = dir.includes('\\') ? '\\' : '/'
-            const targetPath = dir + sep + fileName
-            const result = await window.electronAPI.saveFile(targetPath, saveData, { overwrite: true })
-            if (result && result.success) {
-              return { success: true, message: `已保存：${result.filePath}`, filePath: result.filePath, fileName }
-            }
-            return { success: false, message: `保存失败：${result?.error || '无法写入指定目录'}` }
+            saveDir = String(args.save_dir).replace(/[\\/]+$/, '')
+          } else if (curPath && /\.smm$/i.test(curPath)) {
+            // 取当前文件所在目录
+            const lastSep = Math.max(curPath.lastIndexOf('\\'), curPath.lastIndexOf('/'))
+            if (lastSep > 0) saveDir = curPath.slice(0, lastSep)
           }
-          const result = await window.electronAPI.saveFile(fileName, saveData, { overwrite: true })
+
+          let targetPath
+          if (saveDir) {
+            const sep = saveDir.includes('\\') ? '\\' : '/'
+            targetPath = saveDir + sep + fileName
+          } else {
+            targetPath = fileName // 相对路径，由 saveFile 处理为默认目录
+          }
+          const result = await window.electronAPI.saveFile(targetPath, saveData, { overwrite: true })
           if (result && result.success) {
             return { success: true, message: `已保存：${result.filePath}`, filePath: result.filePath, fileName }
           }
@@ -4556,7 +4571,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           }
 
           if (parentNodes.length === 0) {
-            return { success: false, message: `没有找到目标父节点（uids: ${targetUids.join(', ')}）` }
+            return { success: false, message: `没有找到目标父节点（uids: ${targetUids.join(', ')}）。请先调用 get_all_nodes(file_path=...) 获取该文件的全部节点 UID 列表，确认 UID 正确后再操作。注意：UID 只对当前文件有效，不能跨文件使用。` }
           }
 
           // 构建子节点树（复用 buildChildList 的逻辑）
@@ -5530,7 +5545,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           success: true,
           message: results.length
             ? `找到 ${results.length} 个匹配节点${results.length >= maxResults ? '（已达 max_results 上限）' : ''}${fromFile ? '（文件模式）' : ''}：\n${results.map((r, i) => `${i + 1}. ${r.path}${r.uid ? `（uid: ${r.uid}）` : ''}`).join('\n')}`
-            : `未找到匹配的节点${fromFile ? '（文件模式）' : ''}`,
+            : `未找到匹配的节点${fromFile ? '（文件模式）' : ''}。\n💡 提示：关键词可能与节点文本写法不一致，建议：\n1. 调用 get_all_nodes 获取全部节点列表后再筛选\n2. 尝试用更短、更通用的关键词搜索\n3. 使用 query_nodes 的 textRegex 正则模糊匹配`,
           results,
           fromFile
         }
@@ -5842,7 +5857,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const sheet = { id: 'sheet1', class: 'sheet', title: rootText, rootTopic: toTopic(treeData) }
           const zip = new JSZip()
           zip.file('content.json', JSON.stringify([sheet]))
-          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.16.1' } }))
+          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.16.2' } }))
           const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
           if (!window.electronAPI?.saveBinaryFile) return { success: false, message: '文件保存功能不可用' }
           const r = await window.electronAPI.saveBinaryFile(fileName, base64)
@@ -8904,15 +8919,25 @@ ${block}`
 
         const maxLevel = allNodes.reduce((m, n) => Math.max(m, n.depth), 0) + 1
 
+        // 占位节点检测（常见模板默认文本）
+        const PLACEHOLDER_TEXTS = ['分支主题', '中心主题', '子主题', '主题', '新节点', '节点', 'Topic', 'Central Topic', 'Main Topic', 'Subtopic']
+        const placeholderNodes = allNodes.filter(n => {
+          const t = (n.text || '').trim()
+          if (!t) return true // 空文本也算占位
+          return PLACEHOLDER_TEXTS.some(ph => t === ph || t.startsWith(ph + ' ') || /^(分支主题|中心主题|子主题|新节点)\s*\d*$/.test(t))
+        })
+
         const result = {
           total: totalCount,
           leafCount,
           maxLevel,
           rootUid: allNodes[0]?.uid || '',
+          placeholderCount: placeholderNodes.length,
+          placeholderNodes,
           nodes: allNodes
         }
 
-        const summary = `共 ${totalCount} 个节点（${leafCount} 个叶子），最大层级 ${maxLevel} 层`
+        const summary = `共 ${totalCount} 个节点（${leafCount} 个叶子），最大层级 ${maxLevel} 层${placeholderNodes.length > 0 ? `，检测到 ${placeholderNodes.length} 个疑似占位节点（可用 update_node_text 批量填充）` : ''}`
         return {
           success: true,
           message: `${summary}\n\n${JSON.stringify(result, null, 2)}`,
