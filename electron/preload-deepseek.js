@@ -60,6 +60,31 @@ const state = {
   lastSendTime: 0,    // 上次发送时间（冷却期内不扫描）
 }
 
+// 修改类工具列表（初始化阶段和非用户明确指令时禁止执行）
+const WRITE_TOOLS = new Set([
+  'add_child_nodes', 'update_node_text', 'delete_node', 'batch_node_actions',
+  'save_mindmap', 'new_mindmap', 'ai_cloze', 'ai_cloze_full_map',
+  'ai_cloze_review', 'clear_cloze', 'select_node', 'focus_node',
+  'zoom_control'
+])
+
+// 查询类工具（只读，任何时候都可以执行）
+const READ_TOOLS = new Set([
+  'search_nodes', 'get_all_nodes', 'query_nodes', 'list_tools',
+  'get_tool_detail', 'list_directory', 'find_local_file',
+  'read_mindmap_file', 'semantic_search'
+])
+
+// 统计当前对话中的用户消息数（用于判断是否处于初始化阶段）
+function countUserMessages() {
+  try {
+    const messages = document.querySelectorAll('[data-role="user"], [data-author="user"], .user-message, .message-user')
+    return messages.length
+  } catch (e) {
+    return 999 // 检测失败时放行，避免误拦截
+  }
+}
+
 // ========== 发送频率限流（防止触发 DeepSeek 消息频率限制） ==========
 const MIN_SEND_INTERVAL = 6000 // 最小发送间隔 6 秒
 let sendQueue = [] // 待发送消息队列
@@ -2314,14 +2339,17 @@ function buildInitMessage(context) {
 8. 等待工具执行结果自动返回
 9. 基于结果继续分析，如需更多操作继续输出 mymindmap 代码块
 
-## ⚠️ 重要注意事项
+## ⚠️ 重要注意事项（铁律，必须严格遵守）
 
+- **🚫 严禁主动操作导图**：在用户没有明确提出具体需求之前，绝对不要调用任何修改类工具（add_child_nodes / update_node_text / delete_node / batch_node_actions / save_mindmap 等）。即使导图是空白的，也不能自己创建内容。
+- **🚫 初始化阶段不要调用工具**：首次加载时只做自我介绍，不要调用 search_nodes / get_all_nodes 等任何工具。工具只有在用户明确需要时才能调用。
+- **🚫 严禁自作主张**：用户说"你好""在吗"或只是打个招呼时，礼貌回应即可，不要主动开始干活。永远等待用户明确说出他想要什么。
 - **UID 只对当前绑定文件有效**：每个 .smm 文件的节点 UID 都是独立的。切换文件后，之前获取的 UID 全部失效，必须重新调用 get_all_nodes 或 search_nodes 获取新的 UID
 - **保存文件默认原地覆盖**：直接调用 save_mindmap 不传任何参数 = 保存到当前绑定文件。只有需要另存为新文件时才传 fileName / save_dir / new_file
 - **不确定节点文本时用 get_all_nodes**：search_nodes 搜不到时不要盲目换关键词猜，直接用 get_all_nodes 拿到全部节点列表后再筛选
 - **占位节点检测**：get_all_nodes 会自动检测"分支主题"、"中心主题"等模板占位节点并返回 placeholderNodes 列表。发现占位节点时应主动提醒用户并询问是否需要补充内容
 
-现在请确认你已理解以上规则，并简要回复你能做什么。`
+现在请确认你已理解以上所有规则（尤其是前面三条铁律），简要回复你能做什么，**但不要调用任何工具，不要主动创建内容，等待用户下一步指示**。`
 }
 
 // ========== 全局工具函数（提取代码块语言） ==========
@@ -3023,6 +3051,24 @@ function executeTool(toolId) {
     updateLogBadge()
     return
   }
+
+  // 🛡️ 初始化阶段硬拦截：用户还没说过话时，禁止执行修改类工具
+  // 防止 AI 在自我介绍阶段就自作主张修改导图
+  const userMsgCount = countUserMessages()
+  const isWriteTool = WRITE_TOOLS.has(tc.name)
+  if (userMsgCount === 0 && isWriteTool) {
+    const warnMsg = `初始化阶段拦截：用户尚未发送任何消息，禁止执行修改类工具「${tc.name}」。请等待用户明确提出需求后再操作。`
+    console.warn('[🧠 Agent]', warnMsg)
+    tc.status = 'blocked'
+    tc.error = warnMsg
+    updateStatus(`${tc.name} 已拦截`, 'warning')
+    renderLogPanel()
+    updateLogBadge()
+    addSystemLog('已拦截', `初始化阶段禁止修改：${tc.name}`, 'warning')
+    // 回传给 AI，明确告知被拦截的原因
+    sendResultToAI(tc.name, null, warnMsg)
+    return
+  }
   
   tc.status = 'running'
   updateStatus(`执行中: ${tc.name}`, 'running')
@@ -3066,7 +3112,7 @@ async function sendResultToAI(toolName, result, error = null) {
 ${error}
 \`\`\`
 
-请检查参数是否正确，或尝试其他方式继续。如果需要更多信息，请调用其他工具查询。`
+请检查参数是否正确，或尝试其他方式继续。**注意：只有在用户明确有需求时才继续调用工具，不要主动操作。**`
   } else {
     resultText = `工具 ${toolName} 执行结果：
 
@@ -3074,7 +3120,7 @@ ${error}
 ${JSON.stringify(result, null, 2)}
 \`\`\`
 
-请基于这个结果继续分析。如果任务完成，请给出最终结论；如果还需要调用其他工具，请继续输出 mymindmap 代码块。**注意：一次消息最多输出 2 个工具调用，太多会触发频率限制。**`
+以上是工具执行结果。请根据用户的实际需求决定下一步：如果用户的需求已经满足，直接总结说明即可；如果确实还需要调用工具才能完成用户需求，再继续输出 mymindmap 代码块。**注意：一次消息最多输出 2 个工具调用，太多会触发频率限制。不要主动做用户没要求的事。**`
   }
 
   // 使用发送队列（自动限流，防止触发 DeepSeek 频率限制）

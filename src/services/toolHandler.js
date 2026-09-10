@@ -5523,7 +5523,9 @@ ${mindMapTypePrompt(mapType, 'organize')}
         const mode = args.mode === 'all' ? 'all' : 'any'
         const maxResults = Math.min(Math.max(Number(args.max_results) || 200, 1), 1000)
         const results = []
+        let totalNodeCount = 0
         function traverse(node, parents) {
+          totalNodeCount++
           const rawText = node.data?.text || node.text || ''
           const plain = rawText.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim()
           const text = normalizeForMatch(rawText)
@@ -5545,8 +5547,9 @@ ${mindMapTypePrompt(mapType, 'organize')}
           success: true,
           message: results.length
             ? `找到 ${results.length} 个匹配节点${results.length >= maxResults ? '（已达 max_results 上限）' : ''}${fromFile ? '（文件模式）' : ''}：\n${results.map((r, i) => `${i + 1}. ${r.path}${r.uid ? `（uid: ${r.uid}）` : ''}`).join('\n')}`
-            : `未找到匹配的节点${fromFile ? '（文件模式）' : ''}。\n💡 提示：关键词可能与节点文本写法不一致，建议：\n1. 调用 get_all_nodes 获取全部节点列表后再筛选\n2. 尝试用更短、更通用的关键词搜索\n3. 使用 query_nodes 的 textRegex 正则模糊匹配`,
+            : `未找到匹配的节点${fromFile ? '（文件模式）' : ''}。当前导图共 ${totalNodeCount} 个节点${totalNodeCount <= 3 ? '（节点很少，可能是空白或新建导图）' : ''}。\n💡 建议：\n1. 调用 get_all_nodes 获取全部节点列表后再筛选\n2. 尝试用更短、更通用的关键词搜索\n3. 使用 query_nodes 的 textRegex 正则模糊匹配`,
           results,
+          totalNodeCount,
           fromFile
         }
       } catch (e) {
@@ -5857,7 +5860,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const sheet = { id: 'sheet1', class: 'sheet', title: rootText, rootTopic: toTopic(treeData) }
           const zip = new JSZip()
           zip.file('content.json', JSON.stringify([sheet]))
-          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.16.3' } }))
+          zip.file('metadata.json', JSON.stringify({ dataStructureVersion: '2.0', creator: { name: 'my-mindmap agent', version: '4.16.4' } }))
           const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' })
           if (!window.electronAPI?.saveBinaryFile) return { success: false, message: '文件保存功能不可用' }
           const r = await window.electronAPI.saveBinaryFile(fileName, base64)
