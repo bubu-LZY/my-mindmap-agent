@@ -2236,7 +2236,7 @@ function buildInitMessage(context) {
   - save_dir (字符串，可选): 保存目录。有当前打开文件时默认保存到当前文件所在目录；无打开文件时保存到默认目录（C:\我的mindmap）
   - new_file (布尔，可选): true=强制另存为新文件
 - 💡 **重要**：不传 fileName / save_dir / new_file 时 = 直接覆盖保存当前文件（原地保存，最常用）
-- 💡 只想保存当前文件的修改 → 直接调用 `save_mindmap` 不传任何参数
+- 💡 只想保存当前文件的修改 → 直接调用 \`save_mindmap\` 不传任何参数
 - 示例（原地覆盖保存）: \`{ "tool": "save_mindmap", "params": {} }\`
 - 示例（另存为新文件到当前目录）: \`{ "tool": "save_mindmap", "params": { "fileName": "副本", "new_file": true } }\`
 
