@@ -73,6 +73,9 @@
       <div v-else-if="filteredLogs.length === 0" class="log-empty">
         「{{ filterLabel(activeFilter) }}」类型下暂无日志
       </div>
+      <div v-if="hiddenCount > 0" class="log-omitted">
+        仅渲染最近 {{ MAX_RENDER }} 条，更早的 {{ hiddenCount }} 条未显示（统计与复制仍包含全部）
+      </div>
       <div
         v-for="log in filteredLogs"
         :key="log.id"
@@ -102,7 +105,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, shallowRef, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { loadLogsByConversation, clearLogsByConversation, formatLogTime } from '../utils/logStore'
 
@@ -119,16 +122,39 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 
-const logs = ref([])
+// 日志条目是写一次就不再改的普通对象，整体只做 wholesale 替换，
+// 深响应式逐条代理纯属浪费 —— shallowRef 足够。
+const logs = shallowRef([])
 const logListRef = ref(null)
 
 // 当前筛选类型：null（全部）| 'send' | 'receive' | 'tool' | 'error'
 const activeFilter = ref(null)
 
-const sendCount = computed(() => logs.value.filter(l => l.type === 'send').length)
-const receiveCount = computed(() => logs.value.filter(l => l.type === 'receive').length)
-const errorCount = computed(() => logs.value.filter(l => l.type === 'error' || l.type === 'tool_error').length)
-const toolCallCount = computed(() => logs.value.filter(l => l.type === 'tool_call' || l.type === 'tool_result' || l.type === 'tool_error' || l.type === 'tool_rejected').length)
+const TOOL_TYPES = new Set(['tool_call', 'tool_result', 'tool_error', 'tool_rejected'])
+const ERROR_TYPES = new Set(['error', 'tool_error'])
+
+// 最多渲染多少条。长任务动辄几百上千条日志，每条还带嵌套的 toolCalls 循环，
+// 全量 v-for 会把 DOM 节点数和滚动开销一起顶上去。
+const MAX_RENDER = 300
+
+// 原先 send/receive/error/tool 四个 computed 各自 filter 一遍全量数组，
+// 每次日志变化就是四次全量扫描；合并成一次遍历。
+const stats = computed(() => {
+  let send = 0, receive = 0, error = 0, tool = 0
+  for (const l of logs.value) {
+    const t = l.type
+    if (t === 'send') send++
+    else if (t === 'receive') receive++
+    else if (t === 'tool_error') { error++; tool++ }
+    else if (t === 'error') error++
+    else if (TOOL_TYPES.has(t)) tool++
+  }
+  return { send, receive, error, tool }
+})
+const sendCount = computed(() => stats.value.send)
+const receiveCount = computed(() => stats.value.receive)
+const errorCount = computed(() => stats.value.error)
+const toolCallCount = computed(() => stats.value.tool)
 
 // 点击徽章切换筛选；再点一次同类型则取消
 const toggleFilter = (filter) => {
@@ -140,17 +166,19 @@ const filterLabel = (f) => {
   return map[f] || f
 }
 
-const filteredLogs = computed(() => {
+const matchesFilter = (type) => {
   const f = activeFilter.value
-  if (!f) return logs.value
-  if (f === 'tool') {
-    return logs.value.filter(l => l.type === 'tool_call' || l.type === 'tool_result' || l.type === 'tool_error' || l.type === 'tool_rejected')
-  }
-  if (f === 'error') {
-    return logs.value.filter(l => l.type === 'error' || l.type === 'tool_error')
-  }
-  return logs.value.filter(l => l.type === f)
-})
+  if (!f) return true
+  if (f === 'tool') return TOOL_TYPES.has(type)
+  if (f === 'error') return ERROR_TYPES.has(type)
+  return type === f
+}
+
+const filteredAll = computed(() => logs.value.filter(l => matchesFilter(l.type)))
+const filteredLogs = computed(() => (
+  filteredAll.value.length > MAX_RENDER ? filteredAll.value.slice(-MAX_RENDER) : filteredAll.value
+))
+const hiddenCount = computed(() => filteredAll.value.length - filteredLogs.value.length)
 
 const typeLabel = (type) => {
   switch (type) {
@@ -440,6 +468,16 @@ onMounted(() => {
   text-align: center;
   font-size: 13px;
   color: var(--text-tertiary, #c7c7cc);
+}
+
+.log-omitted {
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(120, 120, 128, 0.08);
+  color: var(--text-secondary, #86868b);
+  font-size: 11px;
+  text-align: center;
 }
 
 .log-entry {

@@ -700,7 +700,7 @@
 </template>
 
 <script setup>
-import { ref, computed, shallowReactive, onMounted, onBeforeUnmount, nextTick, watch, onErrorCaptured, defineAsyncComponent } from 'vue'
+import { ref, computed, shallowReactive, shallowRef, markRaw, onMounted, onBeforeUnmount, nextTick, watch, onErrorCaptured, defineAsyncComponent } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, FolderOpened, Document } from '@element-plus/icons-vue'
 import MindMapEditor from './components/MindMapEditor.vue'
@@ -810,8 +810,17 @@ const tagViewRef = ref(null)
 // OcrScreenshot 组件引用
 const ocrScreenshotRef = ref(null)
 
+// simple-mind-map 的实例与节点都是库自有的庞大对象图（SVG 节点、事件监听、内部渲染树）。
+// 必须用 shallowRef + markRaw 持有：ref() 会在每次读取 .value 时递归代理整张图，
+// 既白付深遍历开销、又让实例上每次属性访问多穿一层 Proxy（大图卡顿的主要来源之一），
+// 还会破坏身份比较——Proxy 永远 !== 原始对象，见下方 watch(activeFileId) 与
+// backgroundMindMapService 里的 `getInstance(id) === mm` 判断。
+// 这两个值的所有消费方都是命令式读取或整体重新赋值，没有任何模板深层绑定，
+// 深响应性在这里是纯成本、零收益。
+const rawOf = (v) => (v && typeof v === 'object' ? markRaw(v) : v)
+
 // mind-map 实例引用
-const mindMapInstance = ref(null)
+const mindMapInstance = shallowRef(null)
 
 // 传给 ChatPanel 的导图实例：快照可能因容器隐藏初始化失败而为 null，
 // 取值时实时从编辑器兜底获取，避免 AI 导图工具一直拿到过期空值
@@ -820,7 +829,7 @@ const activeMindMap = computed(() => {
 })
 
 // 当前选中的节点
-const activeNode = ref(null)
+const activeNode = shallowRef(null)
 
 // 思维导图数据
 const mindMapData = ref({
@@ -2156,7 +2165,7 @@ const initMindMapInstance = () => {
       if (!mindMapInstance.value && editorRef.value.ensureInit) {
         try { editorRef.value.ensureInit() } catch (e) { /* 忽略 */ }
       }
-      mindMapInstance.value = editorRef.value.getMindMap()
+      mindMapInstance.value = rawOf(editorRef.value.getMindMap())
     }
   })
 }
@@ -2365,7 +2374,7 @@ const handleMarkdownApply = ({ tree, fileId }) => {
 
 // 节点激活回调（分屏模式下区分不同 pane）
 const onNodeActive = (pane, node, activeNodeList) => {
-  activeNode.value = node
+  activeNode.value = rawOf(node)
   if (pane && pane.id) {
     paneActiveNodes[pane.id] = activeNodeList || []
   }
@@ -2380,7 +2389,7 @@ const onNodeTreeRenderEnd = () => {
   }
   // 确保 mindMap 实例可用
   if (!mindMapInstance.value && editorRef.value) {
-    mindMapInstance.value = editorRef.value.getMindMap()
+    mindMapInstance.value = rawOf(editorRef.value.getMindMap())
   }
 }
 
@@ -2590,17 +2599,17 @@ const handleAddReview = (nodes) => {
   if (validNodes.length === 0) return
 
   // 设置当前激活节点为第一个
-  activeNode.value = validNodes[0]
+  activeNode.value = rawOf(validNodes[0])
 
   // 为每个节点添加复习计划
   if (reviewViewRef.value && reviewViewRef.value.addCurrentNodeToReview) {
     // ReviewView 已挂载，逐个添加
     for (const node of validNodes) {
-      activeNode.value = node
+      activeNode.value = rawOf(node)
       reviewViewRef.value.addCurrentNodeToReview()
     }
     // 恢复为第一个
-    activeNode.value = validNodes[0]
+    activeNode.value = rawOf(validNodes[0])
   } else {
     // ReviewView 可能未挂载（不在复习模式），直接添加
     for (const node of validNodes) {
@@ -3411,8 +3420,10 @@ const syncActiveTab = (filePath, data, isImported = false) => {
 watch(activeFileId, () => {
   nextTick(() => {
     const inst = editorRef.value?.getMindMap?.() || null
+    // shallowRef 之后这个身份判断才真正生效：深响应式下 mindMapInstance.value 是 Proxy，
+    // inst !== Proxy 恒为真，每次切 Tab 都会白赋值一次并触发下游重渲染。
     if (inst !== mindMapInstance.value) {
-      mindMapInstance.value = inst
+      mindMapInstance.value = rawOf(inst)
     }
     // 切换 Tab 后主动刷新大纲（mindMap 实例可能需要额外 nextTick 才就绪）
     nextTick(() => {

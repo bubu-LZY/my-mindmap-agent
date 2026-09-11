@@ -1537,7 +1537,32 @@ const dangerDialog = ref({
   argSummary: '',
   remember: false
 })
+// 同一时刻只能显示一个确认弹窗，但 confirmDangerousTool 可能被并发调用
+// （只读工具是并行执行的）。原先用单个 dangerResolve 变量，第二次调用会覆盖
+// 第一次的 resolve，那个 promise 就永远不 settle —— Agent 直接挂死且无法恢复。
+// 改为 FIFO 排队：逐个弹窗，保证每个 promise 都有结果。
 let dangerResolve = null
+const dangerQueue = []
+
+const showNextDangerRequest = () => {
+  if (dangerDialog.value.visible) return
+  const next = dangerQueue.shift()
+  if (!next) {
+    dangerResolve = null
+    return
+  }
+  dangerResolve = next.resolve
+  dangerDialog.value = { visible: true, ...next.dialog }
+}
+
+// 结束当前弹窗并把结果交回调用方，然后放行队列里的下一个
+const settleDanger = (allowed) => {
+  const resolve = dangerResolve
+  dangerResolve = null
+  dangerDialog.value.visible = false
+  if (resolve) resolve(allowed)
+  showNextDangerRequest()
+}
 
 /**
  * 分析 run_code 代码中调用了哪些工具
@@ -1589,15 +1614,27 @@ const confirmDangerousTool = (toolName, args) => {
   if (!dangerReason) return Promise.resolve(true)
   if (trustMode.value) return Promise.resolve(true)
   if (loadWhitelist().has(toolName)) return Promise.resolve(true)
-  dangerDialog.value = {
-    visible: true,
+  // JSON.stringify 遇到循环引用的工具参数会抛异常，那样本函数就不是返回 promise
+  // 而是同步抛出，破坏危险闸门的调用契约
+  let argSummary = summarizeToolArgs(toolName, args)
+  if (!argSummary) {
+    try {
+      argSummary = JSON.stringify(args).slice(0, 120)
+    } catch {
+      argSummary = '[参数无法序列化]'
+    }
+  }
+  const dialog = {
     toolName,
     displayName: toolNameMap[toolName] || toolName,
     reason: dangerReason,
-    argSummary: summarizeToolArgs(toolName, args) || JSON.stringify(args).slice(0, 120),
+    argSummary,
     remember: false
   }
-  return new Promise((resolve) => { dangerResolve = resolve })
+  return new Promise((resolve) => {
+    dangerQueue.push({ dialog, resolve })
+    showNextDangerRequest()
+  })
 }
 
 const onDangerConfirm = () => {
@@ -1606,21 +1643,23 @@ const onDangerConfirm = () => {
     wl.add(dangerDialog.value.toolName)
     saveWhitelist(wl)
   }
-  dangerDialog.value.visible = false
-  if (dangerResolve) { dangerResolve(true); dangerResolve = null }
+  settleDanger(true)
 }
 
 const onDangerCancel = () => {
-  dangerDialog.value.visible = false
-  if (dangerResolve) { dangerResolve(false); dangerResolve = null }
+  settleDanger(false)
 }
 
-// 停止运行/切换会话时关闭悬挂中的确认弹窗并拒绝放行，否则弹窗永远等不到本轮的执行者
+// 停止运行/切换会话时关闭悬挂中的确认弹窗并拒绝放行，否则弹窗永远等不到本轮的执行者。
+// 队列里还没弹出来的请求也一并拒绝，不能留到下一轮再冒出来。
 const dismissDangerDialog = () => {
-  if (dangerDialog.value.visible) {
-    dangerDialog.value.visible = false
-    if (dangerResolve) { dangerResolve(false); dangerResolve = null }
-  }
+  const pending = dangerQueue.splice(0, dangerQueue.length)
+  if (!dangerDialog.value.visible && pending.length === 0) return
+  const resolve = dangerResolve
+  dangerResolve = null
+  dangerDialog.value.visible = false
+  if (resolve) resolve(false)
+  for (const p of pending) p.resolve(false)
 }
 
 // ========== 工具参数摘要（流式状态栏显示"正在做什么"） ==========

@@ -41,6 +41,10 @@ const TOOL_BUDGETS = {
   struct: { str: 400, arr: 200, total: 8000 }
 }
 
+// Agent 循环轮次的绝对上限（含计划放宽与自动延长）。
+// 40 轮足够跑完真实的长链任务，又能保证再糟的情况下也一定会收尾。
+const HARD_MAX_ROUNDS = 40
+
 const budgetForTool = (toolName) => {
   const name = String(toolName || '')
   if (TEXT_HEAVY_TOOLS.has(name)) return TOOL_BUDGETS.text
@@ -328,7 +332,13 @@ export function isVisionModel(name) {
  * 自动工具发现（第一级）：用用户原话在工具池里做本地匹配（中文二元组 + 拉丁词），
  * 返回得分最高且未被激活的工具。纯本地计算，不发请求、零 token。
  * 命中规则：description 命中一个 token 记 1 分，工具名命中记 3 分，≥2 分才算命中
+ *
+ * 分数是整数、不是归一化到 0-1 的相关度。调用方要按下面的常量比较，
+ * 早先有两处写成 score >= 0.6 / score >= 0.5，对整数分恒真，过滤形同虚设。
  */
+const TOOL_MATCH_MIN_SCORE = 2 // 命中门槛：至少两个 description token，或一个工具名 token
+const TOOL_MATCH_HIGH_CONFIDENCE = 3 // 高置信：命中过工具名本身，而不只是描述里的词
+
 function matchToolsByText(text, pool, activeNames, limit = 3) {
   const q = String(text || '').trim()
   if (!q || !Array.isArray(pool) || pool.length === 0) return []
@@ -350,7 +360,7 @@ function matchToolsByText(text, pool, activeNames, limit = 3) {
       if (descL.includes(tok)) score += 1
       if (nameL.includes(tok)) score += 3
     }
-    if (score >= 2) hits.push({ name, desc: desc.slice(0, 80), score })
+    if (score >= TOOL_MATCH_MIN_SCORE) hits.push({ name, desc: desc.slice(0, 80), score })
   }
   return hits.sort((a, b) => b.score - a.score).slice(0, limit)
 }
@@ -1189,14 +1199,16 @@ class AIService {
     this._inLoop = true
 
     let currentMessages = [...messages]
-    // 动态轮次上限：基础 8 轮；模型输出计划后按"步骤数+4"放宽；
-    // 轮次用尽但模型仍在调用工具时自动延长（最多 2 次、每次 +3），支持长链复杂任务
+    // 动态轮次上限：基础 8 轮；模型输出计划后按"步骤数+4"放宽（但不超过 HARD_MAX_ROUNDS）；
+    // 轮次用尽但模型仍在调用工具时自动延长（最多 4 次、每次 +3），支持长链复杂任务
     let maxRounds = 8
     let extensions = 0
     // Plan-and-Execute：<plan>/<step-done> 标记从显示文本剥离（整个循环共用一个过滤器）
     const planFilter = createPlanStreamFilter({
       onPlan: (steps) => {
-        maxRounds = Math.max(maxRounds, steps.length + 4)
+        // 步数由模型自己报，必须夹住：一份几百步的计划会把循环变成事实上跑不完的任务，
+        // 白烧 token 和配额，用户只能靠手动停止收尾。
+        maxRounds = Math.min(Math.max(maxRounds, steps.length + 4), HARD_MAX_ROUNDS)
         if (onPlan) onPlan(steps)
       },
       onStepDone
@@ -1228,8 +1240,8 @@ class AIService {
     if (latestUserQuery && latestUserQuery.length >= 4) {
       const activeNames = new Set(activeTools.map(t => t.function.name))
       const preHits = matchToolsByText(latestUserQuery, toolPool, activeNames)
-      // 只激活高分匹配（阈值 ≥ 0.6），避免误激活
-      const highConfidenceHits = preHits.filter(h => h.score >= 0.6)
+      // 只激活高置信匹配（命中过工具名本身），避免误激活
+      const highConfidenceHits = preHits.filter(h => h.score >= TOOL_MATCH_HIGH_CONFIDENCE)
       if (highConfidenceHits.length > 0 && highConfidenceHits.length <= 3) {
         const defs = highConfidenceHits
           .map(h => toolPool.find(t => t.function.name === h.name))
@@ -1252,7 +1264,7 @@ class AIService {
         }
         // 轮次控制：用尽时优先放宽并续跑（工具链长任务/推理模型易超轮次），真正耗尽才收尾
         if (round >= maxRounds) {
-          if (extensions < 4) {
+          if (extensions < 4 && maxRounds + 3 <= HARD_MAX_ROUNDS) {
             extensions++
             maxRounds += 3
             // 上一轮未调用工具（纯文字说明，如"接下来我要做 XXX"）：任务很可能还没执行完，
@@ -1509,8 +1521,10 @@ class AIService {
             const activeNames = new Set(activeTools.map(t => t.function.name))
             // 第一级：本地 n-gram 匹配（零成本，总是做）
             let hits = matchToolsByText(latestUserQuery, toolPool, activeNames)
-            // 过滤掉低置信度结果
-            let highConfHits = hits.filter(h => h.score >= 0.5)
+            // 过滤掉低置信度结果（score 2 = 只命中描述里的词，工具名没命中）。
+            // 这一层真的会筛掉东西之后，下面「高置信命中不足 2 个」才有可能成立，
+            // 语义检索兜底才轮得到触发——原先阈值写成 0.5，对整数分恒真，兜底路径基本走不到。
+            let highConfHits = hits.filter(h => h.score >= TOOL_MATCH_HIGH_CONFIDENCE)
             // 第二级：本地命中数不足 且 (回复疑似拒答 或 回复很短无实质内容) → 语义检索兜底
             const isRefusal = REFUSAL_RE.test(rawContent || '')
             const isShortUnhelpful = rawContent && rawContent.length < 80 && !rawContent.includes('节点') && !rawContent.includes('导图')

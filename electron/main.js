@@ -153,6 +153,8 @@ const ENGINE_BREAKER_MS = 5 * 60 * 1000
 const ENGINE_FAILURE_THRESHOLD = 3
 const MAX_SEARCHES_PER_TASK = 6
 const MAX_DEEP_RESEARCH_SEARCHES = 10
+// 每个任务的搜索配额有效期；过期条目由 cleanupSearchCache 回收
+const SEARCH_BUDGET_WINDOW_MS = 30 * 60 * 1000
 const searchCache = new Map()
 const engineFailures = new Map()
 const searchBudgets = new Map()
@@ -239,6 +241,11 @@ const cleanupSearchCache = () => {
   for (const [key, item] of searchCache) {
     if (item.expiresAt <= now) searchCache.delete(key)
   }
+  // searchBudgets 同样要清理：consumeSearchBudget 只是把过期条目当作不存在，
+  // 并不会删掉它，长时间运行会按任务数无上限堆积。
+  for (const [taskId, budget] of searchBudgets) {
+    if (now - budget.createdAt > SEARCH_BUDGET_WINDOW_MS) searchBudgets.delete(taskId)
+  }
 }
 
 const consumeSearchBudget = (taskId, deepResearch) => {
@@ -246,7 +253,7 @@ const consumeSearchBudget = (taskId, deepResearch) => {
   if (!taskId) return { allowed: true, count: 0, limit }
   const now = Date.now()
   const budget = searchBudgets.get(taskId)
-  if (!budget || now - budget.createdAt > 30 * 60 * 1000) {
+  if (!budget || now - budget.createdAt > SEARCH_BUDGET_WINDOW_MS) {
     searchBudgets.set(taskId, { count: 0, createdAt: now })
     return { allowed: true, count: 0, limit }
   }
@@ -607,7 +614,7 @@ ipcMain.handle('web-fetch', async (event, url) => {
   }
 })
 
-// 获取当前位置（IP 定位，免费无密钥）：pconline 优先，ip-api 兜底
+// 获取当前位置（IP 定位，免费无密钥）：pconline 优先，ipwho.is 兜底（两者都走 HTTPS）
 // 注意：走系统代理时定位结果可能是代理出口城市
 ipcMain.handle('get-location', async () => {
   const { net } = require('electron')
@@ -639,14 +646,25 @@ ipcMain.handle('get-location', async () => {
     errors.push('pconline 无有效数据')
   } catch (e) { errors.push('pconline ' + e.message) }
 
+  // 兜底源改用 HTTPS：ip-api.com 的免费档只提供 HTTP（HTTPS 需付费，实测 403），
+  // 明文请求既泄露使用行为，也能被中间人改写成假定位喂给 AI。ipwho.is 免费且支持 HTTPS。
+  // 返回字段是英文（city/region/country），消费方是模型，不影响使用。
   try {
-    const t = await fetchText('http://ip-api.com/json/?lang=zh-CN')
+    const t = await fetchText('https://ipwho.is/')
     const j = JSON.parse(t)
-    if (j && j.status === 'success' && j.city) {
-      return { success: true, ip: j.query || '', country: j.country || '', province: j.regionName || '', city: j.city, isp: j.isp || '', source: 'ip-api' }
+    if (j && j.success === true && j.city) {
+      return {
+        success: true,
+        ip: j.ip || '',
+        country: j.country || '',
+        province: j.region || '',
+        city: j.city,
+        isp: j.connection?.isp || j.connection?.org || '',
+        source: 'ipwhois'
+      }
     }
-    errors.push('ip-api 无有效数据')
-  } catch (e) { errors.push('ip-api ' + e.message) }
+    errors.push('ipwhois 无有效数据')
+  } catch (e) { errors.push('ipwhois ' + e.message) }
 
   return { success: false, error: '定位失败：' + errors.join('；') }
 })
@@ -1240,13 +1258,14 @@ if (!gotTheLock) {
 
     // 上次用户保持飞书机器人长连接开启的话，等渲染页面加载完成后自动恢复启动
     // （避免消息早于渲染进程就绪到达而丢失）
-    const botWin = BrowserWindow.getAllWindows()[0]
+    // 必须等 mainWindow 本身：getAllWindows()[0] 在存在截图/OCR 等辅助窗口时可能取错对象，
+    // 恢复动作要么早于渲染层就绪、要么永远不触发。
     const restoreBot = () => {
       feishuBotModule.initAutoStart()
       wechatBotModule.initAutoStart()
     }
-    if (botWin && botWin.webContents.isLoading()) {
-      botWin.webContents.once('did-finish-load', restoreBot)
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.isLoading()) {
+      mainWindow.webContents.once('did-finish-load', restoreBot)
     } else {
       restoreBot()
     }
