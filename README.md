@@ -4,25 +4,26 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.19.0-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.19.1-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.19.0 更新
+## 🆕 v4.19.1 更新
 
-**应用内自动更新 + macOS / Linux 安装包**
+**自动更新链路修复与发布流程加固**
 
 | 分类 | 内容 |
 |------|------|
-| 🚀 自动更新 | 检测到新版本后在程序内后台下载安装包，下完点「重启并安装」即可自动完成覆盖安装 |
-| 🖥️ 多平台 | 新增 macOS（dmg / zip，Intel + Apple Silicon）与 Linux（AppImage / deb）安装包 |
-| 🎯 自动匹配 | 按系统与架构自动选择对应安装包；没有匹配产物时自动回退到 Release 下载页 |
-| ⚙️ CI | 推 tag 即四路并行构建（Windows / macOS ×2 / Linux）并自动发布 Release |
-| 🔒 安全 | 下载地址仅由主进程从 Release API 推导，限定 GitHub 域并做 sha256 与大小校验 |
+| 🐧 Linux | 修复自动更新选错安装形态：`x86_64` 产物名被误判为 32 位架构，导致命中 `.deb`（需手动安装）而非可静默自替换的 AppImage |
+| 📦 源码包 | 修复发布流水线把安装包与构建日志打进源码 zip 的问题（日志含本机绝对路径，不应进入公开产物） |
+| ⚙️ CI | Intel macOS 构建改用现役的 `macos-15-intel`（`macos-13` 已退役，会导致任务无限排队） |
+| 🎯 选包 | 32 位 Windows、Linux arm64 等无产物的架构明确回退到 Release 下载页；排除源码包被误当安装包 |
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.0)
+> v4.19.0 带来的应用内自动更新与 macOS / Linux 多平台安装包见上一版说明。
+
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.1)
 
 ---
 
