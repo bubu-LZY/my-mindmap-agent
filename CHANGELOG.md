@@ -2,6 +2,16 @@
 
 记录项目的所有重要变更。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [4.17.0] - 2026-09-11
+
+### 性能优化（前端启动与运行流畅度）
+
+- **代码分割，主包瘦身 89%**：原 24 个组件 + 全部依赖挤在 5.27MB（gzip 1.74MB）单个 JS 文件里，启动需单线程解析 5MB JavaScript，是启动慢与操作卡顿的主要来源。现主包降至 579KB（gzip 199KB），其余拆为并行加载的独立块：
+  - `element-plus`（1,032KB）、`simple-mind-map`（1,235KB）、`tool-handler`（940KB）独立分块，与主包并行加载；版本升级时未变化的依赖块直接走本地缓存，二次启动更快
+  - `md-editor`（872KB）、`pdfjs`、`xlsx`、`exceljs`、`force-graph`、`highlight.js` 等按需加载，用到才拉取
+- **11 个低频组件异步化**：SettingsView、TaskSchedulerPanel、GraphView、MarkdownEditor、DocViewer、OcrScreenshot、ShortcutCenter、ReviewView、TagView、FloatingNotepad、FloatingMessageCenter 改为 `defineAsyncComponent`，首次使用时才加载，启动路径显著变轻
+- 体检确认运行时链路健康无需改动：AI 流式输出已有 rAF 节流 + markdown 渲染缓存；布局深度 watcher 已有 rAF 节流；5 处高频 mousemove 均有早退守卫/节流且卸载时正确清理；轮询定时器均为 30 秒低频或短命自清
+
 ## [4.16.7] - 2026-09-11
 
 ### UI 修复

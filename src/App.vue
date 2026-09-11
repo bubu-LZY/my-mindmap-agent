@@ -700,29 +700,30 @@
 </template>
 
 <script setup>
-import { ref, computed, shallowReactive, onMounted, onBeforeUnmount, nextTick, watch, onErrorCaptured } from 'vue'
+import { ref, computed, shallowReactive, onMounted, onBeforeUnmount, nextTick, watch, onErrorCaptured, defineAsyncComponent } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, FolderOpened, Document } from '@element-plus/icons-vue'
 import MindMapEditor from './components/MindMapEditor.vue'
 import FloatingBrowser from './components/FloatingBrowser.vue'
-import FloatingNotepad from './components/FloatingNotepad.vue'
-import FloatingMessageCenter from './components/FloatingMessageCenter.vue'
 import OutlineView from './components/OutlineView.vue'
 import FixedToolbar from './components/FixedToolbar.vue'
-import ReviewView from './components/ReviewView.vue'
-import TagView from './components/TagView.vue'
 import FileTree from './components/FileTree.vue'
 import SearchBar from './components/SearchBar.vue'
-import DocViewer from './components/DocViewer.vue'
-import OcrScreenshot from './components/OcrScreenshot.vue'
 import ChatPanel from './components/ChatPanel.vue'
-import GraphView from './components/GraphView.vue'
-import MarkdownEditor from './components/MarkdownEditor.vue'
 import LogPanel from './components/LogPanel.vue'
 import ToolCallIndicator from './components/ToolCallIndicator.vue'
-import SettingsView from './components/SettingsView.vue'
-import TaskSchedulerPanel from './components/TaskSchedulerPanel.vue'
-import ShortcutCenter from './components/ShortcutCenter.vue'
+// 低频重型面板异步化：不进主包、首次使用时才加载 chunk（本地文件加载毫秒级，无感知）
+const FloatingNotepad = defineAsyncComponent(() => import('./components/FloatingNotepad.vue'))
+const FloatingMessageCenter = defineAsyncComponent(() => import('./components/FloatingMessageCenter.vue'))
+const ReviewView = defineAsyncComponent(() => import('./components/ReviewView.vue'))
+const TagView = defineAsyncComponent(() => import('./components/TagView.vue'))
+const DocViewer = defineAsyncComponent(() => import('./components/DocViewer.vue'))
+const OcrScreenshot = defineAsyncComponent(() => import('./components/OcrScreenshot.vue'))
+const GraphView = defineAsyncComponent(() => import('./components/GraphView.vue'))
+const MarkdownEditor = defineAsyncComponent(() => import('./components/MarkdownEditor.vue'))
+const SettingsView = defineAsyncComponent(() => import('./components/SettingsView.vue'))
+const TaskSchedulerPanel = defineAsyncComponent(() => import('./components/TaskSchedulerPanel.vue'))
+const ShortcutCenter = defineAsyncComponent(() => import('./components/ShortcutCenter.vue'))
 import { taskSchedulerService } from './services/taskSchedulerService'
 import { searchService } from './services/searchService'
 import { indexFileRelations, removeFileRelations } from './services/fileRelationGraph'
