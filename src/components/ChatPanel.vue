@@ -413,9 +413,9 @@
       </div>
     </div>
 
-    <!-- Todo 原子胶囊：悬浮在记忆/历史/新建对话工具栏上方 -->
+    <!-- Todo 原子胶囊：悬浮在记忆/历史/新建对话工具栏上方（仅 API 模式；网页模式下 API 历史里的计划不应泄漏显示） -->
     <div
-      v-if="activePlan && activePlan.steps && activePlan.steps.length > 0"
+      v-if="chatMode === 'api' && activePlan && activePlan.steps && activePlan.steps.length > 0"
       class="plan-float"
       @mouseenter="planHover = true"
       @mouseleave="planHover = false"

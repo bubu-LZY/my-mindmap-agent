@@ -2,6 +2,12 @@
 
 记录项目的所有重要变更。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [4.16.7] - 2026-09-11
+
+### UI 修复
+
+- **修复 Todo 胶囊泄漏到 DeepSeek 网页模式**：API 聊天界面的"Plan-and-Execute 任务清单"悬浮胶囊（☑ Todo N/M）原只要 `activePlan` 存在就渲染、未检查 `chatMode`——用户曾在 API 模式生成过任务计划后切换到 DeepSeek 网页模式，胶囊仍悬浮在网页面板边上，看起来像 DeepSeek 页面自身弹出的组件。现胶囊仅在 API 模式（`chatMode === 'api'`）显示，切换到网页模式自动隐藏。
+
 ## [4.16.6] - 2026-09-11
 
 ### DeepSeek 面板工具检测修复
