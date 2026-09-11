@@ -299,7 +299,7 @@ const handleMcpRequest = async (req, res, url, readBody) => {
       sendRpcResult(res, {
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'my-mindmap-agent', version: '2.1.0', title: 'My-Mindmap Agent（思维导图智能体）' }
+        serverInfo: { name: 'my-mindmap-agent', version: '4.18.0', title: 'My-Mindmap Agent（思维导图智能体）' }
       }, id, { 'Mcp-Session-Id': sessionId })
       return true
     }
