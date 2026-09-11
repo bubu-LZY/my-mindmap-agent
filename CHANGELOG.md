@@ -2,6 +2,14 @@
 
 记录项目的所有重要变更。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [4.16.6] - 2026-09-11
+
+### DeepSeek 面板工具检测修复
+
+- **修复初始化后“幽灵工具调用”**：`parseToolCalls` 终极兜底原扫描 `document.body.innerText` 全页文本，会把用户消息（初始化系统提示词）里的 `mymindmap` 示例块误识别成 AI 的工具调用并自动执行。现改为只收集 AI 消息文本（`collectAIMessagesText`），绝不包含用户消息；并补充工具名格式校验（字母数字下划线），拦截 `"tool": "工具名"` 这类中文占位符。
+- **修复修改类工具被永久误拦截**：`countUserMessages()` 原用 `[data-role="user"]` / `.user-message` 选择器统计用户消息，在 DeepSeek 真实 DOM（`.ds-message` + `human` 标记）上恒返回 0，导致用户发出明确需求后 `delete_node` / `add_child_nodes` 等仍被“初始化阶段拦截”。现改用 `.ds-message` + `isUserMessage()` 统一判定；`isUserMessage` 提升为顶层函数供两处复用，消除判定标准漂移。
+- **保留防自作主张设计**：按开头特征排除系统注入的初始化提示词——初始化后 AI 自我介绍阶段调用修改类工具仍会被拦截，用户发出真实需求后立即放行。
+
 ## [4.16.5] - 2026-09-11
 
 ### 搜索与语义检索质量（AI 工具链）

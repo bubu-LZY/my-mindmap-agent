@@ -75,11 +75,41 @@ const READ_TOOLS = new Set([
   'read_mindmap_file', 'semantic_search'
 ])
 
-// 统计当前对话中的用户消息数（用于判断是否处于初始化阶段）
+// 判断节点是否位于用户消息区域内（向上遍历查找角色标记）
+function isUserMessage(node) {
+  let current = node
+  while (current) {
+    const role = current.getAttribute?.('data-role') || current.getAttribute?.('data-author') || ''
+    if (role === 'user' || role === 'human') return true
+    const cls = current.className || ''
+    if (typeof cls === 'string' && (cls.includes('user-message') || cls.includes('message-user') || cls.includes('human'))) {
+      return true
+    }
+    current = current.parentElement
+  }
+  return false
+}
+
+// 初始化系统提示词的开头特征：它作为用户消息显示在页面上，但属于系统注入，不算用户真实需求
+const INIT_MESSAGE_PREFIX_RE = /^你是一个专业的.{0,40}AI 助手，运行在「我的思维导图」桌面应用中/
+
+// 统计当前对话中用户真实发送的消息数（排除系统注入的初始化提示词，用于判断是否处于初始化阶段）
 function countUserMessages() {
   try {
-    const messages = document.querySelectorAll('[data-role="user"], [data-author="user"], .user-message, .message-user')
-    return messages.length
+    const messages = document.querySelectorAll('.ds-message')
+    if (messages.length === 0) {
+      // DOM 结构变化时回退旧选择器（补 human 标记，与 isUserMessage 判定保持一致）
+      const marked = document.querySelectorAll('[data-role="user"], [data-author="user"], [data-role="human"], [data-author="human"], .user-message, .message-user')
+      return marked.length
+    }
+    let count = 0
+    for (const msg of messages) {
+      if (!isUserMessage(msg)) continue
+      const text = (msg.innerText || '').trim()
+      if (INIT_MESSAGE_PREFIX_RE.test(text)) continue
+      count++
+    }
+    return count
   } catch (e) {
     return 999 // 检测失败时放行，避免误拦截
   }
@@ -2399,21 +2429,7 @@ function injectToolDetector() {
     checkTimer = setTimeout(checkForToolCalls, 1000)
   }
   
-  // 判断节点是否位于用户消息区域内
-  function isUserMessage(node) {
-    let current = node
-    while (current) {
-      const role = current.getAttribute?.('data-role') || current.getAttribute?.('data-author') || ''
-      if (role === 'user' || role === 'human') return true
-      const cls = current.className || ''
-      if (typeof cls === 'string' && (cls.includes('user-message') || cls.includes('message-user') || cls.includes('human'))) {
-        return true
-      }
-      current = current.parentElement
-    }
-    return false
-  }
-  
+  // 判断节点是否位于用户消息区域内（isUserMessage 已提升为顶层函数）
   // 提取代码块的语言标记（小写）
   function getCodeBlockLanguage(pre) {
     if (!pre) return ''
@@ -2511,6 +2527,24 @@ function injectToolDetector() {
     return last.markdown
   }
   
+  // 终极兜底的扫描范围：只收集 AI 消息文本，绝不含用户消息。
+  // 初始化系统提示词作为用户消息显示在页面上，其中包含 mymindmap 示例代码块；
+  // 若扫全页（document.body.innerText）会把示例误识别成 AI 的工具调用并自动执行。
+  function collectAIMessagesText() {
+    const parts = []
+    try {
+      const messages = document.querySelectorAll('.ds-message')
+      for (const msg of messages) {
+        if (isUserMessage(msg)) continue
+        const t = msg.innerText || ''
+        if (t.trim()) parts.push(t)
+      }
+    } catch (e) {
+      console.log(`[🧠 Agent] collectAIMessagesText: 收集 AI 消息失败: ${e.message}`)
+    }
+    return parts.join('\n')
+  }
+
   function parseToolCalls(markdownEl) {
     const calls = []
     if (!markdownEl) {
@@ -2626,13 +2660,15 @@ function injectToolDetector() {
       }
     }
 
-    // ========== 终极兜底：全页搜索 mymindmap 代码块 ==========
-    // 如果上面的方法都失败了，直接在整个页面里搜
+    // ========== 终极兜底：跨所有 AI 消息搜索 mymindmap 代码块 ==========
+    // 如果上面的方法都失败了，在所有 AI 消息文本里搜（仅限 AI 消息，绝不包含用户消息）
     if (calls.length === 0) {
       try {
-        const fullText = document.body.innerText || ''
+        // 只扫 AI 消息文本，不扫全页（document.body.innerText 包含用户消息——
+        // 初始化系统提示词里就有 mymindmap 示例块，扫全页会把示例误识别成 AI 的工具调用）
+        const fullText = collectAIMessagesText()
         if (fullText.includes('mymindmap')) {
-          console.log(`[🧠 Agent] parseToolCalls: ⚠️ 消息元素内未找到，但全页文本包含 mymindmap！尝试全页提取...`)
+          console.log(`[🧠 Agent] parseToolCalls: ⚠️ 消息元素内未找到，但其他 AI 消息文本包含 mymindmap！尝试跨 AI 消息提取...`)
           // 用更宽松的正则，匹配 ```mymindmap 和后面的 JSON
           const fullPattern = /```mymindmap\s*\n?([\s\S]*?)\n?```/g
           let fm
@@ -2642,9 +2678,11 @@ function injectToolDetector() {
               const obj = JSON.parse(codeStr)
               const name = obj.tool || obj.name
               const params = obj.params || obj.arguments || obj.args || {}
-              if (name && typeof name === 'string' && name.length > 1) {
+              // 校验工具名格式（字母数字下划线），排除"工具名"这类中文占位符
+              if (name && typeof name === 'string' && name.length > 1
+                && (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name) || /^[a-zA-Z][a-zA-Z0-9_]*_[a-zA-Z0-9_]+/.test(name))) {
                 calls.push({ name, params })
-                console.log(`[🧠 Agent] parseToolCalls: ✅ 全页扫描匹配到工具: ${name}`)
+                console.log(`[🧠 Agent] parseToolCalls: ✅ 跨 AI 消息扫描匹配到工具: ${name}`)
               }
             } catch(e) {
               // JSON 解析失败，尝试提取第一个完整的 JSON 对象
@@ -2654,24 +2692,25 @@ function injectToolDetector() {
                   const obj = JSON.parse(jsonMatch[0])
                   const name = obj.tool || obj.name
                   const params = obj.params || obj.arguments || obj.args || {}
-                  if (name && typeof name === 'string' && name.length > 1) {
+                  if (name && typeof name === 'string' && name.length > 1
+                    && (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name) || /^[a-zA-Z][a-zA-Z0-9_]*_[a-zA-Z0-9_]+/.test(name))) {
                     calls.push({ name, params })
-                    console.log(`[🧠 Agent] parseToolCalls: ✅ 全页扫描提取 JSON 匹配到工具: ${name}`)
+                    console.log(`[🧠 Agent] parseToolCalls: ✅ 跨 AI 消息扫描提取 JSON 匹配到工具: ${name}`)
                   }
                 } catch(e2) {
-                  console.log(`[🧠 Agent] parseToolCalls: 全页扫描 JSON 解析失败: ${e2.message}`)
+                  console.log(`[🧠 Agent] parseToolCalls: 跨 AI 消息扫描 JSON 解析失败: ${e2.message}`)
                 }
               }
             }
           }
           if (calls.length === 0) {
-            console.log(`[🧠 Agent] parseToolCalls: 全页扫描也没解析到。前 300 字上下文: ${fullText.substring(fullText.indexOf('mymindmap'), fullText.indexOf('mymindmap') + 300).replace(/\n/g, '\\n')}`)
+            console.log(`[🧠 Agent] parseToolCalls: 跨 AI 消息扫描也没解析到。前 300 字上下文: ${fullText.substring(fullText.indexOf('mymindmap'), fullText.indexOf('mymindmap') + 300).replace(/\n/g, '\\n')}`)
           }
         } else {
           // 连 mymindmap 这个词都没有
-          // 试试终极兜底：直接在全页文本里找包含 "tool" 字段的 JSON 对象
+          // 试试终极兜底：直接在 AI 消息文本里找包含 "tool" 字段的 JSON 对象
           // 这是为了应对 DeepSeek 渲染代码块时去掉了 ``` 标记的情况
-          console.log('[🧠 Agent] parseToolCalls: 全文无 mymindmap 关键词，尝试终极兜底：搜索含 tool 字段的 JSON 对象...')
+          console.log('[🧠 Agent] parseToolCalls: AI 消息无 mymindmap 关键词，尝试终极兜底：搜索含 tool 字段的 JSON 对象...')
           
           // 找所有看起来像工具调用的 JSON（有 "tool" 字段和 "params" 字段）
           const jsonPattern = /\{"tool"\s*:\s*"([^"]+)"[\s\S]*?\}/g
