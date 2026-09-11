@@ -93,13 +93,15 @@ jobs:
       - name: 安装依赖（源码 zip 脚本需要 jszip）
         run: npm ci
 
+      # 必须在 download-artifact 之前生成：否则资产的落盘目录会被一起打进源码 zip
+      # （曾导致源码包从 1.5MB 膨胀到 1.4GB）
+      - name: 生成源码 zip
+        run: node tools/make-source-zip.cjs
+
       - uses: actions/download-artifact@v4
         with:
           path: assets
           merge-multiple: true
-
-      - name: 生成源码 zip
-        run: node tools/make-source-zip.cjs
 
       - name: 生成发布说明
         run: node tools/extract-changelog.cjs "${GITHUB_REF_NAME}" > release-notes.md
