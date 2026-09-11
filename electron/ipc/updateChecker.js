@@ -148,7 +148,12 @@ const resolveAsset = (assets, platform = process.platform, arch = process.arch) 
     const lower = name.toLowerCase()
     const rule = rules.find(r => r.ext.test(lower))
     if (!rule) continue
-    const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean)
+    // electron-builder 的 Linux x64 产物用 x86_64 命名，而按 [^a-z0-9]+ 切词会把下划线当分隔符，
+    // 碎成 x86 + 64；x86 又是 ia32 的别名，于是 AppImage 被当成「异构架构」排除，
+    // Linux 用户只能拿到 .deb（需手动安装）而拿不到可静默更新的 AppImage。
+    // 先归一化复合写法再切词比对。
+    const normalized = lower.replace(/x86[_-]64/g, 'x64').replace(/aarch64/g, 'arm64')
+    const tokens = normalized.split(/[^a-z0-9]+/).filter(Boolean)
     if (SOURCE_HINTS.some(hint => tokens.includes(hint))) continue
     const hasForeignArch = Object.entries(ARCH_ALIASES).some(([key, list]) => (
       key !== arch && list.some(alias => tokens.includes(alias))
