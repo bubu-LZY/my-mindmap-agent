@@ -2337,22 +2337,6 @@ const onDataChange = (data, fileId) => {
   // 切换文件时概要丢失）。清理后再同步，保证 tab.data 始终是纯数据。
   let cleanData = data
   try { cleanData = deepCleanForSave(data) } catch (e) { cleanData = data }
-  // 概要诊断：对比清理前后的概要数量，若清理后丢失说明 deepCleanForSave 误删了概要数据
-  try {
-    const countTree = (n, c = { items: 0 }) => {
-      if (!n || !n.data) return c
-      const g = n.data.generalization
-      const list = Array.isArray(g) ? g : (g ? [g] : [])
-      c.items += list.length
-      if (Array.isArray(n.children)) n.children.forEach(ch => countTree(ch, c))
-      return c
-    }
-    const before = countTree(data).items
-    const after = countTree(cleanData).items
-    if (before !== after) {
-      console.warn(`[概要诊断] onDataChange 清理后概要丢失：清理前 ${before} 条 → 清理后 ${after} 条`, data)
-    }
-  } catch (e) {}
   mindMapData.value = cleanData
   if (fid) {
     const tab = tabs.value.find(t => t.fileId === fid)

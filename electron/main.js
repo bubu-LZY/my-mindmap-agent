@@ -685,9 +685,15 @@ ipcMain.handle('deepseek-view:create', (event, { x, y, width, height }) => {
     deepSeekView.setAutoResize({ width: false, height: false })
     deepSeekView.webContents.loadURL('https://chat.deepseek.com/')
     
-    // 拦截新窗口，用系统浏览器打开
+    // 拦截新窗口，用系统浏览器打开。
+    // 这里加载的是远程站点，链接目标由远端内容决定，必须做协议白名单：
+    // file:// 可读本地文件，search-ms:// / ms-msdt:// 等自定义协议能拉起本地程序。
     deepSeekView.webContents.setWindowOpenHandler(({ url }) => {
-      shell.openExternal(url)
+      if (!/^https?:\/\//i.test(String(url || ''))) {
+        console.warn('[security] 已拦截 BrowserView 非 http(s) 外链:', url)
+      } else {
+        shell.openExternal(url)
+      }
       return { action: 'deny' }
     })
     

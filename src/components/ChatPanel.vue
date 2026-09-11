@@ -5148,9 +5148,18 @@ Output a JSON code block with EXACTLY this format. Put it FIRST in your reply:
             }
           }
 
-          // ---------- 策略：直接报错（鉴权失败、模型不存在等） ----------
-          if (nextAction.action === 'report_error') {
-            // 不重试，直接报错
+          // ---------- 终态兜底：直接报错（鉴权失败、模型不存在等） ----------
+          // 这里必须无条件收敛：errorStrategyEngine 会返回 retry_file_format / retry_base64
+          // 等本文件没有对应分支的动作，retry_shorter_context 在消息数不足以压缩时也会落空。
+          // 任一情况下若直接结束回调，aiStatus 会永远停在 thinking，界面表现为"一直转圈不回复"。
+          {
+            if (nextAction.action !== 'report_error') {
+              addLog('smart_fallback', `⚠️ 自愈动作「${nextAction.action}」未被消费，已降级为直接报错`, {
+                strategy: nextAction.strategyId,
+                reason: nextAction.reason
+              }, currentConversation.value?.id)
+              emit('log-updated')
+            }
             console.error('AI 服务错误:', error)
             aiMsg.content = fullResponse || `错误: ${error.message || 'AI 服务异常'}`
             aiStatus.value = 'error'

@@ -42,6 +42,11 @@ const disposeInstance = (fileId) => {
         store.unregisterInstance(norm)
       }
     } catch { /* store 未就绪时忽略 */ }
+    // 必须显式销毁：simple-mind-map 内部持有事件监听/渲染循环/SVG 子树，
+    // 仅移除 DOM 容器不会释放它们，后台任务反复打开文件会持续累积内存。
+    try {
+      if (typeof mm.destroy === 'function') mm.destroy()
+    } catch { /* 实例已处于不可销毁状态时忽略 */ }
   }
 }
 

@@ -646,7 +646,17 @@ export const DANGEROUS_TOOLS = {
   send_feishu_file: '发送文件到飞书群聊（对外发送）',
   research_to_mindmap: '生成研究导图会覆盖当前画布（未保存内容将丢失）',
   import_file_as_mindmap: '导入外部文件并打开时会覆盖当前画布（未保存内容将丢失）',
-  run_code: '执行自定义 JavaScript 代码，可操作文件、修改导图、调用外部工具，请确认代码内容安全后再执行'
+  run_code: '执行自定义 JavaScript 代码，可操作文件、修改导图、调用外部工具，请确认代码内容安全后再执行',
+  // 自定义工具：写入即持久化，后续可被自动调用，等同于授予长期代码执行权
+  write_custom_tool: '创建/更新自定义工具会把代码写入磁盘并在之后自动执行，请确认工具代码安全',
+  call_custom_tool: '调用自定义工具会执行已落盘的第三方代码，请确认该工具来源可信',
+  // MCP：调用外部服务的未知工具，副作用不可预判
+  mcp_call_tool: '调用外部 MCP 服务工具，副作用由第三方服务决定，请确认服务与参数可信',
+  create_mcp_server: '新增 MCP 服务配置会引入外部可执行服务，请确认地址与凭据可信',
+  // Skills / 本地写文件
+  invoke_skill: '调用 Skill 会执行其中定义的操作，请确认该 Skill 来源可信',
+  create_skill: '创建 Skill 会把指令与资源写入磁盘，请确认内容安全',
+  save_text_file: '向本地磁盘写入文件，可能覆盖已有内容，请确认路径与内容'
 }
 
 // ========== AI 工具定义（OpenAI function calling 格式） ==========
@@ -8492,6 +8502,14 @@ ${block}`
         const code = String(args.code || '').trim()
         if (!id || !name || !description || !code) return { success: false, message: '请提供 id / name / description / code' }
         if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return { success: false, message: 'id 只能包含小写字母、数字、中划线，且以字母或数字开头' }
+        // AI 不得为自己创建 PowerShell 工具：那等于把任意系统命令执行权写进磁盘并长期生效。
+        // 需要 PowerShell 能力时，请用户在「自定义工具」界面手动创建并自行审核脚本。
+        if (args.powershell === true) {
+          return {
+            success: false,
+            message: '不允许通过 AI 创建 PowerShell 类自定义工具（可执行任意系统命令）。请改用 JS 自定义工具，或让用户在设置界面手动创建并审核 PowerShell 脚本。'
+          }
+        }
         if (!window.electronAPI?.customTools?.create) return { success: false, message: '自定义工具创建功能不可用（当前运行环境不支持）' }
         const result = await window.electronAPI.customTools.create({
           id,
@@ -8499,7 +8517,7 @@ ${block}`
           description,
           code,
           parameters: args.parameters || undefined,
-          powershell: args.powershell === true
+          powershell: false
         })
         if (result && result.ok === false) return { success: false, message: result.error || '创建自定义工具失败' }
         return { success: true, message: `已创建/更新自定义工具「${name}」（id=${id}）。可用 call_custom_tool(toolId="${id}", arguments={...}) 调用。重新 list_custom_tools 可查看最新清单。` }

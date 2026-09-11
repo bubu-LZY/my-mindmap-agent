@@ -1922,26 +1922,6 @@ const initMindMap = () => {
   mindMap.on('data_change', (data) => {
     if (!mindMap) return // 组件卸载后残留的 addHistory 节流回调仍会触发，静默跳过
     if (isSettingData) return
-    // 概要诊断：对比 data_change 事件数据与实际 renderTree 里的概要数量，
-    // 若不一致说明概要数据在 getCopyData（simpleDeepClone）环节丢失，据此定位根因
-    try {
-      const actual = mindMap.renderer && mindMap.renderer.renderTree
-      if (actual && data && data.data) {
-        const countTree = (n, c = { nodes: 0, items: 0 }) => {
-          if (!n || !n.data) return c
-          const g = n.data.generalization
-          const list = Array.isArray(g) ? g : (g ? [g] : [])
-          if (list.length > 0) { c.nodes++; c.items += list.length }
-          if (Array.isArray(n.children)) n.children.forEach(ch => countTree(ch, c))
-          return c
-        }
-        const a = countTree(actual)
-        const b = countTree(data)
-        if (a.items !== b.items) {
-          console.warn(`[概要诊断] data_change 数据概要数与实际不一致：renderTree=${a.nodes}节点/${a.items}条，data=${b.nodes}节点/${b.items}条`, data)
-        }
-      }
-    } catch (e) {}
     // 带上 fileId，App 层按文件独立跟踪脏标记（多窗口各自保存）
     emit('data-change', data, props.fileId)
     clearTimeout(imgResizeRenderTimer)

@@ -77,9 +77,16 @@ export function registerLegacyTools(aiTools, handleToolCall, options = {}) {
  */
 function createLegacyHandler(toolName, handleToolCall) {
   return async (args, context) => {
+    // handleToolCall 期望 OpenAI function-calling 结构：读取 toolCall.function.name，
+    // 并对 toolCall.function.arguments 调 parseToolCallArgs（内部做 JSON.parse）。
+    // 传扁平结构会让 toolCall.function 为 undefined，桥接工具一调用就抛 TypeError。
     const toolCall = {
-      name: toolName,
-      arguments: args || {},
+      id: `legacy_${toolName}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      type: 'function',
+      function: {
+        name: toolName,
+        arguments: JSON.stringify(args || {})
+      }
     }
 
     const result = await handleToolCall(

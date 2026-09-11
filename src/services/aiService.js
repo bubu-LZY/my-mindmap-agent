@@ -1423,7 +1423,7 @@ class AIService {
           // 输出被 max_tokens 截断（finish_reason=length）：任务很可能还没完成。
           // 尤其推理模型第一轮"思考+输出"就可能触顶，此时尚未调用任何工具——这是"做着做着就中断"的高频场景。
           // 因此不再要求 anyToolCalled，只要被截断就续跑，最多 2 次。
-          if (finishReason === 'length' && lengthRetryCount < 2 && !this._aborted && !isStale()) {
+          if (finishReason === 'length' && lengthRetryCount < 2 && !this._abortedTokens.has(token) && !isStale()) {
             lengthRetryCount++
             // 把被截断的这轮输出放回上下文，让模型知道自己说到哪了，续跑更连贯
             if (rawContent) {
@@ -1438,7 +1438,7 @@ class AIService {
           }
           // 推理型模型可能把输出预算耗在 <think> 中，工具已执行但最终可见内容为空。
           // 这里注入极简恢复指令并只重试一次，避免界面表现为"运行完但停止/无回复"。
-          if (anyToolCalled && !rawContent && !emptyResponseRetryTried && !this._aborted && !isStale()) {
+          if (anyToolCalled && !rawContent && !emptyResponseRetryTried && !this._abortedTokens.has(token) && !isStale()) {
             emptyResponseRetryTried = true
             currentMessages.push({
               role: 'system',
@@ -1447,7 +1447,7 @@ class AIService {
             lastRoundHadTools = false
             continue
           }
-          if (!anyToolCalled && !autoDiscoveryTried && latestUserQuery && !this._aborted && !isStale()) {
+          if (!anyToolCalled && !autoDiscoveryTried && latestUserQuery && !this._abortedTokens.has(token) && !isStale()) {
             const activeNames = new Set(activeTools.map(t => t.function.name))
             // 第一级：本地 n-gram 匹配（零成本，总是做）
             let hits = matchToolsByText(latestUserQuery, toolPool, activeNames)
