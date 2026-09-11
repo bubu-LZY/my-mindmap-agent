@@ -66,6 +66,13 @@ jobs:
       - name: 生成完整性清单
         run: node tools/gen-integrity-manifest.js
 
+      - name: 关闭 Spotlight 索引（macOS）
+        # DMG 制作时 electron-builder 要挂载临时卷再 hdiutil detach，而 Spotlight 正在索引
+        # 刚挂载的卷会让 detach 报 "Resource busy"（exit 16）；electron-builder 重试 5 次仍失败，
+        # 整个 macos 构建失败并连带跳过 Release 发布。构建机上关掉索引是官方推荐的规避手段。
+        if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
+
       - name: 打包（${{ matrix.label }}）
         # --publish never：发布统一交给下面的 release job，这里只产出产物
         run: node node_modules/electron-builder/cli.js ${{ matrix.args }} --publish never
