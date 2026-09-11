@@ -15,7 +15,9 @@
   nsProcess::_FindProcess "my-mindmap agent.exe"
   Pop $0
   ${If} $0 == 0
-    MessageBox MB_YESNO|MB_ICONQUESTION "检测到 my-mindmap agent 正在运行。$\r$\n$\r$\n继续安装将自动退出该程序，如有未保存的内容请先保存，否则可能丢失。$\r$\n$\r$\n是否继续安装？" IDYES proceed
+    ; /SD IDYES：静默安装（应用内自动更新走的是 --updated /S）时不弹确认框直接继续，
+    ; 否则 MessageBox 会挂在无人值守的静默安装流程里，导致更新卡住
+    MessageBox MB_YESNO|MB_ICONQUESTION "检测到 my-mindmap agent 正在运行。$\r$\n$\r$\n继续安装将自动退出该程序，如有未保存的内容请先保存，否则可能丢失。$\r$\n$\r$\n是否继续安装？" /SD IDYES IDYES proceed
       Abort
     proceed:
   ${EndIf}

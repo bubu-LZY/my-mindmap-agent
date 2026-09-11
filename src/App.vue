@@ -696,6 +696,9 @@
       <button class="node-search-btn" :disabled="!nodeSearchCount" title="下一个（Enter）" @click="nodeSearchNext">↓</button>
       <button class="node-search-btn" title="关闭（Esc）" @click="closeNodeSearch">✕</button>
     </div>
+
+    <!-- ============ 更新进度卡片（后台下载 / 重启安装） ============ -->
+    <UpdateCard />
   </div>
 </template>
 
@@ -725,6 +728,8 @@ const SettingsView = defineAsyncComponent(() => import('./components/SettingsVie
 const TaskSchedulerPanel = defineAsyncComponent(() => import('./components/TaskSchedulerPanel.vue'))
 const ShortcutCenter = defineAsyncComponent(() => import('./components/ShortcutCenter.vue'))
 import { taskSchedulerService } from './services/taskSchedulerService'
+import { updateState, initUpdateService, disposeUpdateService, downloadUpdate, installUpdate, openReleasePage } from './services/updateService'
+import UpdateCard from './components/UpdateCard.vue'
 import { searchService } from './services/searchService'
 import { indexFileRelations, removeFileRelations } from './services/fileRelationGraph'
 import * as cloudSyncService from './services/cloudSyncService'
@@ -4889,39 +4894,68 @@ const startReviewReminder = () => {
   reviewReminderTimer = setInterval(checkReviewReminder, 30000)
 }
 
-// 更新检测：收到主进程「检测到新版本」通知后，按「今日不再提醒」规则弹提示
+// 应用更新：检测与下载都在主进程完成，这里只做「提醒 + 触发」，进度展示在 UpdateCard 组件里。
+// 手动检查（设置页）与定时检测最终都通过主进程推送的状态到达，两条路径共用同一套弹窗逻辑。
 const UPDATE_SKIP_KEY = 'MINDMAP_UPDATE_SKIP'
-const initUpdateCheckerListener = () => {
-  window.electronAPI?.updateChecker?.onUpdateAvailable?.((payload) => {
-    if (!payload) return
-    const { currentVersion, latestVersion, url } = payload
-    const today = new Date().toISOString().slice(0, 10)
+let updateDialogShowing = false
+
+const promptUpdateAvailable = () => {
+  if (updateDialogShowing || updateState.status !== 'available') return
+  const today = new Date().toISOString().slice(0, 10)
+  // 自动检测的提醒支持「今日不再提醒」；用户手动点「检查更新」触发的提醒不做跳过
+  if (!updateState.manualCheck) {
     let skip = {}
     try { skip = JSON.parse(localStorage.getItem(UPDATE_SKIP_KEY) || '{}') } catch {}
-    // 当日已对该版本选过「今日不再提醒」：静默
-    if (skip.date === today && skip.tag === latestVersion) return
-    ElMessageBox.confirm(
-      `检测到新版本 ${latestVersion}（当前 ${currentVersion}）。\n\n点击「立即下载」前往 GitHub 下载页面；点击「今日不再提醒」当天不再提示。`,
-      '发现新版本',
-      {
-        confirmButtonText: '立即下载',
-        cancelButtonText: '今日不再提醒',
-        type: 'info',
-        distinguishCancelAndClose: true,
-        closeOnClickModal: false
-      }
-    ).then(() => {
-      if (url) {
-        if (window.electronAPI?.openExternal) window.electronAPI.openExternal(url)
-        else window.open(url, '_blank')
-      }
-    }).catch((action) => {
-      // action === 'cancel' → 今日不再提醒；'close'（右上角 ×）→ 下次检测仍会提示
-      if (action === 'cancel') {
-        localStorage.setItem(UPDATE_SKIP_KEY, JSON.stringify({ date: today, tag: latestVersion }))
-      }
-    })
-  })
+    if (skip.date === today && skip.tag === updateState.latestVersion) return
+  }
+  const auto = updateState.installMode !== 'open-page'
+  updateDialogShowing = true
+  ElMessageBox.confirm(
+    `检测到新版本 ${updateState.latestVersion}（当前 ${updateState.currentVersion}）。\n\n` +
+      (auto
+        ? '点击「后台下载」会在后台自动下载安装包，下载完成后可一键重启安装。'
+        : '当前系统没有可自动安装的安装包，点击「前往下载页」手动选择。'),
+    '发现新版本',
+    {
+      confirmButtonText: auto ? '后台下载' : '前往下载页',
+      cancelButtonText: '今日不再提醒',
+      type: 'info',
+      distinguishCancelAndClose: true,
+      closeOnClickModal: false
+    }
+  ).then(() => {
+    if (auto) downloadUpdate()
+    else openReleasePage()
+  }).catch((action) => {
+    // action === 'cancel' → 今日不再提醒；'close'（右上角 ×）→ 下次检测仍会提示
+    if (action === 'cancel') {
+      localStorage.setItem(UPDATE_SKIP_KEY, JSON.stringify({ date: today, tag: updateState.latestVersion }))
+    }
+  }).finally(() => { updateDialogShowing = false })
+}
+
+const promptUpdateReady = () => {
+  if (updateState.status !== 'ready') return
+  const silent = updateState.installMode === 'silent'
+  ElMessageBox.confirm(
+    `新版本 ${updateState.latestVersion} 已下载完成。\n\n` +
+      (silent
+        ? '点击「重启并安装」后程序将退出并自动完成安装。'
+        : '点击「打开安装包」调用系统安装程序完成安装。'),
+    '更新包已就绪',
+    {
+      confirmButtonText: silent ? '重启并安装' : '打开安装包',
+      cancelButtonText: '稍后',
+      type: 'success'
+    }
+  ).then(() => { installUpdate() }).catch(() => {})
+}
+
+const initUpdaterListener = () => {
+  // 订阅是同步注册的，状态回填是异步的，所以这里不 await
+  initUpdateService()
+  watch(() => updateState.availableAt, (val) => { if (val) promptUpdateAvailable() })
+  watch(() => updateState.status, (next) => { if (next === 'ready') promptUpdateReady() })
 }
 
 onMounted(() => {
@@ -4931,7 +4965,7 @@ onMounted(() => {
   initDeskCalendarQueryListener()
   // 恢复上次保存的同步开关：开启时立即启动每小时自动同步，不必先进设置页
   isDeskCalendarSyncEnabled()
-  initUpdateCheckerListener()
+  initUpdaterListener()
   loadLayoutTemplates()
   // 延迟恢复上次多屏布局，给目录树和文件系统预热留出时间。
   setTimeout(() => { restoreLastLayout() }, 800)
@@ -5049,6 +5083,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposeUpdateService()
   window.removeEventListener('keydown', handleKeyDown)
   window.removeEventListener('mousemove', onGlobalMouseMove)
   window.removeEventListener('mouseup', onGlobalMouseUp)

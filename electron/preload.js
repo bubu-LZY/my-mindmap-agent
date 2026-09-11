@@ -166,14 +166,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
-  // 更新检测：主进程查询 GitHub 最新 release，检测到新版本时通知渲染进程
-  updateChecker: {
-    onUpdateAvailable: (callback) => {
+  // 应用更新：检测、后台下载、校验、安装全在主进程完成，这里只转发状态与命令
+  updater: {
+    onState: (callback) => {
       const handler = (_event, payload) => callback(payload)
-      ipcRenderer.on('update-available', handler)
-      return () => ipcRenderer.removeListener('update-available', handler)
+      ipcRenderer.on('update-state', handler)
+      return () => ipcRenderer.removeListener('update-state', handler)
     },
-    check: () => ipcRenderer.invoke('update-check')
+    getState: () => ipcRenderer.invoke('updater:state'),
+    check: () => ipcRenderer.invoke('updater:check'),
+    download: () => ipcRenderer.invoke('updater:download'),
+    cancel: () => ipcRenderer.invoke('updater:cancel'),
+    install: () => ipcRenderer.invoke('updater:install'),
+    openReleasePage: () => ipcRenderer.invoke('updater:open-release-page')
   },
 
   // 云盘同步：rclone 镜像同步（本地默认目录 -> 云盘 WebDAV 文件夹）

@@ -2,6 +2,30 @@
 
 记录项目的所有重要变更。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [4.19.0] - 2026-09-12
+
+### 新增功能
+
+- **应用内自动更新**：检测到新版本后可在程序内后台下载安装包，下完提示「重启并安装」，点击后自动完成覆盖安装并重启，不再需要手动去 Release 页面下载
+  - Windows：调用 NSIS 安装包静默安装（`--updated /S --force-run`），装完自动拉起新版本
+  - macOS：`hdiutil` 挂载 dmg → `ditto` 覆盖 `/Applications` 下的应用 → 重启；任一步失败回退为打开 dmg 由用户拖入
+  - Linux：AppImage 原地原子替换后重启；deb/rpm 交给系统包管理器打开
+  - 下载全程在主进程进行，右下角进度卡片显示百分比、已下载大小与速度，支持取消，设置页「关于」内也能查看进度与重试
+- **按系统与架构自动匹配安装包**：从 Release 资产中按平台 + 架构（x64 / arm64 / x86_64 等别名）打分匹配唯一产物；无匹配产物时（如 32 位 Windows、Intel Mac）自动回退到 Release 下载页
+- **多平台安装包**：新增 macOS（dmg + zip，Intel 与 Apple Silicon）与 Linux（AppImage + deb）打包配置，Windows 保持 x64 NSIS
+- **CI 三平台构建发布**：推 `v*` tag 即在 windows / macos-13 / macos-14 / ubuntu 四路并行构建，产物连同源码 zip 自动上传 Release 并标记 latest
+
+### 安全加固
+
+- 下载地址一律由主进程根据 GitHub Release API 响应推导，不接受渲染层传入的 URL；仅允许 https 且限定 GitHub 下载域，重定向逐跳校验、最多 5 跳
+- 落盘前校验文件大小与 sha256（Release API 提供 digest 时），不通过即删除；文件名取 basename 并过滤路径分隔符，统一落在 `userData/updates`
+- 安装前复核「只能执行本次下载到 updates 目录里的文件」；退出时清理半截安装包
+- 安装器 `customInit` 的进程占用确认框加 `/SD IDYES`，静默更新不再被这个弹窗挂住
+
+### 修复
+
+- 设置页「检查更新」由「跳转下载页」改为触发后台下载流程；「今日不再提醒」对自动检测仍然生效，手动检查不受其限制
+
 ## [4.18.0] - 2026-09-12
 
 ### 安全修复（高危）

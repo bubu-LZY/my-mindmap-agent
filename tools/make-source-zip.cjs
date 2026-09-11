@@ -3,7 +3,9 @@ const path = require('path')
 const JSZip = require('jszip')
 
 const projectDir = process.cwd()
-const outPath = path.join(projectDir, 'my-mindmap-agent-source.zip')
+// 产物名带版本号，与 Release 上的历史命名保持一致（mind-map-ai-agent-source-vX.Y.Z.zip）
+const version = require(path.join(projectDir, 'package.json')).version
+const outPath = path.join(projectDir, `mind-map-ai-agent-source-v${version}.zip`)
 const excludeDirs = new Set([
   'node_modules', 'dist', 'release', '.git',
   '.workbuddy', '.trae', '.trae-cn', '.vscode', 'package',

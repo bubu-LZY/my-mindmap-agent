@@ -1,0 +1,124 @@
+name: Build & Release
+
+# 推 vX.Y.Z tag 时：四个平台并行构建 → 汇总产物 + 源码 zip → 创建/更新 GitHub Release（标记 latest）。
+# 也支持手动触发做「只构建不发布」的干跑验证（release job 只在 tag 推送时执行）。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            os: windows-latest
+            args: --win nsis --x64
+            files: |
+              release/*.exe
+          - label: macos-x64
+            os: macos-13
+            args: --mac dmg zip --x64
+            files: |
+              release/*.dmg
+              release/*.zip
+          - label: macos-arm64
+            os: macos-14
+            args: --mac dmg zip --arm64
+            files: |
+              release/*.dmg
+              release/*.zip
+          - label: linux-x64
+            os: ubuntu-22.04
+            args: --linux AppImage deb --x64
+            files: |
+              release/*.AppImage
+              release/*.deb
+    env:
+      # 未做 Apple 代码签名：禁止 electron-builder 自动寻找签名证书，避免在 CI 上中断
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建前端
+        run: node node_modules/vite/bin/vite.js build
+
+      - name: 生成完整性清单
+        run: node tools/gen-integrity-manifest.js
+
+      - name: 打包（${{ matrix.label }}）
+        # --publish never：发布统一交给下面的 release job，这里只产出产物
+        run: node node_modules/electron-builder/cli.js ${{ matrix.args }} --publish never
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          if-no-files-found: error
+          path: ${{ matrix.files }}
+
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 安装依赖（源码 zip 脚本需要 jszip）
+        run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: 生成源码 zip
+        run: node tools/make-source-zip.cjs
+
+      - name: 生成发布说明
+        run: node tools/extract-changelog.cjs "${GITHUB_REF_NAME}" > release-notes.md
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # 源码 zip 的版本号取自 package.json，用通配符引用，避免 tag 与 package.json 不一致时漏传
+          ASSETS=(assets/* mind-map-ai-agent-source-*.zip)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            gh release edit "$TAG" --notes-file release-notes.md --latest
+          else
+            gh release create "$TAG" "${ASSETS[@]}" --title "$TAG" --notes-file release-notes.md --latest
+          fi
+
+      - name: 核对发布结果
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release view "${GITHUB_REF_NAME}" --json tagName,isDraft,isPrerelease,assets --jq '{tag:.tagName,draft:.isDraft,pre:.isPrerelease,assets:[.assets[]|{name,size}]}'

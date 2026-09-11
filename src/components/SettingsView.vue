@@ -938,10 +938,43 @@
 
     <div id="sec-about" class="settings-section">
       <h3>关于</h3>
-      <div style="margin-bottom: 12px;">
+      <div class="update-actions">
         <el-button size="small" type="primary" :loading="checkingUpdate" @click="checkUpdate">检查更新</el-button>
+        <el-button
+          v-if="updateState.status === 'available' && updateState.installMode !== 'open-page'"
+          size="small"
+          :loading="updaterBusy"
+          @click="startUpdateDownload"
+        >后台下载 {{ updateState.latestVersion }}</el-button>
+        <el-button v-if="updateState.status === 'downloading'" size="small" @click="cancelUpdateDownload">取消下载</el-button>
+        <el-button
+          v-if="updateState.status === 'ready'"
+          size="small"
+          type="success"
+          :loading="updaterBusy"
+          @click="runUpdateInstall"
+        >{{ updateState.installMode === 'silent' ? '重启并安装' : '打开安装包' }}</el-button>
+        <el-button
+          v-if="updateState.status === 'available' && updateState.installMode === 'open-page'"
+          size="small"
+          @click="openUpdatePage"
+        >前往下载页</el-button>
       </div>
-      <p>my-mindmap agent v4.18.0</p>
+      <div v-if="updateState.status === 'downloading'" style="max-width: 380px; margin-bottom: 10px;">
+        <el-progress :percentage="updateState.percent" :stroke-width="10" />
+        <div class="update-progress-text">
+          已下载 {{ formatBytes(updateState.receivedBytes) }} / {{ formatBytes(updateState.totalBytes) }}
+          <span v-if="updateState.bytesPerSecond"> · {{ formatBytes(updateState.bytesPerSecond) }}/s</span>
+        </div>
+      </div>
+      <p v-if="updateState.status === 'ready'" style="color: #67c23a;">
+        新版本 {{ updateState.latestVersion }} 安装包已就绪，点击上方「{{ updateState.installMode === 'silent' ? '重启并安装' : '打开安装包' }}」完成更新。
+      </p>
+      <p v-else-if="updateState.status === 'error'" style="color: #f56c6c;">{{ updateState.message }}</p>
+      <p v-else-if="updateState.status === 'available'" style="color: #e6a23c;">
+        发现新版本 {{ updateState.latestVersion }}（当前 {{ updateState.currentVersion }}）。
+      </p>
+      <p>my-mindmap agent v4.19.0</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
@@ -1047,6 +1080,15 @@ import { getMemoryFacts, removeMemoryFact as deleteMemoryFact, clearMemoryFacts,
 import { loadMemory, saveMemory } from '../utils/conversationStore'
 import { isDeskCalendarSyncEnabled, setDeskCalendarSyncEnabled } from '../services/deskCalendarSync'
 import * as cloudSyncService from '../services/cloudSyncService'
+import {
+  updateState,
+  checkUpdate as runUpdateCheck,
+  downloadUpdate,
+  cancelDownload,
+  installUpdate,
+  openReleasePage,
+  formatBytes
+} from '../services/updateService'
 
 const emit = defineEmits(['saved'])
 
@@ -3294,13 +3336,17 @@ const onBackupFilePicked = (event) => {
   importBackupFromPath(fp)
 }
 
-// 手动检查更新（设置页「关于」里的按钮）
+// 手动检查更新（设置页「关于」里的按钮）。
+// 下载与安装都在主进程完成：这里只触发并回显结果，进度与「重启并安装」按钮直接读 updateState。
+// 有更新时的下载确认弹窗由 App.vue 统一负责（手动检查同样会触发它）。
 const checkingUpdate = ref(false)
+const updaterBusy = ref(false)
+
 const checkUpdate = async () => {
   if (checkingUpdate.value) return
   checkingUpdate.value = true
   try {
-    const res = await window.electronAPI?.updateChecker?.check?.()
+    const res = await runUpdateCheck()
     if (!res) {
       ElMessage.warning('当前环境不支持手动检查更新')
       return
@@ -3309,28 +3355,44 @@ const checkUpdate = async () => {
       ElMessage.error(res.message || '检查更新失败')
       return
     }
-    if (res.hasUpdate) {
-      ElMessageBox.confirm(
-        `检测到新版本 ${res.latestVersion}（当前 ${res.currentVersion}）。\n\n是否前往下载页面？`,
-        '发现新版本',
-        {
-          confirmButtonText: '立即下载',
-          cancelButtonText: '取消',
-          type: 'info'
-        }
-      ).then(() => {
-        if (res.url) {
-          if (window.electronAPI?.openExternal) window.electronAPI.openExternal(res.url)
-          else window.open(res.url, '_blank')
-        }
-      }).catch(() => {})
-    } else {
+    if (!res.hasUpdate) {
       ElMessage.success(`已是最新版本（${res.currentVersion}）`)
+      return
+    }
+    // 已经下好待安装时，状态不会再走「可更新 → 下载」流程，这里明确告诉用户下一步
+    if (updateState.status === 'ready') {
+      ElMessage.info('新版本安装包已下载完成，点击「重启并安装」即可完成更新')
     }
   } finally {
     checkingUpdate.value = false
   }
 }
+
+const startUpdateDownload = async () => {
+  if (updaterBusy.value) return
+  updaterBusy.value = true
+  try {
+    const res = await downloadUpdate()
+    if (res && !res.success) ElMessage.error(res.message || '下载失败')
+  } finally {
+    updaterBusy.value = false
+  }
+}
+
+const cancelUpdateDownload = async () => { await cancelDownload() }
+
+const runUpdateInstall = async () => {
+  if (updaterBusy.value) return
+  updaterBusy.value = true
+  try {
+    const res = await installUpdate()
+    if (res && !res.success) ElMessage.warning(res.message || '安装未完成')
+  } finally {
+    updaterBusy.value = false
+  }
+}
+
+const openUpdatePage = async () => { await openReleasePage() }
 
 // 云盘同步（rclone WebDAV）
 const cloudVendors = cloudSyncService.VENDOR_PRESETS
@@ -3586,6 +3648,20 @@ onBeforeUnmount(() => {
   color: #1d1d1f;
   margin: 0 0 18px 0;
   letter-spacing: -0.02em;
+}
+
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.update-progress-text {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
 }
 
 .settings-action-btn {

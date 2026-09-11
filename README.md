@@ -4,25 +4,25 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.18.0-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.19.0-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.18.0 更新
+## 🆕 v4.19.0 更新
 
-**安全加固 + 流畅度修复**
+**应用内自动更新 + macOS / Linux 安装包**
 
 | 分类 | 内容 |
 |------|------|
-| 🔒 安全加固 | 路径穿越 / SSRF / XSS 全链路收口；云盘同步密码改由主进程加密存储 |
-| ⚡ 性能 | 日志写入改内存缓存 + 合并写盘，修复 AI 任务期间主线程卡顿 |
-| 🖼️ 渲染 | 日志面板渲染收敛、四个统计合并为一次遍历；导图实例改浅响应 |
-| 🤖 Agent | 工具结果预算按类型分配；计划步数上限 40 轮；修正工具匹配阈值 |
-| 🛠️ 稳定 | 危险工具确认弹窗改队列，修复并发时 Agent 挂死；补齐 tool_call_id |
+| 🚀 自动更新 | 检测到新版本后在程序内后台下载安装包，下完点「重启并安装」即可自动完成覆盖安装 |
+| 🖥️ 多平台 | 新增 macOS（dmg / zip，Intel + Apple Silicon）与 Linux（AppImage / deb）安装包 |
+| 🎯 自动匹配 | 按系统与架构自动选择对应安装包；没有匹配产物时自动回退到 Release 下载页 |
+| ⚙️ CI | 推 tag 即四路并行构建（Windows / macOS ×2 / Linux）并自动发布 Release |
+| 🔒 安全 | 下载地址仅由主进程从 Release API 推导，限定 GitHub 域并做 sha256 与大小校验 |
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.18.0)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.0)
 
 ---
 
@@ -309,14 +309,21 @@ docs/                   项目文档 + GitHub Pages Demo
 ```bash
 # 1. 下载最新安装包
 # 访问 https://github.com/bubu-LZY/my-mindmap-agent/releases/latest
-# 下载 my-mindmap agent Setup <version>.exe
+# Windows: my-mindmap agent Setup <version>.exe
+# macOS:   my-mindmap agent-<version>-arm64.dmg（Apple Silicon）/ -x64.dmg（Intel）
+# Linux:   my-mindmap agent-<version>-x86_64.AppImage 或 .deb
 
-# 2. 双击安装
+# 2. 安装
+# Windows: 双击安装（安装前先退出正在运行的旧版本，含托盘图标）
+# macOS:   打开 dmg，把应用拖入「应用程序」（未签名，首次需右键「打开」放行）
+# Linux:   AppImage 直接 chmod +x 运行；deb 用包管理器安装
 
 # 3. 打开后到「设置 → AI 配置」填入你的 API Key
 
 # 4. 开始使用
 ```
+
+> 已经安装过旧版本的用户无需手动下载：程序检测到新版本后会在「发现新版本」弹窗里提供「后台下载」，下载完成后点「重启并安装」即可自动完成更新。
 
 ### 7.2 开发者
 
@@ -343,14 +350,17 @@ npm run electron:build
 ## 8. 打包发布
 
 ```bash
-npm run electron:build
+# 本地只出当前平台的安装包（Windows 上出 NSIS，macOS 上出 dmg/zip，Linux 上出 AppImage/deb）
+node node_modules/electron-builder/cli.js --win nsis --x64 --publish never
 ```
 
-打包产物：
-- 安装包：`release/my-mindmap agent Setup <version>.exe`（NSIS）
-- 源码 zip：`my-mindmap-agent-source.zip`（用于上传 GitHub release）
+打包产物（`release/`）：
+- Windows：`my-mindmap agent Setup <version>.exe`（NSIS，x64）
+- macOS：`my-mindmap agent-<version>-<arch>.dmg` / `.zip`（arch = `x64` / `arm64`）
+- Linux：`my-mindmap agent-<version>-<arch>.AppImage` / `.deb`
+- 源码 zip：`mind-map-ai-agent-source-v<version>.zip`（项目根目录）
 
-发版流程详见 skill `package-and-release`。
+正式发版走 CI：推 `v<version>` tag 后，`.github/workflows/release-build.yml` 会在 Windows / macOS(Intel + Apple Silicon) / Linux 四路并行构建，并把全部产物连同源码 zip 上传到同名 Release（标记 latest）。发版流程详见 skill `package-and-release`。
 
 ---
 
@@ -358,11 +368,13 @@ npm run electron:build
 
 ```
 my-mindmap-agent/
-├── electron/           主进程（IPC、文件管理、MCP、安全）
+├── .github/workflows/    CI：推 tag 触发四平台构建并发布 Release
+├── electron/           主进程（IPC、文件管理、MCP、安全、自动更新）
 ├── src/                 渲染进程（Vue 3 + Element Plus + simple-mind-map）
 ├── custom-tools/        用户自定义工具示例
 ├── skills/              Skills 示例
 ├── docs/                项目文档 + GitHub Pages Demo（index.html）
+├── build/               打包资源（安装器脚本、平台图标）
 ├── tools/               构建辅助脚本
 ├── release/             构建产物
 ├── package.json

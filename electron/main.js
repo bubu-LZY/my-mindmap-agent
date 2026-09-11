@@ -105,6 +105,7 @@ require('./ipc/vectorStore')
 require('./ipc/passwordGate')
 require('./ipc/backupManager')
 const updateChecker = require('./ipc/updateChecker')
+const appUpdater = require('./ipc/appUpdater')
 require('./ipc/cloudSync')
 
 // 在默认浏览器中打开 URL
@@ -1254,7 +1255,9 @@ if (!gotTheLock) {
 
     httpServerModule.init(() => mainWindow)
     httpServerModule.initAutoStart()
-    updateChecker.initUpdateChecker(() => mainWindow)
+    // 更新：appUpdater 负责状态与下载安装，updateChecker 定时静默检测后把结果交回给它
+    appUpdater.initAppUpdater(() => mainWindow)
+    updateChecker.initUpdateChecker((info) => appUpdater.setUpdateAvailable(info))
 
     // 上次用户保持飞书机器人长连接开启的话，等渲染页面加载完成后自动恢复启动
     // （避免消息早于渲染进程就绪到达而丢失）
