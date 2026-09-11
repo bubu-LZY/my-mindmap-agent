@@ -1,12 +1,26 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
   <head>
+    <!-- CSP 必须是 head 的第一个元素才生效。
+         取向：只管住脚本执行，其余放开——应用需要远程图片、data:/blob: 资源、
+         模型下载与 blob worker，卡死这些会直接弄坏功能；XSS 落地点（v-html /
+         innerHTML）真正需要的防线是禁止内联脚本与外来脚本源。
+         script-src 保留 blob: 与 'unsafe-eval'：run_code 用 Blob URL 起 Worker，
+         并在其中通过 new AsyncFunction 执行代码；localhost:5173 供 Vite dev server。 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src * 'self' file: data: blob: filesystem: 'unsafe-inline'; script-src 'self' file: blob: 'unsafe-eval' http://localhost:5173; worker-src 'self' file: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';" />
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="./icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>my-mindmap agent</title>
-    <script type="module" crossorigin src="./assets/index-DQa6oc5Y.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-C_2yr3Ln.css">
+    <script src="./bridge.js"></script>
+    <script type="module" crossorigin src="./assets/index-DJRKadqQ.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/element-plus-DRRrEw2P.js">
+    <link rel="modulepreload" crossorigin href="./assets/simple-mind-map-2H_2MQz-.js">
+    <link rel="modulepreload" crossorigin href="./assets/pdfjs-ZeCjpKCA.js">
+    <link rel="modulepreload" crossorigin href="./assets/tool-handler-gYBUPGae.js">
+    <link rel="stylesheet" crossorigin href="./assets/element-plus-BUAb-I7I.css">
+    <link rel="stylesheet" crossorigin href="./assets/simple-mind-map-7oN3-GhD.css">
+    <link rel="stylesheet" crossorigin href="./assets/index-DtlZG2dF.css">
   </head>
   <body>
     <div id="app"></div>
