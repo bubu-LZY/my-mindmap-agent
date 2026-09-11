@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const JSZip = require('jszip')
 const store = require('../utils/store')
+const { resolveInside } = require('../utils/safePath')
 const crypto = require('crypto')
 
 const STORE_KEY = 'agentSkills'
@@ -66,7 +67,12 @@ const ensureUserSkillDir = () => {
   return dir
 }
 
-const sanitizeFolderName = (name) => String(name || 'skill').replace(/[\\/:*?"<>|]/g, '_').trim() || 'skill'
+const sanitizeFolderName = (name) => {
+  // 除路径分隔符与 Windows 保留字符外还要剥掉前导点号：
+  // '..' 与 '.' 原样进入 path.join 会指向父目录 / 当前目录。
+  const cleaned = String(name || 'skill').replace(/[\\/:*?"<>|]/g, '_').replace(/^\.+/, '').trim()
+  return cleaned || 'skill'
+}
 
 // 解析 SKILL.md 的 YAML 前置元数据（name / description）
 const parseFrontmatter = (content) => {
@@ -174,7 +180,16 @@ const writeSkillToDir = (skill, fullContent, group) => {
   for (const f of group.supporting || []) {
     const rel = rootDir ? f.relativePath.slice(rootDir.length + 1) : f.relativePath
     if (!rel) continue
-    const dest = path.join(target, rel)
+    // relativePath 可能来自 zip 条目名（JSZip 不剥离 ../）或渲染进程载荷，
+    // 直接 path.join 会逃出 Skill 目录，把任意内容写到磁盘任意位置。
+    let dest
+    try {
+      dest = resolveInside(target, rel)
+    } catch (e) {
+      console.warn('[security] 已跳过越界的 Skill 支持文件:', rel)
+      continue
+    }
+    if (!dest) continue
     fs.mkdirSync(path.dirname(dest), { recursive: true })
     fs.writeFileSync(dest, f.buf)
   }

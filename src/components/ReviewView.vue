@@ -192,6 +192,7 @@ import {
   runDeskCalendarSyncOnce,
   getDeskCalendarSyncMeta
 } from '../services/deskCalendarSync'
+import { textFromHtmlInert } from '../utils/inertDom'
 
 const props = defineProps({
   mindMap: {
@@ -497,9 +498,7 @@ const formatDateDisplay = (dateStr) => {
  */
 const stripHtml = (html) => {
   if (!html) return ''
-  const div = document.createElement('div')
-  div.innerHTML = html
-  return (div.innerText || div.textContent || '').trim()
+  return textFromHtmlInert(html).trim()
 }
 
 /**

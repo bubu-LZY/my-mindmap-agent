@@ -3,6 +3,8 @@
  * 5 个记忆周期：1天、3天、7天、15天、31天（适配工作节奏的低频复习方案）
  */
 
+import { textFromHtmlInert } from './inertDom'
+
 const REVIEW_KEY = 'MINDMAP_REVIEW_PLAN'
 const REMINDER_KEY = 'MINDMAP_REVIEW_REMINDER'
 
@@ -80,9 +82,7 @@ function genId() {
 export function stripHtmlTags(html) {
   if (!html || typeof html !== 'string') return ''
   if (!html.includes('<')) return html.trim()
-  const div = document.createElement('div')
-  div.innerHTML = html
-  return (div.innerText || div.textContent || '').trim()
+  return textFromHtmlInert(html).trim()
 }
 
 // 从节点实例提取纯文本

@@ -11,15 +11,14 @@
 import { aiService } from '../services/aiService'
 import { applyClozeStyles, getMindMapRef, removeClozeSpansBalanced, clearNodeCloze } from './cloze'
 import { classifyMindMap, mindMapTypePrompt } from './mindMapType'
+import { parseHtmlBodyInert, textFromHtmlInert } from './inertDom'
 
 /* ==================== 提取节点信息 ==================== */
 
 const extractPlainText = (html) => {
   if (typeof html !== 'string') return ''
   if (!html.includes('<')) return html
-  const div = document.createElement('div')
-  div.innerHTML = html
-  return div.textContent || div.innerText || ''
+  return textFromHtmlInert(html)
 }
 
 // 读取节点纯文本
@@ -408,8 +407,7 @@ const applyClozeToNode = (node, item) => {
 
   if (clozes.length > 0) {
     if (isRichText && text.includes('<')) {
-      const div = document.createElement('div')
-      div.innerHTML = text
+      const div = parseHtmlBodyInert(text)
       clozes.forEach(cloze => wrapTextInElement(div, cloze))
       text = div.innerHTML
     } else {
@@ -1532,8 +1530,7 @@ const removeClozeForKeyword = (node, keyword) => {
   if (!keyword || !node) return false
   let text = (typeof node.getData === 'function' ? node.getData('text') : node.text) || ''
   if (typeof text !== 'string' || !text.includes('smm-cloze')) return false
-  const div = document.createElement('div')
-  div.innerHTML = text
+  const div = parseHtmlBodyInert(text)
   let changed = false
   div.querySelectorAll('.smm-cloze').forEach(span => {
     if (span.textContent === keyword) {
@@ -1558,8 +1555,7 @@ const applyClozeHint = (node, keyword, hint) => {
   if (!keyword || !hint || !node) return false
   let text = (typeof node.getData === 'function' ? node.getData('text') : node.text) || ''
   if (typeof text !== 'string' || !text.includes('smm-cloze')) return false
-  const div = document.createElement('div')
-  div.innerHTML = text
+  const div = parseHtmlBodyInert(text)
   let changed = false
   div.querySelectorAll('.smm-cloze').forEach(span => {
     if (span.textContent === keyword) {

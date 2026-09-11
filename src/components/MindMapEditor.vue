@@ -187,6 +187,7 @@ import { parseReferenceLink, isReferenceLink } from '../services/referenceServic
 import { useMindMapStore } from '../stores/mindMapStore'
 import { initCloze, destroyCloze, applyClozeStyles, toggleAllCloze, isClozeHiddenAll, toggleSelectionCloze, clozeWholeNode, encodeClozeInHtml, setupClozeClickHandler, nodeHasCloze, clearAllCloze, resetClozeState, saveClozeState, syncMindMapRef } from '../utils/cloze'
 import { normalizeHtmlForQuill } from '../utils/textStyle'
+import { textFromHtmlInert } from '../utils/inertDom'
 import { legacyTableHtmlToText } from '../utils/markdownParser'
 import MindMapNode from 'simple-mind-map/src/core/render/node/MindMapNode.js'
 import nodeGeneralization from 'simple-mind-map/src/core/render/node/nodeGeneralization.js'
@@ -3090,9 +3091,7 @@ const onNodeCopyCapture = (e) => {
     for (const node of activeNodes) {
       try {
         const html = node.getData?.('text') || ''
-        const div = document.createElement('div')
-        div.innerHTML = html
-        const text = div.textContent || div.innerText || ''
+        const text = textFromHtmlInert(html)
         if (text.trim()) texts.push(text.trim())
       } catch (_) {}
     }

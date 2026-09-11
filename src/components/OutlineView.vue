@@ -235,6 +235,7 @@ import {
   syncMindMapRef
 } from '../utils/cloze'
 import { sanitizeSafeHtml } from '../utils/sanitizeHtml'
+import { parseHtmlBodyInert, parseHtmlInert, textFromHtmlInert } from '../utils/inertDom'
 import { buildTriModeHtml } from '../utils/triModeExport'
 import { buildGraphDataFromRaw, downloadGraphHtml } from '../utils/graphExport'
 import { safeExportSvg } from '../utils/safeExportSvg'
@@ -254,8 +255,7 @@ const outlineHtmlToRichText = (html) => {
     /smm-cloze/.test(tag) ? '<span class="smm-cloze">' : tag
   )
   // 检查是否已含 HTML 元素
-  const div = document.createElement('div')
-  div.innerHTML = converted
+  const div = parseHtmlBodyInert(converted)
   let hasHtmlElement = false
   for (let i = div.childNodes.length - 1; i >= 0; i--) {
     if (div.childNodes[i].nodeType === 1) { hasHtmlElement = true; break }
@@ -276,22 +276,22 @@ const outlineHtmlToRichText = (html) => {
   const hasClozeMarker = /\[==[\s\S]+?==\]/.test(html)
   if (hasClozeMarker) {
     // 有挖空标记：先把标记转为占位符，wrap 后再替换回来
+    // 占位符边界必须避开 NUL：HTML 分词器会把 \x00 换成 U+FFFD，
+    // 那样后面的 split(placeholder) 永远匹配不上，挖空标记会以乱码留在结果里。
     const markers = []
     let textWithPlaceholders = html.replace(/\[==([\s\S]+?)==\]/g, (m, inner) => {
-      const placeholder = `\x00CLOZE${markers.length}\x00`
+      const placeholder = `\uE000CLOZE${markers.length}\uE001`
       markers.push(getTextFromHtml(inner))
       return placeholder
     })
     // 获取纯文本（去除 HTML 标签）
-    const tempDiv = document.createElement('div')
-    tempDiv.innerHTML = textWithPlaceholders
-    const plainWithPlaceholders = tempDiv.textContent || tempDiv.innerText || ''
+    const plainWithPlaceholders = textFromHtmlInert(textWithPlaceholders)
     // 使用 textToNodeRichTextWithWrap 转 <p><span>text</span></p>
     const wrapped = textToNodeRichTextWithWrap(plainWithPlaceholders)
     // 把占位符替换回 <span class="smm-cloze">
     let result = wrapped
     markers.forEach((text, i) => {
-      const placeholder = `\x00CLOZE${i}\x00`
+      const placeholder = `\uE000CLOZE${i}\uE001`
       result = result.split(placeholder).join('<span class="smm-cloze">' + text + '</span>')
     })
     return result
@@ -306,12 +306,12 @@ const outlineHtmlToRichText = (html) => {
 const normalizeOutlineRefTags = (html) => {
   if (!html || typeof html !== 'string' || !html.includes('mindmap-')) return html
   try {
-    const div = document.createElement('div')
-    div.innerHTML = html
+    const doc = parseHtmlInert(html)
+    const div = doc.body
     const links = Array.from(div.querySelectorAll('a[href^="mindmap-file:"], a[href^="mindmap-node:"]'))
     for (const a of links) {
       if (a.closest('.ref-tag')) continue
-      const span = document.createElement('span')
+      const span = doc.createElement('span')
       span.setAttribute('contenteditable', 'false')
       span.className = 'ref-tag'
       a.parentNode.insertBefore(span, a)
@@ -2801,9 +2801,9 @@ const captureNodeFormat = (node) => {
     const data = node.getData && node.getData()
     const html = data && data.text
     if (!html || typeof html !== 'string' || !/<[a-z]/i.test(html)) return null
-    const div = document.createElement('div')
-    div.innerHTML = html
-    const walker = document.createTreeWalker(div, NodeFilter.SHOW_ELEMENT)
+    const doc = parseHtmlInert(html)
+    const div = doc.body
+    const walker = doc.createTreeWalker(div, NodeFilter.SHOW_ELEMENT)
     while (walker.nextNode()) {
       const fmt = collectElFormat(walker.currentNode, div)
       if (fmt) return fmt

@@ -7,22 +7,13 @@
 // https://github.com/wangyongpeng90/cuckoo-code
 // 感谢开源社区的贡献！
 
-const { contextBridge, ipcRenderer } = require('electron')
+const { ipcRenderer } = require('electron')
 
-// ========== 通过 contextBridge 安全暴露接口 ==========
-contextBridge.exposeInMainWorld('__deepseek_agent__', {
-  send: (channel, data) => {
-    ipcRenderer.send('deepseek:' + channel, data)
-  },
-  invoke: (channel, data) => {
-    return ipcRenderer.invoke('deepseek:' + channel, data)
-  },
-  on: (channel, callback) => {
-    const listener = (event, ...args) => callback(...args)
-    ipcRenderer.on(channel, listener)
-    return () => ipcRenderer.removeListener(channel, listener)
-  }
-})
+// 注意：这里刻意不通过 contextBridge 向页面暴露任何 IPC 桥。
+// 本 preload 内的 Agent 逻辑直接使用 ipcRenderer 即可，页面侧无需任何入口。
+// 曾经暴露过 window.__deepseek_agent__（send/invoke/on），但全仓库零引用，
+// 它唯一的作用是把 IPC 能力递给远端 chat.deepseek.com：其中 on() 未限制通道前缀，
+// invoke('execute-tool') 更能让远端页面直接触发本地工具执行。已移除。
 
 // ========== 状态 ==========
 // ========== 状态管理 ==========

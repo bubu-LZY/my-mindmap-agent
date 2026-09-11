@@ -9,42 +9,87 @@ import { createPlanStreamFilter } from '../utils/planFilter'
 /**
  * 清洗工具返回值，移除/截断 AI 不需要且会爆上下文的大字段：
  * - base64 图片/文件数据（data:image/...;base64,...）替换为占位符
- * - 字符串值超过 MAX_STR_LEN 自动截断
+ * - 字符串值按「该工具的预算」截断
  * - 递归处理嵌套对象/数组
+ * - 所有字符串共用一个总预算，防止「很多字段各截 3000」叠加起来照样爆上下文
  */
 const MAX_STR_LEN = 3000
+const MAX_ARR_LEN = 50
+const MAX_TOTAL_CHARS = 20000
 const BASE64_RE = /^data:[a-zA-Z0-9]+\/[a-zA-Z0-9.+-]+;base64,/
-const sanitizeForAI = (obj, depth = 0) => {
+const BINARY_KEYS = new Set(['imageData', 'fileData', 'binaryData', 'dataUrl', 'base64'])
+
+// 文本密集型工具：返回的就是正文本身，用默认 3000 会被拦腰截断，
+// 模型拿到半截文件反而更容易凭想象补全（比报错更糟，因为看不出来）。
+const TEXT_HEAVY_TOOLS = new Set([
+  'read_local_file', 'retrieve_local_file', 'read_webpage', 'read_mindmap_file',
+  'get_mindmap_content', 'get_node_detail', 'read_node_subtree', 'feishu_get_doc_content',
+  'search_web', 'search_across_files', 'search_knowledge_base', 'get_skill', 'run_code'
+])
+
+// 结构型工具：返回的是 ID/文件名/样式这类短字段，给大预算纯属浪费上下文，
+// 但要允许更多条目（目录列表天然项数多）。
+const STRUCTURAL_TOOLS = new Set([
+  'list_directory', 'find_local_file', 'list_tools', 'list_skills', 'list_custom_tools',
+  'list_mcp_servers', 'list_mcp_tools', 'get_all_nodes', 'query_nodes', 'get_mindmap_info',
+  'list_cloze_nodes', 'list_references', 'get_related_files', 'get_review_schedule'
+])
+
+const TOOL_BUDGETS = {
+  text: { str: 12000, arr: MAX_ARR_LEN, total: 40000 },
+  def: { str: MAX_STR_LEN, arr: MAX_ARR_LEN, total: MAX_TOTAL_CHARS },
+  struct: { str: 400, arr: 200, total: 8000 }
+}
+
+const budgetForTool = (toolName) => {
+  const name = String(toolName || '')
+  if (TEXT_HEAVY_TOOLS.has(name)) return TOOL_BUDGETS.text
+  if (STRUCTURAL_TOOLS.has(name)) return TOOL_BUDGETS.struct
+  return TOOL_BUDGETS.def
+}
+
+// state.remaining 在递归中递减，是整个结果的总预算余额
+const sanitizeForAI = (obj, budget = TOOL_BUDGETS.def, depth = 0, state = { remaining: budget.total }) => {
   if (depth > 8) return '[嵌套过深已省略]'
   if (obj === null || obj === undefined) return obj
   if (typeof obj === 'string') {
     if (BASE64_RE.test(obj)) {
       return `[二进制数据已省略，长度 ${obj.length} 字符，请使用 filePath 访问文件]`
     }
-    if (obj.length > MAX_STR_LEN) {
-      return obj.slice(0, MAX_STR_LEN) + `\n...[内容过长已截断，原长度 ${obj.length} 字符]`
+    if (state.remaining <= 0) return '[总长度预算已用尽，内容省略]'
+    const keep = Math.min(obj.length, budget.str, state.remaining)
+    state.remaining -= keep
+    if (obj.length > keep) {
+      return obj.slice(0, keep) + `\n...[内容过长已截断，保留 ${keep}/${obj.length} 字符]`
     }
     return obj
   }
   if (Array.isArray(obj)) {
-    // 数组也截断（防止read_file返回巨大的行数组）
-    const arr = obj.map(v => sanitizeForAI(v, depth + 1))
-    if (arr.length > 50) {
-      return [...arr.slice(0, 50), `...[数组过长已截断，原 ${arr.length} 项]`]
+    const cap = Math.min(obj.length, budget.arr)
+    const arr = []
+    for (let i = 0; i < cap; i++) {
+      if (state.remaining <= 0) {
+        arr.push(`...[总长度预算已用尽，剩余 ${obj.length - i} 项已省略]`)
+        return arr
+      }
+      arr.push(sanitizeForAI(obj[i], budget, depth + 1, state))
     }
+    if (obj.length > cap) arr.push(`...[数组过长已截断，原 ${obj.length} 项]`)
     return arr
   }
   if (typeof obj === 'object') {
     const out = {}
     for (const [k, v] of Object.entries(obj)) {
-      // 明确移除会携带巨量二进制数据的字段（AI不需要看base64图片/文件内容）
-      if (k === 'imageData' || k === 'fileData' || k === 'binaryData' || k === 'dataUrl' || k === 'base64') {
-        if (typeof v === 'string' && v.length > 500) {
-          out[k] = `[二进制数据已省略，长度 ${v.length} 字符]`
-          continue
-        }
+      if (state.remaining <= 0) {
+        out._truncated = '[总长度预算已用尽，其余字段已省略]'
+        break
       }
-      out[k] = sanitizeForAI(v, depth + 1)
+      // 明确移除会携带巨量二进制数据的字段（AI不需要看base64图片/文件内容）
+      if (BINARY_KEYS.has(k) && typeof v === 'string' && v.length > 500) {
+        out[k] = `[二进制数据已省略，长度 ${v.length} 字符]`
+        continue
+      }
+      out[k] = sanitizeForAI(v, budget, depth + 1, state)
     }
     return out
   }
@@ -52,9 +97,9 @@ const sanitizeForAI = (obj, depth = 0) => {
 }
 
 /**
- * 安全序列化工具结果给 AI：先清洗再 JSON.stringify
+ * 安全序列化工具结果给 AI：按工具类型选预算，先清洗再 JSON.stringify
  */
-const safeStringifyResult = (r) => JSON.stringify(sanitizeForAI(r))
+const safeStringifyResult = (r, toolName) => JSON.stringify(sanitizeForAI(r, budgetForTool(toolName)))
 
 /**
  * 构建 chat completions API URL
@@ -1077,6 +1122,12 @@ class AIService {
       return choice
     }
 
+    // 补齐缺失的 tool_call_id（理由同流式分支）。这里 assistant 消息与 tool 消息
+    // 引用的是同一批对象，先就地补 id 再 push，两边天然一致。
+    choice.message.tool_calls.forEach((tc, idx) => {
+      if (tc && !tc.id) tc.id = `call_${Date.now().toString(36)}_${idx}`
+    })
+
     // 将 assistant 的工具调用消息追加到对话中
     messages.push({
       role: 'assistant',
@@ -1090,7 +1141,7 @@ class AIService {
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
-        content: safeStringifyResult(toolResult)
+        content: safeStringifyResult(toolResult, toolCall.function?.name)
       })
     }
 
@@ -1399,6 +1450,13 @@ class AIService {
         // 过滤掉空的工具调用
         toolCalls = toolCalls.filter(tc => tc && tc.function && tc.function.name)
 
+        // 补齐缺失的 tool_call_id：部分厂商（以及 legacy function_call 形态）不返回 id，
+        // 而 OpenAI 兼容接口要求 tool 消息的 tool_call_id 必填且与 assistant 消息里的完全一致，
+        // 缺一个整轮请求就会被 400 掉。在这里统一生成，后面两处都读同一份，天然对齐。
+        toolCalls.forEach((tc, idx) => {
+          if (!tc.id) tc.id = `call_${Date.now().toString(36)}_${idx}`
+        })
+
         // 用户已点击停止 / 本轮已过期：不再执行后续工具调用与请求轮次
         if (this._abortedTokens.has(token) || isStale()) {
           if (!isStale() && onDone) onDone()
@@ -1559,6 +1617,7 @@ class AIService {
         // 按原始顺序回传工具结果（与 tool_call_id 一一对应）
         for (let i = 0; i < toolCalls.length; i++) {
           const r = results[i]
+          const toolName = toolCalls[i].function?.name
           let contentStr
           const msg = r && typeof r.message === 'string' ? r.message : ''
           const userStopped = msg.includes('用户取消') || msg.includes('用户已停止')
@@ -1567,9 +1626,9 @@ class AIService {
             contentStr = safeStringifyResult({
               ...r,
               _recovery_hint: '该工具执行失败。请自主恢复，禁止直接中断向用户道歉：①分析错误原因，修正参数后重试（最多2次）；②换用等效工具（如 set_node_style / batch_node_actions / batch_text_style 可互换）；③把任务拆成更小的步骤。全部尝试仍失败才向用户简要说明原因与已尝试的方案。'
-            })
+            }, toolName)
           } else {
-            contentStr = safeStringifyResult(r ?? { success: false, message: '未执行' })
+            contentStr = safeStringifyResult(r ?? { success: false, message: '未执行' }, toolName)
           }
           currentMessages.push({
             role: 'tool',

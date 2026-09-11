@@ -49,6 +49,22 @@ function isSupportFile(name) {
   return /\.(smm|md|json|pdf|docx|pptx|xlsx|xls|csv|tsv|txt|log|html|xml)$/i.test(name)
 }
 
+// shell.openPath 等同于用户双击：下列扩展名会被系统直接执行。
+// 渲染层被注入后可以用它拉起任意本地程序，必须在主进程拦掉。
+const EXECUTABLE_EXTENSIONS = new Set([
+  '.exe', '.dll', '.bat', '.cmd', '.com', '.scr', '.msi', '.msp', '.msu',
+  '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.ps1', '.psm1', '.psd1',
+  '.hta', '.cpl', '.inf', '.reg', '.lnk', '.pif', '.jar', '.app', '.sh',
+  '.gadget', '.apk'
+])
+
+function assertNotExecutable(target) {
+  const ext = path.extname(String(target || '')).toLowerCase()
+  if (EXECUTABLE_EXTENSIONS.has(ext)) {
+    throw new Error(`出于安全考虑，不允许用系统程序直接打开 ${ext || '该类型'} 文件（可执行/脚本类）`)
+  }
+}
+
 // 路径安全校验：
 // 1. 拒绝空字节注入
 // 2. 拒绝换行符、制表符等控制字符
@@ -86,20 +102,80 @@ function assertSafePath(rawPath, opts = {}) {
   return normalized
 }
 
-// 写文件路径白名单：默认保存目录 / 临时目录 / userData，防止 AI 工具把文件写到任意系统位置。
-function assertAllowedWritePath(filePath) {
-  const target = path.resolve(filePath)
-  const allowed = [
+// === 写路径授权模型 ===
+// fs:writeFile / writeBinary / createFile / mkdir / move / rename / remove 都直接暴露在
+// preload 上，此前只经过 assertSafePath（仅挡控制字符与 Windows / Program Files 等目录），
+// 渲染层被注入后可以往用户启动目录写 .bat，形成下次登录即执行的持久化 RCE。
+// 策略：允许写入的根 = 默认保存目录 + 临时目录 + 应用数据目录 + 桌面/文档/下载
+// （find_local_file 本来就自动扫这三个目录，属于应用既定工作范围）+ 用户通过系统对话框
+// 主动选过的目录或文件；无论是否授权，启动目录 / .ssh 等位置一律拒绝——否则用户把
+// 整个 C:\Users\xxx 选为文件树根后，注入照样能落到启动目录。
+const grantedWriteRoots = new Set()
+
+const isWindows = process.platform === 'win32'
+
+// Windows 文件系统大小写不敏感，统一小写后比较；POSIX 保留原样
+const normalizeForCompare = (p) => {
+  const resolved = path.resolve(String(p || ''))
+  const noTrailingSep = resolved.replace(/[\\/]+$/, '')
+  return isWindows ? noTrailingSep.toLowerCase() : noTrailingSep
+}
+
+const startsWithRoot = (target, root) => {
+  if (!root) return false
+  return target === root || target.startsWith(root + path.sep) || target.startsWith(root + '/')
+}
+
+// 用户通过系统对话框选中某个目录/文件后调用，登记为可写根
+function grantWritePath(rawPath) {
+  const root = normalizeForCompare(rawPath)
+  if (root) grantedWriteRoots.add(root)
+}
+
+// 硬性拒绝：即使位于已授权根内也不允许写入（自启动与凭据位置）
+const WRITE_DENIED_SEGMENTS = [
+  '/microsoft/windows/start menu/programs/startup',
+  '/microsoft/windows/start menu/programs/启动',
+  '/microsoft/windows/startup',
+  '/.ssh',
+  '/.gnupg',
+  '/microsoft/credentials',
+  '/microsoft/protect',
+].map((s) => s.replace(/\//g, path.sep).toLowerCase())
+
+function assertWriteDeniedSegments(target) {
+  if (!isWindows) return
+  const lower = target.toLowerCase()
+  for (const seg of WRITE_DENIED_SEGMENTS) {
+    if (lower.includes(seg)) {
+      throw new Error('目标路径位于系统自启动或凭据目录，禁止写入：' + target)
+    }
+  }
+}
+
+function implicitWriteRoots() {
+  const roots = [
     getDefaultSaveDir(),
     app.getPath('temp'),
-    app.getPath('userData')
+    app.getPath('userData'),
+    app.getPath('desktop'),
+    app.getPath('documents'),
+    app.getPath('downloads')
   ]
-  const inside = allowed.some((base) => {
-    const rel = path.relative(path.resolve(base), target)
-    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
-  })
-  if (!inside) {
-    throw new Error('写入路径不在允许范围内（仅允许默认保存目录、临时目录或应用数据目录）')
+  // os.homedir() 下的 AppData 不在 implicit 列表里，只有 temp/userData 两个具体子目录被放行
+  return roots.filter(Boolean)
+}
+
+// 写文件路径白名单：默认保存目录 / 临时目录 / userData / 桌面 / 文档 / 下载 / 用户选过的目录，
+// 防止 AI 工具或渲染层注入把文件写到任意系统位置（尤其是启动目录）。
+function assertAllowedWritePath(filePath) {
+  const target = path.resolve(String(filePath || ''))
+  assertWriteDeniedSegments(target)
+  const normalizedTarget = normalizeForCompare(target)
+  const implicitOk = implicitWriteRoots().some((base) => startsWithRoot(normalizedTarget, normalizeForCompare(base)))
+  const grantedOk = [...grantedWriteRoots].some((root) => startsWithRoot(normalizedTarget, root))
+  if (!implicitOk && !grantedOk) {
+    throw new Error('写入路径不在允许范围内（仅允许默认保存目录、临时目录、应用数据目录、桌面/文档/下载，或你在文件对话框中选择过的目录）：' + target)
   }
 }
 
@@ -228,6 +304,8 @@ ipcMain.handle('save-binary-file', async (event, { filename, base64 }) => {
 // 打开/读取文件
 ipcMain.handle('open-file', async (event, { filePath }) => {
   try {
+    // 用户主动打开该文件 = 授权在其所在目录写回（保存时 uniquePath 可能生成同目录副本）
+    grantWritePath(path.dirname(String(filePath || '')))
     const ext = path.extname(filePath).toLowerCase()
     let data, isMarkdown = false, isXmind = false
     if (ext === '.xmind') {
@@ -273,6 +351,8 @@ ipcMain.handle('select-file', async () => {
     }
 
     const selectedPath = result.filePaths[0]
+    // 用户在系统对话框中主动选中 = 授权在该文件所在目录写回
+    grantWritePath(path.dirname(selectedPath))
     const ext = path.extname(selectedPath).toLowerCase()
     let data, isMarkdown = false, isXmind = false
     if (ext === '.xmind') {
@@ -372,7 +452,11 @@ ipcMain.handle('print-to-pdf', async (event, { html }) => {
 ipcMain.handle('fs:selectFolder', async () => {
   try {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
-    return result.canceled ? null : result.filePaths[0]
+    if (result.canceled) return null
+    const picked = result.filePaths[0]
+    // 用户选定的文件夹即文件树根，整个子树登记为可写
+    grantWritePath(picked)
+    return picked
   } catch (error) {
     console.error('选择文件夹失败:', error)
     return null
@@ -445,6 +529,7 @@ ipcMain.handle('fs:readBinary', async (event, filePath) => {
 ipcMain.handle('fs:writeFile', async (event, filePath, content) => {
   try {
     assertSafePath(filePath, { destructive: true })
+    assertAllowedWritePath(filePath)
     await fs.promises.writeFile(filePath, content, 'utf8')
     return true
   } catch (error) {
@@ -456,6 +541,7 @@ ipcMain.handle('fs:writeFile', async (event, filePath, content) => {
 ipcMain.handle('fs:writeBinary', async (event, filePath, base64Data) => {
   try {
     assertSafePath(filePath, { destructive: true })
+    assertAllowedWritePath(filePath)
     const buffer = Buffer.from(base64Data, 'base64')
     await fs.promises.writeFile(filePath, buffer)
     return { success: true, path: filePath }
@@ -481,6 +567,7 @@ ipcMain.handle('fs:rename', async (event, oldPath, newPath) => {
   try {
     assertSafePath(oldPath, { destructive: true })
     assertSafePath(newPath, { destructive: true })
+    assertAllowedWritePath(newPath)
     if (await exists(newPath)) throw new Error('目标名称已存在')
     await fs.promises.rename(oldPath, newPath)
     return newPath
@@ -512,6 +599,8 @@ ipcMain.handle('fs:openFile', async (event, rawPath) => {
   try {
     const target = typeof rawPath === 'string' ? path.normalize(rawPath) : ''
     if (!target || !path.isAbsolute(target)) throw new Error('路径无效')
+    assertSafePath(target)
+    assertNotExecutable(target)
     if (!fs.existsSync(target)) throw new Error('文件不存在')
     const errMsg = await shell.openPath(target)
     if (errMsg) throw new Error(errMsg)
@@ -533,6 +622,7 @@ ipcMain.handle('fs:remove', async (event, rawPath) => {
       throw new Error('文件不存在')
     }
     assertSafePath(filePath, { destructive: true })
+    assertAllowedWritePath(filePath)
     await shell.trashItem(filePath)
     return true
   } catch (error) {
@@ -544,6 +634,7 @@ ipcMain.handle('fs:remove', async (event, rawPath) => {
 ipcMain.handle('fs:mkdir', async (event, dirPath) => {
   try {
     assertSafePath(dirPath, { destructive: true })
+    assertAllowedWritePath(dirPath)
     const target = await uniquePath(path.normalize(dirPath))
     await fs.promises.mkdir(target, { recursive: true })
     return target
@@ -556,6 +647,7 @@ ipcMain.handle('fs:mkdir', async (event, dirPath) => {
 ipcMain.handle('fs:createFile', async (event, filePath, content) => {
   try {
     assertSafePath(filePath, { destructive: true })
+    assertAllowedWritePath(filePath)
     const target = await uniquePath(path.normalize(filePath))
     // 根节点默认用文件名（不带扩展名），而非「中心主题」
     const rootName = (path.basename(target, path.extname(target)) || '中心主题')
@@ -573,6 +665,7 @@ ipcMain.handle('fs:move', async (event, src, destDir) => {
   try {
     assertSafePath(src, { destructive: true })
     assertSafePath(destDir, { destructive: true })
+    assertAllowedWritePath(destDir)
     const target = path.join(destDir, path.basename(src))
     if (path.resolve(target) === path.resolve(src)) return src
     if (await exists(target)) throw new Error('目标位置已存在同名文件或文件夹')

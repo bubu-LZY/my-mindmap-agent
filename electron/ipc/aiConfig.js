@@ -1,6 +1,7 @@
 const { ipcMain, safeStorage } = require('electron')
 const store = require('../utils/store')
 const { buildChatURL } = require('./aiChat')
+const { assertSafeAiEndpoint, fetchWithGuard } = require('../utils/netGuard')
 
 // API Key 加密标记前缀：命中该前缀的 apiKey 为 safeStorage 密文（base64）
 const ENC_PREFIX = 'enc:v1:'
@@ -444,11 +445,16 @@ ipcMain.handle('ai:fetchModels', async (event, { baseURL, apiKey, profileId }) =
     const modelsUrl = /\/v\d+[a-z]*$/i.test(base) ? `${base}/models` : `${base}/v1/models`
     let models = []
     let details = []
-    // 超时保护：端点挂起时避免「检测模型」永久转圈
-    const fetchWithTimeout = (url, opts = {}) => {
+    // 超时保护 + SSRF 校验：端点挂起时避免「检测模型」永久转圈；
+    // 同时拦掉指向云元数据/链路本地一类地址的请求（域名会先解析出全部 IP 再判定），
+    // 并自己跟重定向——fetch 默认自动跟随 3xx，公网地址可以一跳 302 到内网绕过首跳校验。
+    // 回环与内网仍放行：Ollama（下面的 /api/tags 探测）、LM Studio、vLLM 与内网网关是受支持的用法。
+    const fetchWithTimeout = async (url, opts = {}) => {
+      await assertSafeAiEndpoint(url)
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), 15000)
-      return fetch(url, { ...opts, signal: controller.signal }).finally(() => clearTimeout(timer))
+      return fetchWithGuard(url, { ...opts, signal: controller.signal })
+        .finally(() => clearTimeout(timer))
     }
     try {
       const resp = await fetchWithTimeout(modelsUrl, { headers })
@@ -525,11 +531,12 @@ ipcMain.handle('ai:testVisionModel', async (event, { baseURL, apiKey, profileId,
       key = resolveApiKeyForProfile(profileId)
     }
     const url = buildChatURL(baseURL, autoComplete !== false)
+    await assertSafeAiEndpoint(url)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 30000)
     let resp
     try {
-      resp = await fetch(url, {
+      resp = await fetchWithGuard(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

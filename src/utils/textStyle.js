@@ -6,6 +6,8 @@
  * App.vue（Alt / Ctrl+Alt 快捷键）共用
  */
 
+import { parseHtmlBodyInert } from './inertDom'
+
 // 统一字体颜色：AI 工具、固定工具栏、文字工具栏、右键菜单、快捷键共用同一套色板。
 // 这里的值以文字工具栏（TextToolbar）为准，避免 AI 的“蓝色”和工具栏的“蓝色”不一致。
 export const textColors = [
@@ -96,7 +98,10 @@ export const escapeHtmlForStyle = (s) =>
 
 // 收集容器内所有非空文本节点
 export const collectTextNodes = (root) => {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  // root 可能来自惰性解析文档（DOMParser），TreeWalker 要由它自己的文档创建；
+  // 对活动 DOM 节点而言 ownerDocument 就是 document，行为不变。
+  const ownerDoc = root.ownerDocument || document
+  const walker = ownerDoc.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   const list = []
   while (walker.nextNode()) {
     const t = walker.currentNode
@@ -237,8 +242,7 @@ export const setTextDecorationToken = (el, token, add) => {
 
 // 对 HTML 中所有文本节点执行样式写入；无文本节点时返回 null
 export const transformNodeHtml = (html, cssAction) => {
-  const div = document.createElement('div')
-  div.innerHTML = html || ''
+  const div = parseHtmlBodyInert(html || '')
   const textNodes = collectTextNodes(div)
   if (textNodes.length === 0) return null
   for (const t of textNodes) {
@@ -253,8 +257,7 @@ export const transformNodeHtml = (html, cssAction) => {
  * 用于节点进入富文本编辑前，保证“非编辑态加粗”与“编辑态加粗”是同一状态。
  */
 export const normalizeHtmlForQuill = (html) => {
-  const div = document.createElement('div')
-  div.innerHTML = html || ''
+  const div = parseHtmlBodyInert(html || '')
   for (const t of collectTextNodes(div)) {
     const el = ensureInlineSpan(t)
     const weight = getEffectiveProp(el, 'font-weight')
@@ -453,8 +456,7 @@ export const applyRichTextAction = (el, action) => {
  * @returns {{html: string|null, count: number}} 新 HTML 与匹配片段数
  */
 export const styleTextRanges = (html, matchText, matchRegex, actions) => {
-  const div = document.createElement('div')
-  div.innerHTML = html || ''
+  const div = parseHtmlBodyInert(html || '')
 
   // 预编译匹配器：返回一个文本中全部匹配区间的函数
   let findRanges
@@ -569,8 +571,7 @@ export const analyzeNodeTextStyles = (html) => {
   if (!html || typeof html !== 'string' || !html.includes('<')) return null
   let div
   try {
-    div = document.createElement('div')
-    div.innerHTML = html
+    div = parseHtmlBodyInert(html)
   } catch (e) {
     return null
   }
@@ -632,8 +633,7 @@ export const copyRichTextStyles = (mindMap, sourceNode, targetNodes) => {
   try { srcHtml = sourceNode.getData().text || '' } catch (e) { return 0 }
   let div
   try {
-    div = document.createElement('div')
-    div.innerHTML = srcHtml
+    div = parseHtmlBodyInert(srcHtml)
   } catch (e) { return 0 }
   const textNodes = collectTextNodes(div)
   if (textNodes.length === 0) return 0
@@ -860,8 +860,7 @@ export const normalizeNodeFillColor = (color) => {
  * @returns {{html: string|null, count: number}}
  */
 export const styleTextRangesByColor = (html, colorFamily, actions) => {
-  const div = document.createElement('div')
-  div.innerHTML = html || ''
+  const div = parseHtmlBodyInert(html || '')
   let count = 0
   for (const t of collectTextNodes(div)) {
     const host = t.parentElement

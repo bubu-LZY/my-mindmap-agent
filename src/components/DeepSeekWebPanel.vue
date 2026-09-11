@@ -18,6 +18,7 @@ import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import { parseDocument } from '../services/docParseService.js'
+import { textFromHtmlInert } from '../utils/inertDom'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
@@ -111,12 +112,12 @@ const initView = async () => {
 }
 
 // 提取纯文本（去除 HTML 标签）
+// 输入是从远端网页抓回来的 HTML，必须用惰性文档解析：
+// 游离 div 的 innerHTML 不执行 <script>，但 <img src=x onerror=...> 之类仍会在本地渲染进程触发脚本。
 const getPlainText = (html) => {
   if (!html) return ''
   if (typeof html !== 'string') return String(html)
-  const tmp = document.createElement('div')
-  tmp.innerHTML = html
-  return tmp.textContent || tmp.innerText || ''
+  return textFromHtmlInert(html)
 }
 
 // 生成上下文文本（根据文件类型自动选择格式）

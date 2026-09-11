@@ -1120,6 +1120,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Setting } from '@element-plus/icons-vue'
 import DeepSeekWebPanel from './DeepSeekWebPanel.vue'
 import { treeToText, treeToSkeletonText, countNodes } from '../utils/treeUtils'
+import { textFromHtmlInert } from '../utils/inertDom'
 import { parseMarkdownToTree } from '../utils/markdownParser'
 import { createUid } from 'simple-mind-map/src/utils'
 import { aiService, buildBaseURL, resetWebSearchTask, createAIService } from '../services/aiService'
@@ -1146,7 +1147,7 @@ import {
   updateModelCapability,
   suggestVisionPath
 } from '../services/modelCapabilityProbe'
-import { handleToolCall, aiTools, getCoreTools, DANGEROUS_TOOLS, TOOL_METADATA, buildToolCatalogText } from '../services/toolHandler'
+import { handleToolCall, aiTools, getCoreTools, DANGEROUS_TOOLS, TOOL_METADATA, buildToolCatalogText, setDangerGate } from '../services/toolHandler'
 import { READONLY_RUN_CODE_TOOLS } from '../tools/ai/runCode'
 import { useMindMapStore } from '../stores/mindMapStore'
 import { stripDynamicContext } from '../composables/useChatSend'
@@ -4518,6 +4519,11 @@ Output a JSON code block with EXACTLY this format. Put it FIRST in your reply:
             return { success: false, message: '用户取消了本次危险操作，未执行。请不要再重复调用该工具。' }
           }
 
+          // run_code 写授权：静态判定为只读的代码是自动放行的（没弹窗），只有真正经过
+          // 用户确认的那批才授予写权限。运行时会在 worker 的工具 RPC 边界上强制，
+          // 因此 tools['delete'+'_node']() 这类绕过静态正则的写法拿不到写权限。
+          const runCodeWriteApproved = toolName === 'run_code' && !isRunCodeReadOnly(toolArgs?.code)
+
           aiStatus.value = 'calling'
           emit('tool-call-status', 'calling')
 
@@ -4544,7 +4550,11 @@ Output a JSON code block with EXACTLY this format. Put it FIRST in your reply:
           try {
             // 工具调用计数：用于判断 AI 一轮结束后是否需要强制重绘
             incrementToolCallCount()
-            const result = await handleToolCall(toolCall, taskMindMap, null, taskExtraHandlers)
+            const result = await handleToolCall(toolCall, taskMindMap, null, {
+              ...taskExtraHandlers,
+              dangerPreConfirmed: true,
+              runCodeWriteApproved
+            })
             tcEntry.status = result && result.success === false ? 'error' : 'done'
             // 关键返回值留档：压缩成摘要时保留
             tcEntry.resultBrief = briefFromResult(result)
@@ -5215,9 +5225,7 @@ const extractNodeText = (node) => {
     text = node.getData('text') || ''
   }
   if (text && text.includes('<')) {
-    const div = document.createElement('div')
-    div.innerHTML = text
-    text = div.innerText || div.textContent || ''
+    text = textFromHtmlInert(text)
   }
   return text.trim()
 }
@@ -7588,7 +7596,10 @@ const callMcpTool = async (toolName, args, mcpCtx = {}) => {
     return { success: false, message: '用户在确认弹窗中取消了本次危险操作，未执行。' }
   }
 
-  const result = await handleToolCall(toolCall, props.mindMap, props.activeNode, extraHandlers)
+  const result = await handleToolCall(toolCall, props.mindMap, props.activeNode, {
+    ...extraHandlers,
+    dangerPreConfirmed: true
+  })
   // 工具失败（success===false）归类为 tool_error，与对话内工具链路一致，日志面板按"错误"可筛出
   const isToolFail = !!(result && result.success === false)
   addLog(isToolFail ? 'tool_error' : 'tool_result', `MCP 外部调用结果：${toolName}\n${typeof result === 'string' ? result : JSON.stringify(result).slice(0, 500)}`, {
@@ -7802,7 +7813,12 @@ const runExternalMessage = async (text, source, extLogger) => {
             extLogger('tool_call', `${toolCall.function.name}: ${toolCall.function.arguments || ''}`)
           }
           try {
-            const result = await handleToolCall(toolCall, taskMindMap, null, taskExtraHandlers)
+            // 后台/外部通道无人值守，无法弹模态框；授权决策已由上方 isTrustedExternal
+            // 分支做出（危险操作在非可信通道会被直接拒绝），此处声明已确认以免闸门挂起。
+            const result = await handleToolCall(toolCall, taskMindMap, null, {
+              ...taskExtraHandlers,
+              dangerPreConfirmed: true
+            })
             tcEntry.status = 'done'
             // 关键返回值留档：压缩成摘要时保留
             tcEntry.resultBrief = briefFromResult(result)
@@ -8319,6 +8335,9 @@ onMounted(() => {
   loadCurrentModel()
   loadSkillPicker()
   loadToolPicker()
+  // 把本组件的确认弹窗注入执行层闸门：handleToolCall 的所有入口（交互对话、后台任务、
+  // DeepSeek 远程页面转发、外部消息、run_code 内部 RPC）统一在此收口做危险操作确认。
+  setDangerGate((toolName, args) => confirmDangerousTool(toolName, args))
   window.addEventListener('click', onGlobalClick)
   window.addEventListener('dragover', onGlobalDragOver)
   window.addEventListener('drop', onGlobalDrop)
@@ -8326,6 +8345,10 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  // 注销执行层闸门，并拒绝悬挂中的确认：否则弹窗 Promise 永不 settle，
+  // 且残留的闸门会去操作已销毁组件的 ref。
+  setDangerGate(null)
+  dismissDangerDialog()
   window.removeEventListener('click', onGlobalClick)
   window.removeEventListener('dragover', onGlobalDragOver)
   window.removeEventListener('drop', onGlobalDrop)

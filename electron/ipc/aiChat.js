@@ -4,6 +4,7 @@
  */
 const { ipcMain } = require('electron')
 const { getAiTimeoutMs } = require('../utils/store')
+const { assertSafeAiEndpoint, fetchWithGuard } = require('../utils/netGuard')
 
 /**
  * 构建 chat completions API URL
@@ -67,7 +68,8 @@ ipcMain.handle('ai:chat', async (event, { url, headers, body, profileId }) => {
     const timeoutMs = getAiTimeoutMs()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const response = await fetch(url, {
+      await assertSafeAiEndpoint(url)
+      const response = await fetchWithGuard(url, {
         method: 'POST',
         headers: injectAuth(headers, profileId),
         body,
@@ -108,7 +110,8 @@ ipcMain.handle('ai:embedding', async (event, { baseURL, model, input, profileId,
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 30000)
     try {
-      const response = await fetch(url, {
+      await assertSafeAiEndpoint(url)
+      const response = await fetchWithGuard(url, {
         method: 'POST',
         headers: injectAuth({ 'Content-Type': 'application/json' }, profileId),
         body: JSON.stringify({ model, input }),
@@ -166,7 +169,8 @@ ipcMain.on('ai:chatStream', async (event, { id, url, headers, body, profileId })
   }
   try {
     resetIdleTimer()
-    const response = await fetch(url, {
+    await assertSafeAiEndpoint(url)
+    const response = await fetchWithGuard(url, {
       method: 'POST',
       headers: injectAuth(headers, profileId),
       body,
@@ -270,7 +274,8 @@ ipcMain.handle('ai:uploadFile', async (event, { url, apiKey, profileId, fileName
     const headers = injectAuth({}, profileId)
     if (!headers['Authorization'] && apiKey) headers['Authorization'] = `Bearer ${apiKey}`
     // 不要手动设置 Content-Type：fetch + FormData 会自动附带正确的 multipart boundary
-    const response = await fetch(url, { method: 'POST', headers, body: form, signal: controller.signal })
+    await assertSafeAiEndpoint(url)
+    const response = await fetchWithGuard(url, { method: 'POST', headers, body: form, signal: controller.signal })
     const text = await response.text().catch(() => '')
     let data
     try { data = JSON.parse(text) } catch { data = text }

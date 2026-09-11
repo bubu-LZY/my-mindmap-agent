@@ -188,6 +188,9 @@ export const runCodeTool = {
       return { success: false, message: '请提供 code 参数' }
     }
 
+    // 只有用户在确认弹窗中明确批准了这段代码，才授予写权限；默认按只读运行。
+    const writeApproved = context?.extraHandlers?.runCodeWriteApproved === true
+
     const blob = new Blob([buildWorkerSource()], { type: 'text/javascript' })
     const workerUrl = URL.createObjectURL(blob)
     const worker = new Worker(workerUrl)
@@ -206,7 +209,19 @@ export const runCodeTool = {
               if (!ALLOWED_RUN_CODE_TOOLS.has(msg.name)) {
                 throw new Error(`run_code 不允许调用工具 ${msg.name}。请改用白名单内的批量/查询/读取工具。`)
               }
-              const result = await toolRegistry.call(msg.name, msg.args || {}, context)
+              // 运行时写授权：是否"只读"不能只靠对代码文本做正则静态分析——
+              // tools['delete'+'_node']() 或 const t = tools 再调用都能绕过匹配，
+              // 让写操作代码被当成只读自动放行。真正的授权必须收口在这个唯一的
+              // RPC 边界上：调用方未显式授予写权限时，一律拒绝读写类工具。
+              if (!writeApproved && READWRITE_RUN_CODE_TOOLS.has(msg.name)) {
+                throw new Error(`run_code 未获得写操作授权，已拒绝调用 ${msg.name}。请让用户在确认弹窗中批准写操作，或把代码改为只使用只读工具。`)
+              }
+              // 内部工具调用视为已确认：run_code 自身已在执行前经过危险操作确认，
+              // 不再对每个子工具重复弹窗。
+              const result = await toolRegistry.call(msg.name, msg.args || {}, {
+                ...context,
+                extraHandlers: { ...(context?.extraHandlers || {}), dangerPreConfirmed: true }
+              })
               worker.postMessage({ type: 'tool-result', reqId: msg.reqId, result })
             } catch (error) {
               worker.postMessage({

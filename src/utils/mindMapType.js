@@ -7,13 +7,13 @@
  * 分类只依据根节点 + 一级分支（必要时再回退到全树前 2000 字），避免整图扫描拖慢速度。
  */
 
+import { textFromHtmlInert } from './inertDom'
+
 const stripHtml = (s) => {
   if (typeof s !== 'string') return ''
   if (!s.includes('<')) return s
   try {
-    const div = document.createElement('div')
-    div.innerHTML = s
-    return div.textContent || div.innerText || ''
+    return textFromHtmlInert(s)
   } catch (e) {
     return String(s).replace(/<[^>]+>/g, '')
   }

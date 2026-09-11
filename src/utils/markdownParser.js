@@ -8,6 +8,7 @@
 
 import { createUid } from 'simple-mind-map/src/utils'
 import { escapeHtml } from './sanitizeHtml'
+import { parseHtmlBodyInert } from './inertDom'
 
 /**
  * 兼容旧版本遗留的“整张表格塞进单个节点”的数据。
@@ -17,8 +18,7 @@ import { escapeHtml } from './sanitizeHtml'
 export const legacyTableHtmlToText = (html) => {
   if (!html || typeof html !== 'string' || !/<table\b/i.test(html)) return html
   try {
-    const div = document.createElement('div')
-    div.innerHTML = html
+    const div = parseHtmlBodyInert(html)
     const table = div.querySelector('table')
     if (!table) return html
     const header = Array.from(table.querySelectorAll('thead th, tr:first-child th')).map(td => (td.textContent || '').trim())

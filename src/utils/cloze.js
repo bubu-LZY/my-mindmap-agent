@@ -7,6 +7,8 @@
  * 状态持久化到 localStorage，含 hiddenAll 和 nodeOverrideMap
  */
 
+import { parseHtmlBodyInert } from './inertDom'
+
 let hiddenAll = true
 const nodeOverrideMap = new Map()
 let mindMapRef = null
@@ -953,8 +955,7 @@ export const getCurrentClozeState = () => {
   const walk = (node) => {
     const text = node.getData('text') || ''
     if (typeof text === 'string' && text.includes('smm-cloze')) {
-      const div = document.createElement('div')
-      div.innerHTML = text
+      const div = parseHtmlBodyInert(text)
       const clozeEls = div.querySelectorAll('.smm-cloze')
       if (clozeEls.length > 0) {
         state[node.uid] = Array.from(clozeEls).map(el => el.textContent)

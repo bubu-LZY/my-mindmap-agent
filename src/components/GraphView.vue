@@ -77,6 +77,7 @@ import { ElMessage } from 'element-plus'
 import { downloadGraphHtml } from '../utils/graphExport'
 import { buildTriModeHtml } from '../utils/triModeExport'
 import { safeExportSvg } from '../utils/safeExportSvg'
+import { textFromHtmlInert } from '../utils/inertDom'
 
 const props = defineProps({
   // 导图实例（优先使用，可获取实时数据）
@@ -166,9 +167,7 @@ const onPreviewDragStart = (e) => {
 // 富文本 HTML 转纯文本
 const htmlToText = (html) => {
   if (!html) return ''
-  const div = document.createElement('div')
-  div.innerHTML = String(html)
-  return (div.textContent || '').replace(/\s+/g, ' ').trim()
+  return textFromHtmlInert(html).replace(/\s+/g, ' ').trim()
 }
 
 // 按层级着色

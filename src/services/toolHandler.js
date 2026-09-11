@@ -5,6 +5,7 @@
  */
 
 import { parseMarkdownToTree, treeToMarkdown } from '../utils/markdownParser'
+import { parseHtmlInert } from '../utils/inertDom'
 import { createUid, checkIsNodeStyleDataKey } from 'simple-mind-map/src/utils'
 import { treeToText, getNodePath, countNodes, getMaxDepth, treeToSkeletonText, treeToUidList } from '../utils/treeUtils'
 import { searchWeb, readWebpage, aiService } from './aiService'
@@ -657,6 +658,53 @@ export const DANGEROUS_TOOLS = {
   invoke_skill: '调用 Skill 会执行其中定义的操作，请确认该 Skill 来源可信',
   create_skill: '创建 Skill 会把指令与资源写入磁盘，请确认内容安全',
   save_text_file: '向本地磁盘写入文件，可能覆盖已有内容，请确认路径与内容'
+}
+
+// ========== 危险操作确认闸门（执行层统一收口） ==========
+// 安全策略此前散落在各调用点：handleToolCall 有 9 个入口（交互对话、后台任务、
+// DeepSeek 远程页面转发、外部消息、run_code 内部 RPC、视觉模型明文兜底…），
+// 历史上只有 2 处做了二次确认，其余入口等于无门禁。最短的一条攻击链是远端
+// chat.deepseek.com 页面可直接触发 delete_local_file 而不弹任何确认。
+// 现在闸门下沉到执行层：UI 通过 setDangerGate 注入弹窗实现，未注入时一律拒绝
+// （fail-closed），新增调用点无需记得加判断就自动受保护。
+let _dangerGate = null
+
+export function setDangerGate(gate) {
+  _dangerGate = typeof gate === 'function' ? gate : null
+}
+
+async function enforceDangerGate(toolCall, extraHandlers) {
+  const name = toolCall?.function?.name
+  const reason = name ? DANGEROUS_TOOLS[name] : null
+  if (!reason) return null
+
+  // 调用方已在自己的边界上完成用户确认（例如交互对话路径先弹窗再执行），
+  // 显式声明后跳过，避免同一个操作连弹两次。
+  if (extraHandlers && extraHandlers.dangerPreConfirmed === true) return null
+
+  if (!_dangerGate) {
+    return {
+      success: false,
+      message: `「${name}」属于危险操作（${reason}），但当前没有可用的用户确认通道，已拒绝执行。`
+    }
+  }
+
+  let args = {}
+  try { args = JSON.parse(toolCall.function.arguments || '{}') } catch { /* 保持空对象 */ }
+
+  let allowed = false
+  try {
+    allowed = await _dangerGate(name, args, reason)
+  } catch (e) {
+    // 弹窗实现自身抛错时按拒绝处理，不因 UI 异常放开高危操作
+    console.error('[danger-gate] 确认闸门执行异常，按拒绝处理:', e)
+  }
+  if (allowed === true) return null
+
+  return {
+    success: false,
+    message: `用户拒绝执行危险操作「${name}」，未执行。请不要再重复调用该工具。`
+  }
 }
 
 // ========== AI 工具定义（OpenAI function calling 格式） ==========
@@ -3462,9 +3510,9 @@ function wrapNodeTextHtml(html, prefix, suffix) {
     return `<p><span>${pre}${escHtml(src)}${suf}</span></p>`
   }
   try {
-    const wrapEl = document.createElement('div')
-    wrapEl.innerHTML = src
-    const walker = document.createTreeWalker(wrapEl, NodeFilter.SHOW_TEXT)
+    const doc = parseHtmlInert(src)
+    const wrapEl = doc.body
+    const walker = doc.createTreeWalker(wrapEl, NodeFilter.SHOW_TEXT)
     const textNodes = []
     while (walker.nextNode()) textNodes.push(walker.currentNode)
     if (textNodes.length > 0) {
@@ -3476,9 +3524,9 @@ function wrapNodeTextHtml(html, prefix, suffix) {
       // 没有文本节点（如仅含 <br>/<img>）：前后缀插入首/末元素内部
       const firstEl = wrapEl.firstElementChild
       if (!firstEl) return `<p><span>${pre}${suf}</span></p>`
-      firstEl.insertBefore(document.createTextNode(pre), firstEl.firstChild)
+      firstEl.insertBefore(doc.createTextNode(pre), firstEl.firstChild)
       const lastEl = wrapEl.lastElementChild || firstEl
-      lastEl.appendChild(document.createTextNode(suf))
+      lastEl.appendChild(doc.createTextNode(suf))
     }
     return wrapEl.innerHTML
   } catch (e) {
@@ -4014,6 +4062,12 @@ async function waitForRendererSettle(mindMap) {
 
 export async function handleToolCall(toolCall, mindMap, activeNode, extraHandlers = {}) {
   const name = toolCall.function.name
+
+  // 危险操作统一闸门：所有入口（交互对话 / 后台任务 / DeepSeek 远程页面 /
+  // 外部消息 / run_code RPC）都必须经过，拒绝时不进入执行流程。
+  const denied = await enforceDangerGate(toolCall, extraHandlers)
+  if (denied) return denied
+
   // 导图写操作串行执行：避免并发修改导致 renderer 状态错乱 / 重复节点
   if (MINDMAP_WRITE_TOOLS.has(name)) {
     const prev = mindMapWriteChain
@@ -6573,8 +6627,8 @@ ${mindMapTypePrompt(mapType, 'organize')}
 
         const wrapHtmlText = (html) => {
           if (!html || typeof html !== 'string') return html
-          const container = document.createElement('div')
-          container.innerHTML = html
+          const doc = parseHtmlInert(html)
+          const container = doc.body
           const applyTextNode = (node) => {
             const val = node.nodeValue || ''
             if (!val) return
@@ -6595,17 +6649,17 @@ ${mindMapTypePrompt(mapType, 'organize')}
               }
             }
             if (!ranges.length) return
-            const frag = document.createDocumentFragment()
+            const frag = doc.createDocumentFragment()
             let last = 0
             for (const [start, end] of ranges) {
-              if (start > last) frag.appendChild(document.createTextNode(val.slice(last, start)))
-              const span = document.createElement('span')
+              if (start > last) frag.appendChild(doc.createTextNode(val.slice(last, start)))
+              const span = doc.createElement('span')
               span.className = 'smm-cloze smm-cloze-hidden'
               span.textContent = val.slice(start, end)
               frag.appendChild(span)
               last = end
             }
-            if (last < val.length) frag.appendChild(document.createTextNode(val.slice(last)))
+            if (last < val.length) frag.appendChild(doc.createTextNode(val.slice(last)))
             node.parentNode.replaceChild(frag, node)
           }
           const walk = (el) => {

@@ -53,6 +53,7 @@
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { sanitizeSafeHtml } from '../utils/sanitizeHtml'
 
 const STORAGE_KEY = 'my-mindmap-agent:notepad'
 const POS_KEY = 'my-mindmap-agent:notepad:pos'
@@ -90,7 +91,8 @@ const loadPrefs = () => {
 const loadContent = () => {
   const text = localStorage.getItem(STORAGE_KEY) || ''
   if (editorRef.value) {
-    editorRef.value.innerHTML = text
+    // 目标是活动 DOM 里的 contenteditable 容器，<img onerror> 之类会真的执行，必须先净化
+    editorRef.value.innerHTML = sanitizeSafeHtml(text)
   }
 }
 

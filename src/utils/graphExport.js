@@ -1,6 +1,8 @@
 // 关联图导出为交互式 HTML
 // 生成自包含的单文件 HTML，打开后可拖动节点、缩放平移
 
+import { textFromHtmlInert } from './inertDom'
+
 const DEPTH_COLORS = ['#0a84ff', '#30b0c7', '#34c759', '#ff9500', '#af52de', '#8e8e93', '#ff3b30']
 
 /**
@@ -16,11 +18,9 @@ export function buildGraphDataFromRaw(rawData) {
 
   const htmlToText = (html) => {
     if (!html) return ''
-    // 浏览器端用 DOMParser，node 端用正则
-    if (typeof document !== 'undefined' && document.createElement) {
-      const div = document.createElement('div')
-      div.innerHTML = String(html)
-      return (div.textContent || '').replace(/\s+/g, ' ').trim()
+    // 浏览器端用惰性解析，node 端用正则
+    if (typeof DOMParser !== 'undefined') {
+      return textFromHtmlInert(html).replace(/\s+/g, ' ').trim()
     }
     return String(html).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
   }

@@ -851,6 +851,10 @@
         <span class="setting-label">密码</span>
         <el-input v-model="cloudSyncForm.pass" class="desk-token-input" type="password" show-password placeholder="坚果云填「应用密码」，不是登录密码" />
       </div>
+      <p style="font-size: 12px; color: #86868b; margin: -6px 0 12px 0;">
+        密码由系统凭据库（Windows DPAPI）加密后保存在本机，不会以明文落盘，也不会回传给界面。
+        显示 <b>****</b> 表示沿用已保存的密码；重新输入即替换，清空后保存则删除。
+      </p>
       <div class="setting-row">
         <span class="setting-label">云端目录</span>
         <el-input v-model="cloudSyncForm.remoteDir" class="desk-token-input" placeholder="网盘里放导图的文件夹，如 /我的导图" />
@@ -3338,13 +3342,24 @@ const onCloudVendorChange = (vendor) => {
   if (preset && preset.url) cloudSyncForm.value.url = preset.url
 }
 
-const saveCloudSync = () => {
-  cloudSyncService.saveConfig({ ...cloudSyncForm.value })
-  ElMessage.success('云盘同步配置已保存')
+const saveCloudSync = async () => {
+  // 主进程会校验 WebDAV 地址与 rclone 路径，失败原因必须回显，不能一律报「已保存」
+  const res = await cloudSyncService.saveConfig({ ...cloudSyncForm.value })
+  if (res && res.success) {
+    cloudSyncForm.value = cloudSyncService.loadConfig()
+    ElMessage.success('云盘同步配置已保存')
+  } else {
+    ElMessage.error(res?.message || '云盘同步配置保存失败')
+  }
 }
 
 const testCloudSync = async () => {
-  cloudSyncService.saveConfig({ ...cloudSyncForm.value })
+  const saveRes = await cloudSyncService.saveConfig({ ...cloudSyncForm.value })
+  if (!saveRes || !saveRes.success) {
+    ElMessage.error(saveRes?.message || '云盘同步配置保存失败')
+    return
+  }
+  cloudSyncForm.value = cloudSyncService.loadConfig()
   cloudSyncing.value = true
   try {
     const res = await cloudSyncService.runSync()
@@ -3455,6 +3470,11 @@ onMounted(() => {
   loadCustomTools()
   deskCalendarSyncEnabled.value = isDeskCalendarSyncEnabled()
   cloudSyncForm.value = cloudSyncService.loadConfig()
+  // 配置来自主进程（密码经 safeStorage 加密），首次读取是异步的：
+  // 上面的同步 loadConfig() 可能还只是默认值，等 init 落定后再刷一次表单。
+  cloudSyncService.init().then(() => {
+    cloudSyncForm.value = cloudSyncService.loadConfig()
+  })
   nextTick(() => {
     setupTocObserver()
     onSettingsScroll()

@@ -21,34 +21,43 @@ process.on('unhandledRejection', (reason) => {
   try { console.error('[unhandledRejection]', reason) } catch (_) {}
 })
 
-const { app, BrowserWindow, BrowserView, shell, ipcMain, Tray, Menu, nativeImage } = require('electron')
+const { app, BrowserWindow, BrowserView, shell, ipcMain, Tray, Menu, nativeImage, session } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 const store = require('./utils/store')
+const { assertSafeWebTarget } = require('./utils/netGuard')
 
 // === IPC 发送方校验（防御渲染层被注入后滥用特权 IPC）===
 // 仅放行业务主窗口：生产为 file:// 打包产物，开发为本地 dev server。
 // 一旦渲染层被 XSS 注入，可在主进程统一拦截，避免任意文件读写/对外发送被滥用。
 const _origIpcHandle = ipcMain.handle.bind(ipcMain)
 const _origIpcOn = ipcMain.on.bind(ipcMain)
-// DeepSeek BrowserView 专用白名单（这些通道只用于转发消息，不涉及高危操作）
-const DEEPSEEK_WHITELIST = [
-  'deepseek:request-context',
-  'deepseek:execute-tool',
-  'deepseek:open-devtools',
-  'deepseek:ping',
-  'deepseek:view-pong',
-]
 function _isTrustedSender(event, channel) {
   try {
+    const sender = event.sender
+    // deepseek: 前缀（BrowserView preload 发来的）只接受 deepSeekView 本体。
+    // 用对象身份比对而不是 sender.id：远端页面无法伪造，重建 view 后旧 sender 自动失效。
+    if (channel.startsWith('deepseek:')) {
+      return !!(deepSeekView && sender === deepSeekView.webContents)
+    }
+    // deepseek-view: 前缀（主窗口操作 BrowserView 的 API）只接受主窗口
+    if (channel.startsWith('deepseek-view:')) {
+      return !!(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents)
+    }
+
     const url = (event.senderFrame && event.senderFrame.url) || ''
-    if (url.startsWith('file://')) return true
-    if (/^https?:\/\/(localhost|127\.0\.0\.1):\d+/.test(url)) return true
-    // DeepSeek BrowserView 白名单通道放行
-    if (DEEPSEEK_WHITELIST.includes(channel)) return true
-    // 所有 deepseek-view: 开头的（主窗口操作 BrowserView 的 API）
-    if (channel.startsWith('deepseek-view:')) return true
+    // 不能用前缀正则判定：http://localhost:80@evil.com/ 的 userinfo 会让正则命中，
+    // 而真实主机是 evil.com。必须解析出 hostname 再比对。
+    const parsed = new URL(url)
+    if (parsed.protocol === 'file:') {
+      // file://attacker/share/payload.html 是远程 UNC 路径，不能算本地打包产物
+      return !parsed.hostname || parsed.hostname === '' || /^[a-z]:$/i.test(parsed.hostname)
+    }
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      const host = parsed.hostname
+      return host === 'localhost' || host === '127.0.0.1' || host === '[::1]'
+    }
     return false
   } catch {
     return false
@@ -490,71 +499,82 @@ ipcMain.handle('web-search', async (event, query) => {
   return response
 })
 
-// SSRF 防护：命中内网/回环/链路本地/保留地址返回 true（web-fetch 抓取网页前用它拦截）
-function isBlockedTarget(hostname) {
-  const h = String(hostname || '').toLowerCase().trim().replace(/^\[|\]$/g, '')
-  if (!h) return true
-  if (h === 'localhost' || h === 'localhost.localdomain') return true
-  if (/\.(local|internal|lan|localhost|home\.arpa|corp)$/.test(h)) return true
-  const ipv4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
-  if (ipv4) {
-    const o = ipv4.slice(1, 5).map(Number)
-    if (o.some(n => n > 255)) return true
-    const [a, b] = o
-    if (a === 0 || a === 10 || a === 127) return true
-    if (a === 100 && b >= 64 && b <= 127) return true
-    if (a === 169 && b === 254) return true
-    if (a === 172 && b >= 16 && b <= 31) return true
-    if (a === 192 && b === 168) return true
-    if (a === 192 && (o[2] === 0 || o[2] === 2)) return true
-    if (a >= 224) return true
-    return false
-  }
-  if (h.includes(':')) {
-    if (h === '::1') return true
-    if (/^f[cd]/.test(h)) return true
-    if (/^fe[89ab]/.test(h)) return true
-  }
-  return false
+// 读取网页正文（配合联网搜索使用）：抓取网页 HTML 并提取纯文本
+//
+// SSRF 防护要点：本 handler 的目标 URL 由 AI 通过 read_webpage 工具自主指定，
+// 等于把「抓取任意地址并把正文回传给模型」的能力交给了模型输出（可被提示注入操纵），
+// 因此必须同时堵住两条绕过路径：
+//   1. 域名解析——只匹配 hostname 字符串的黑名单，一条指向 169.254.169.254 的 A 记录即可绕过；
+//      assertSafeWebTarget 会先解析出全部 IP 再逐个分类。
+//   2. 重定向——net.request 默认自动跟随，公网页面一跳 302 就能落到内网/云元数据；
+//      这里设为 manual，每跳都回到外层重新校验后再继续。
+const WEB_FETCH_MAX_HOPS = 5
+const WEB_FETCH_MAX_BYTES = 3 * 1024 * 1024 // 超大页面截断，避免内存问题
+const WEB_FETCH_MAX_CHARS = 8000 // 返回给 AI 的正文长度上限
+
+// 单次请求：不自动跟随重定向，命中 3xx 时把目标交回调用方校验
+function webFetchOnce(url) {
+  const { net } = require('electron')
+  return new Promise((resolve, reject) => {
+    const req = net.request({ method: 'GET', url, redirect: 'manual' })
+    const timer = setTimeout(() => {
+      try { req.abort() } catch (e) {}
+      reject(new Error('请求超时'))
+    }, 15000)
+    let buf = Buffer.alloc(0)
+    req.on('redirect', (statusCode, method, redirectUrl) => {
+      clearTimeout(timer)
+      try { req.abort() } catch (e) {}
+      resolve({ redirect: redirectUrl })
+    })
+    req.on('response', (res) => {
+      res.on('data', (c) => {
+        if (buf.length < WEB_FETCH_MAX_BYTES) buf = Buffer.concat([buf, c])
+        else { try { req.abort() } catch (e) {} }
+      })
+      res.on('end', () => { clearTimeout(timer); resolve({ html: buf.toString('utf8') }) })
+      res.on('error', (err) => { clearTimeout(timer); reject(err) })
+    })
+    req.on('error', (err) => { clearTimeout(timer); reject(err) })
+    req.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
+    req.setHeader('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')
+    req.end()
+  })
 }
 
-// 读取网页正文（配合联网搜索使用）：抓取网页 HTML 并提取纯文本
 ipcMain.handle('web-fetch', async (event, url) => {
-  const { net } = require('electron')
-  const target = String(url || '').trim()
+  let target = String(url || '').trim()
   if (!/^https?:\/\//i.test(target)) return { success: false, error: '仅支持 http/https 链接' }
-  // SSRF 防护：禁止抓取内网/回环/链路本地/保留地址
-  try {
-    if (isBlockedTarget(new URL(target).hostname)) return { success: false, error: '禁止访问内网或本地地址' }
-  } catch {
-    return { success: false, error: '链接格式不合法' }
+
+  let html = null
+  for (let hop = 0; hop <= WEB_FETCH_MAX_HOPS; hop++) {
+    try {
+      await assertSafeWebTarget(target)
+    } catch (e) {
+      return { success: false, error: e.message }
+    }
+    let out
+    try {
+      out = await webFetchOnce(target)
+    } catch (e) {
+      return { success: false, error: e.message }
+    }
+    if (out && out.redirect) {
+      try {
+        target = new URL(out.redirect, target).toString()
+      } catch {
+        return { success: false, error: '重定向地址不合法' }
+      }
+      continue
+    }
+    html = out ? out.html : ''
+    break
+  }
+  if (html === null) {
+    return { success: false, error: `重定向次数超过上限（${WEB_FETCH_MAX_HOPS} 次），已中止抓取` }
   }
 
-  const MAX_BYTES = 3 * 1024 * 1024 // 超大页面截断，避免内存问题
-  const MAX_CHARS = 8000 // 返回给 AI 的正文长度上限
-
   try {
-    const html = await new Promise((resolve, reject) => {
-      const req = net.request({ method: 'GET', url: target })
-      const timer = setTimeout(() => {
-        try { req.abort() } catch (e) {}
-        reject(new Error('请求超时'))
-      }, 15000)
-      let buf = Buffer.alloc(0)
-      req.on('response', (res) => {
-        res.on('data', (c) => {
-          if (buf.length < MAX_BYTES) buf = Buffer.concat([buf, c])
-          else { try { req.abort() } catch (e) {} }
-        })
-        res.on('end', () => { clearTimeout(timer); resolve(buf.toString('utf8')) })
-        res.on('error', (err) => { clearTimeout(timer); reject(err) })
-      })
-      req.on('error', (err) => { clearTimeout(timer); reject(err) })
-      req.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
-      req.setHeader('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')
-      req.end()
-    })
-
     // 提取标题
     const tm = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
     const title = tm ? tm[1].replace(/\s+/g, ' ').trim() : ''
@@ -580,7 +600,7 @@ ipcMain.handle('web-fetch', async (event, url) => {
     if (!text) return { success: false, error: '未能从网页提取到正文（可能是纯脚本渲染页面）' }
 
     let truncated = false
-    if (text.length > MAX_CHARS) { text = text.slice(0, MAX_CHARS); truncated = true }
+    if (text.length > WEB_FETCH_MAX_CHARS) { text = text.slice(0, WEB_FETCH_MAX_CHARS); truncated = true }
     return { success: true, url: target, title, content: text, truncated }
   } catch (e) {
     return { success: false, error: e.message }
@@ -677,7 +697,9 @@ ipcMain.handle('deepseek-view:create', (event, { x, y, width, height }) => {
         nodeIntegration: false,
         sandbox: false,
         preload: path.join(__dirname, 'preload-deepseek.js'),
-        partition: 'persist:deepseek-web'
+        partition: 'persist:deepseek-web',
+        // preload 带有工具执行桥，绝不能注入到页面内第三方 iframe（内容由广告/统计方控制）
+        nodeIntegrationInSubFrames: false
       }
     })
     mainWindow.addBrowserView(deepSeekView)
@@ -697,6 +719,33 @@ ipcMain.handle('deepseek-view:create', (event, { x, y, width, height }) => {
       return { action: 'deny' }
     })
     
+    // preload-deepseek.js 会注入到这个 view 内加载的每一个页面，桥对象带有工具执行能力。
+    // 因此必须限制导航目标：否则远端页面把 view 导到自己的域名后就能直接拿到
+    // window.__deepseek_agent__ 并调用本地工具。只允许 deepseek.com 及其子域。
+    const isAllowedDeepSeekNavigation = (url) => {
+      try {
+        const u = new URL(String(url || ''))
+        if (u.protocol !== 'https:') return false
+        return u.hostname === 'deepseek.com' || u.hostname.endsWith('.deepseek.com')
+      } catch {
+        return false
+      }
+    }
+    deepSeekView.webContents.on('will-navigate', (event, url) => {
+      if (!isAllowedDeepSeekNavigation(url)) {
+        event.preventDefault()
+        console.warn('[security] 已拦截 BrowserView 跨域导航:', url)
+      }
+    })
+    deepSeekView.webContents.on('will-redirect', (event, url) => {
+      if (!isAllowedDeepSeekNavigation(url)) {
+        event.preventDefault()
+        console.warn('[security] 已拦截 BrowserView 跨域重定向:', url)
+      }
+    })
+    // 子 frame 的 preload 注入由 webPreferences.nodeIntegrationInSubFrames=false 阻断
+    // （Electron 28 的 will-frame-navigate 不可取消，挂处理器只会产生误导性告警）
+
     // 转发 BrowserView 的控制台日志到主窗口（方便调试）
     deepSeekView.webContents.on('console-message', (event, level, message, line, sourceId) => {
       const levelMap = { 0: 'log', 1: 'warn', 2: 'error', 3: 'info' }
@@ -745,7 +794,7 @@ ipcMain.on('deepseek:request-context', (event) => {
     return
   }
   debugLog(`deepSeekView webContents id: ${deepSeekView.webContents.id}`)
-  // 直接转发，不校验 senderId（避免 id 不匹配导致静默失败）
+  // sender 身份已由 _isTrustedSender 用 deepSeekView.webContents 对象比对确认
   debugLog('转发给主窗口')
   mainWindow.webContents.send('deepseek:request-context', {})
   // 同时给 BrowserView 回个确认
@@ -873,6 +922,30 @@ function getDefaultSaveDir() {
 // 将默认保存目录挂载到 app 上，供 IPC 模块使用
 app.whenReady().then(() => {
   app.defaultSaveDir = getDefaultSaveDir()
+
+  // === 权限请求默认拒绝 ===
+  // Electron 官方文档：未配置自定义处理器时会自动批准所有权限请求。
+  // 应用内的 <webview>（FloatingBrowser）会加载任意外部网页，默认全批等于把
+  // 摄像头/麦克风/地理位置/剪贴板读取直接送给外部站点。这里改为白名单放行。
+  const ALLOWED_PERMISSIONS = new Set([
+    'notifications',            // App.vue 复习提醒 new Notification(...)
+    'clipboard-sanitized-write' // 多处「复制」按钮 navigator.clipboard.writeText
+  ])
+  const installPermissionPolicy = (ses) => {
+    ses.setPermissionRequestHandler((webContents, permission, callback, details) => {
+      const allowed = ALLOWED_PERMISSIONS.has(permission)
+      if (!allowed) {
+        console.warn(`[security] 已拒绝权限请求: ${permission} (${details?.requestingOrigin || ''})`)
+      }
+      callback(allowed)
+    })
+    // 同步权限查询（如 navigator.permissions.query 与部分 API 的免提示路径）遵循同一策略
+    ses.setPermissionCheckHandler((webContents, permission) => ALLOWED_PERMISSIONS.has(permission))
+  }
+  // BrowserView / webview 各自使用独立 partition（persist:deepseek-web、persist:ai-web-browser），
+  // 只装 defaultSession 覆盖不到它们；后续新建的分区 session 也要一并装上。
+  installPermissionPolicy(session.defaultSession)
+  app.on('session-created', installPermissionPolicy)
 })
 
 let mainWindow = null

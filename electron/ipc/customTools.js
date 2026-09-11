@@ -4,6 +4,7 @@ const path = require('path')
 const os = require('os')
 const { execFile, fork } = require('child_process')
 const store = require('../utils/store')
+const { resolveInside } = require('../utils/safePath')
 
 const TOOL_DIR_NAME = 'custom-tools'
 const SPEC_FILE_NAME = 'skills-mcp-tools.md'
@@ -268,7 +269,12 @@ const ensureUserToolDir = () => {
   return dir
 }
 
-const sanitizeFolderName = (name) => String(name || 'custom_tool').replace(/[\\/:*?"<>|]/g, '_').trim() || 'custom_tool'
+const sanitizeFolderName = (name) => {
+  // 除路径分隔符与 Windows 保留字符外还要剥掉前导点号：
+  // '..' 与 '.' 原样进入 path.join 会指向父目录 / 当前目录。
+  const cleaned = String(name || 'custom_tool').replace(/[\\/:*?"<>|]/g, '_').replace(/^\.+/, '').trim()
+  return cleaned || 'custom_tool'
+}
 
 const importFolder = async ({ folderName, files }) => {
   const base = ensureUserToolDir()
@@ -281,9 +287,10 @@ const importFolder = async ({ folderName, files }) => {
   }
   fs.mkdirSync(target, { recursive: true })
   for (const file of (files || [])) {
-    const rel = String(file.relativePath || '').replace(/\\/g, '/')
-    if (!rel) continue
-    const dest = path.join(target, rel)
+    // relativePath 来自渲染进程的拖拽载荷，不可信：../../../ 开头的值能把文件写到
+    // 目标目录之外，而本目录下的文件会被当作可执行代码加载，等于任意代码执行。
+    const dest = resolveInside(target, file.relativePath)
+    if (!dest) continue
     fs.mkdirSync(path.dirname(dest), { recursive: true })
     const buf = Buffer.from(file.base64 || '', 'base64')
     fs.writeFileSync(dest, buf)

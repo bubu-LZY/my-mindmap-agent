@@ -177,8 +177,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // 云盘同步：rclone 镜像同步（本地默认目录 -> 云盘 WebDAV 文件夹）
+  // 配置（含密码）存在主进程，getConfig 只回传掩码；sync 不接受凭据
   cloudSync: {
-    sync: (config) => ipcRenderer.invoke('rclone:sync', config)
+    getConfig: () => ipcRenderer.invoke('rclone:getConfig'),
+    saveConfig: (config) => ipcRenderer.invoke('rclone:saveConfig', config),
+    sync: (override) => ipcRenderer.invoke('rclone:sync', override)
   },
 
   // MCP 服务端桥接（外部 AI 客户端通过 /mcp 端点调用本程序工具）
