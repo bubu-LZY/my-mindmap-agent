@@ -3390,9 +3390,22 @@ const rewriteUserQuestion = async (question) => {
   if (!q) return question
   // 短指令（如"加粗""保存""全部挖空"）意图已明确：跳过改写，省一整轮 LLM 往返
   if (q.length <= 16) return q
+  // 注入当前导图主题：改写模型拿不到导图上下文，缺少主题时会把"看点/线/操作"等口语臆测成无关领域
+  // （例如把驾考科目二误判成股票 K 线），导致改写结果语义漂移、污染主 AI 判断
+  let topic = ''
+  try {
+    const t = extractNodeText(props.mindMap?.renderer?.root)
+    if (t) topic = t
+  } catch { /* 拿不到主题时忽略，不影响改写 */ }
   const sys = '你是用户意图识别与问题规范化专家。把用户原话改写为一条意图清晰、完整、可直接执行的指令，供后续 AI 使用。'
-  const usr = '请改写下面这条用户提问。要求：\n1. 准确识别用户真正想干什么（提问 / 修改导图 / 生成内容 / 导出 / 检索 / 其它），不要臆测。\n2. 补全省略的主语、对象、目标文件或节点、期望结果，但不得编造原文没有的信息。\n3. 去掉口语化与歧义，规范化、全面化表达；如含多个诉求，拆成明确的几条。\n4. 保持原意不变，只输出改写后的内容，不要解释、不要前缀。\n\n用户原话：\n' + q
-  const choice = await aiService.chat(usr, sys, null, { temperature: 0.1, max_tokens: 150, thinking: false })
+  const usr = '请改写下面这条用户提问。要求：\n'
+    + '1. 准确识别用户真正想干什么（提问 / 修改导图 / 生成内容 / 导出 / 检索 / 其它），不要臆测。\n'
+    + '2. 补全省略的主语、对象、目标文件或节点、期望结果，但不得编造原文没有的信息。\n'
+    + '3. 去掉口语化与歧义，规范化、全面化表达；如含多个诉求，拆成明确的几条。\n'
+    + '4. 保持原意不变，只输出改写后的内容，不要解释、不要前缀。\n'
+    + (topic ? `5. 背景：当前思维导图主题是「${topic}」。请紧扣该主题理解用户意图，严禁引入与主题无关的专业术语或臆测领域。\n` : '')
+    + '\n用户原话：\n' + q
+  const choice = await aiService.chat(usr, sys, null, { temperature: 0.1, max_tokens: 400, thinking: false })
   const rewritten = String(choice?.message?.content || '').trim()
   return rewritten || q
 }

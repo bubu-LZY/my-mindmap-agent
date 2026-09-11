@@ -232,14 +232,21 @@ export const searchService = {
    * RRF 融合排序；向量模型不可用（未下载/加载失败）时自动降级纯 BM25。
    * @param {string} query 原始问题/核心词
    * @param {string[]} keywords 意图扩展词（可为空，则退化为 query 多词检索）
+   * @param {object} options { currentFilePath?: string } 当前打开文件路径：
+   *   命中当前文件的结果排序加权靠前，避免知识库中无关文件压过当前导图内容
    * @returns {Promise<{results: Array, terms: string[]}>}
    */
-  async semanticSearch(query, keywords = []) {
+  async semanticSearch(query, keywords = [], options = {}) {
     const terms = [...new Set([
       ...(Array.isArray(keywords) ? keywords.map(k => String(k || '').trim()).filter(Boolean) : []),
       String(query || '').trim()
     ].filter(Boolean))]
     if (terms.length === 0) return { results: [], terms }
+
+    // BM25（SQLite 原始路径，Windows 下多为 \ 分隔）与向量库（多为 / 分隔）路径写法不一致，
+    // 融合去重 key 必须先归一化，否则同一文件被当成两条记录、vectorRank 无法合并
+    const normPath = (p) => String(p || '').replace(/[\\/]+/g, '/')
+    const currentFileNorm = options.currentFilePath ? normPath(options.currentFilePath).toLowerCase() : ''
 
     const merged = new Map()
     for (const term of terms) {
@@ -250,7 +257,7 @@ export const searchService = {
         continue
       }
       for (const r of res?.results || []) {
-        const key = `${r.filePath}::${r.nodeUid}`
+        const key = `${normPath(r.filePath)}::${r.nodeUid}`
         if (!merged.has(key)) {
           merged.set(key, { ...r, hitTerms: [term] })
         } else {
@@ -263,7 +270,7 @@ export const searchService = {
     // 本地向量检索（失败静默降级 BM25）
     const vectorHits = await this.vectorSearch(query, 8)
 
-    // RRF 融合：BM25 名次分 + 向量名次分
+    // RRF 融合：BM25 名次分 + 向量名次分（向量权重低于 BM25，避免无关语义近似结果压过精确匹配）
     const bm25Ranked = [...merged.values()]
       .map((result, index) => {
         const content = String(result.snippet || '').replace(/<[^>]+>/g, '')
@@ -272,13 +279,15 @@ export const searchService = {
     const rrfScore = (item) => {
       let s = 0
       if (item.bm25Rank) s += 1 / (60 + item.bm25Rank)
-      if (item.vectorRank) s += 1.2 / (60 + item.vectorRank)
+      if (item.vectorRank) s += 0.8 / (60 + item.vectorRank)
+      // 当前打开文件的命中强加权（0.03 大于任何单项名次分），保证当前导图内容排在最前
+      if (currentFileNorm && normPath(item.filePath).toLowerCase() === currentFileNorm) s += 0.03
       return s
     }
 
-    const vecMerged = new Map(bm25Ranked.map(r => [`${r.filePath}::${r.nodeUid}`, r]))
+    const vecMerged = new Map(bm25Ranked.map(r => [`${normPath(r.filePath)}::${r.nodeUid}`, r]))
     for (const v of vectorHits) {
-      const key = `${v.filePath}::`
+      const key = `${normPath(v.filePath)}::`
       const existing = vecMerged.get(key)
       if (existing) {
         existing.vectorRank = v.rank

@@ -450,7 +450,7 @@ const toolCatalog = [
 
 // 工具调度元数据：不随 OpenAI tools schema 发给模型，避免供应商拒绝未知字段；调度器用它在本地决策。
 export const TOOL_METADATA = {
-  search_web: { cost: 'high', risk: 'low', cacheable: true, readOnly: true, maxCallsPerTask: 2, timeoutMs: 6000 },
+  search_web: { cost: 'high', risk: 'low', cacheable: true, readOnly: true, maxCallsPerTask: 6, timeoutMs: 8000 },
   read_webpage: { cost: 'medium', risk: 'low', cacheable: true, readOnly: true, maxCallsPerTask: 4, timeoutMs: 8000 },
   get_location: { cost: 'low', risk: 'low', cacheable: true, readOnly: true, maxCallsPerTask: 1 },
   search_knowledge_base: { cost: 'low', risk: 'low', cacheable: true, readOnly: true },
@@ -1452,7 +1452,7 @@ export const aiTools = [
       parameters: {
         type: 'object',
         properties: {
-          keyword: { type: 'string', description: 'Single search keyword' },
+          keyword: { type: 'string', description: 'Single search keyword. 参数名是 keyword（query 为兼容别名，优先用 keyword）' },
           keywords: { type: 'array', items: { type: 'string' }, description: 'Multiple search keywords; preferred over repeated calls' },
           mode: { type: 'string', enum: ['any', 'all'], description: 'any=match any keyword (default); all=match all keywords' },
           max_results: { type: 'number', description: 'Maximum results to return, default 200' }
@@ -1481,8 +1481,8 @@ export const aiTools = [
               hasStyle: { type: 'string', description: 'Node has this style type: bold/italic/underline/color/highlight/cloze/nodeFill/note' },
               hasNote: { type: 'boolean', description: 'true = has note; false = no note' },
               isLeaf: { type: 'boolean', description: 'true = leaf node (no children); false = has children' },
-              minDepth: { type: 'number', description: 'Minimum depth (root=0)' },
-              maxDepth: { type: 'number', description: 'Maximum depth (root=0)' }
+              minDepth: { type: 'number', description: 'Minimum depth. root=0, 一级子节点=1, 二级子节点=2（0-based）' },
+              maxDepth: { type: 'number', description: 'Maximum depth. root=0, 一级子节点=1, 二级子节点=2（0-based）' }
             }
           },
           scope: {
@@ -5500,9 +5500,10 @@ ${mindMapTypePrompt(mapType, 'organize')}
       try {
         const rawKeywords = []
         if (args.keyword) rawKeywords.push(String(args.keyword))
+        if (args.query) rawKeywords.push(String(args.query))
         if (Array.isArray(args.keywords)) args.keywords.forEach((k) => rawKeywords.push(String(k)))
         const keywords = [...new Set(rawKeywords.map((k) => normalizeForMatch(k)).filter(Boolean))]
-        if (!keywords.length) return { success: false, message: '请至少提供一个 keyword 或 keywords 参数' }
+        if (!keywords.length) return { success: false, message: '请至少提供一个 keyword（或 query）或 keywords 参数' }
 
         const filePath = String(args.file_path || args.filePath || '').trim()
         let treeData
@@ -5727,7 +5728,7 @@ ${mindMapTypePrompt(mapType, 'organize')}
           const parts = [`${i + 1}.`]
           if (r.plainText) parts.push(r.plainText.slice(0, 60))
           if (r.clozeWords?.length) parts.push(`[挖空: ${r.clozeWords.join('、')}]`)
-          if (r.uid) parts.push(`uid=${r.uid.slice(0, 8)}`)
+          if (r.uid) parts.push(`uid=${r.uid}`)
           return parts.join(' ')
         }).join('\n')
 
@@ -7963,8 +7964,12 @@ ${block}`
         }
 
         // 混合语义检索：BM25 关键词 + 本地向量余弦（E5），RRF 融合排序；向量不可用自动降级 BM25
+        // 传入当前打开文件：命中当前导图的结果排序优先，避免知识库中无关文件压过当前内容
         const terms = [...new Set([...keywords, query.trim()].filter(Boolean))]
-        const { results: ranked } = await searchService.semanticSearch(query, keywords)
+        const curPath = typeof extraHandlers?.currentFilePath === 'function'
+          ? extraHandlers.currentFilePath()
+          : (extraHandlers?.currentFilePath || '')
+        const { results: ranked } = await searchService.semanticSearch(query, keywords, { currentFilePath: curPath })
 
         // LLM 重排：混合召回候选后用模型按相关度精排（候选多时才做；失败自动降级原排序）
         let rankedResults = ranked

@@ -69,7 +69,38 @@ async function initDatabase() {
     console.error('[DB] 表结构升级失败:', e)
   }
 
+  migratePathSeparator()
+
   return db
+}
+
+// 路径统一归一化（Windows 反斜杠 → 正斜杠）。
+// 索引写入方（渲染层）、向量库、目录树列表的路径分隔符不一致，
+// 同一文件会以 C:\a\b.smm 与 C:/a/b.smm 两种形式双写，检索去重失败。
+function normalizePath(p) {
+  return String(p || '').replace(/\\/g, '/')
+}
+
+// 旧库迁移：把历史数据中含 \ 的 file_path 统一为 / 分隔符。
+// 先删掉已存在的同归一化路径记录，避免 files 表 UNIQUE 约束冲突或残留重复。
+function migratePathSeparator() {
+  try {
+    const badIdx = queryRows("SELECT DISTINCT file_path FROM search_index WHERE file_path LIKE '%\\%'")
+    for (const r of badIdx) {
+      const norm = normalizePath(r.file_path)
+      db.run('DELETE FROM search_index WHERE file_path = ?', [norm])
+      db.run('UPDATE search_index SET file_path = ? WHERE file_path = ?', [norm, r.file_path])
+    }
+    const badFiles = queryRows("SELECT DISTINCT file_path FROM files WHERE file_path LIKE '%\\%'")
+    for (const r of badFiles) {
+      const norm = normalizePath(r.file_path)
+      db.run('DELETE FROM files WHERE file_path = ?', [norm])
+      db.run('UPDATE files SET file_path = ? WHERE file_path = ?', [norm, r.file_path])
+    }
+    if (badIdx.length || badFiles.length) saveDatabase()
+  } catch (e) {
+    console.error('[DB] 路径分隔符迁移失败:', e)
+  }
 }
 
 // 数据库写盘节流：db.export() + writeFileSync 是同步阻塞操作，
@@ -375,6 +406,7 @@ function registerDatabaseHandlers() {
   ipcMain.handle('db:indexFile', async (event, { filePath, fileName, treeData, mtime }) => {
     try {
       await initDatabase()
+      filePath = normalizePath(filePath)
 
       db.run('DELETE FROM search_index WHERE file_path = ?', [filePath])
       db.run('DELETE FROM files WHERE file_path = ?', [filePath])
@@ -406,6 +438,7 @@ function registerDatabaseHandlers() {
   ipcMain.handle('db:indexDocument', async (event, { filePath, fileName, fileType, mtime, chunks }) => {
     try {
       await initDatabase()
+      filePath = normalizePath(filePath)
       if (!Array.isArray(chunks) || !chunks.length) return { success: false, error: '没有可索引的内容' }
 
       // 同文件且未修改则跳过重索引
@@ -444,6 +477,7 @@ function registerDatabaseHandlers() {
   ipcMain.handle('db:removeFile', async (event, { filePath }) => {
     try {
       await initDatabase()
+      filePath = normalizePath(filePath)
       db.run('DELETE FROM search_index WHERE file_path = ?', [filePath])
       db.run('DELETE FROM files WHERE file_path = ?', [filePath])
       miniRemoveFile(filePath)

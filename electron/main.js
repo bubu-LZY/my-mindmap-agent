@@ -142,8 +142,8 @@ ipcMain.handle('app:restart', () => {
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000
 const ENGINE_BREAKER_MS = 5 * 60 * 1000
 const ENGINE_FAILURE_THRESHOLD = 3
-const MAX_SEARCHES_PER_TASK = 2
-const MAX_DEEP_RESEARCH_SEARCHES = 6
+const MAX_SEARCHES_PER_TASK = 6
+const MAX_DEEP_RESEARCH_SEARCHES = 10
 const searchCache = new Map()
 const engineFailures = new Map()
 const searchBudgets = new Map()
@@ -370,6 +370,20 @@ ipcMain.handle('web-search', async (event, query) => {
     return results
   }
 
+  const isBaiduAggregated = (link) => {
+    try {
+      const u = new URL(link)
+      const host = u.hostname
+      if (host === 'www.baidu.com' || host === 'm.baidu.com') {
+        // /link?url= 是真实结果的跳转链接，其余（相关搜索、聚合卡片等）视为聚合页
+        return !u.pathname.startsWith('/link')
+      }
+      return false
+    } catch {
+      return true
+    }
+  }
+
   const parseBaidu = (html) => {
     const results = []
     const snippets = []
@@ -381,9 +395,11 @@ ipcMain.handle('web-search', async (event, query) => {
     let picked = 0
     while ((match = titleRe.exec(html)) !== null && results.length < 8) {
       const title = decode(match[2])
-      if (!title) continue
-      results.push({ title, link: normalizeLink(match[1]), snippet: snippets[picked] || '' })
+      const link = normalizeLink(match[1])
       picked++
+      if (!title || !link) continue
+      if (isBaiduAggregated(link)) continue
+      results.push({ title, link, snippet: snippets[picked - 1] || '' })
     }
     return results
   }
