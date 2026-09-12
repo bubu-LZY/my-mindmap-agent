@@ -20,6 +20,7 @@ import { Loading } from '@element-plus/icons-vue'
 import { parseDocument } from '../services/docParseService.js'
 import { textFromHtmlInert } from '../utils/inertDom'
 import { deepSeekOverlayBlocked } from '../utils/deepSeekOverlayGate'
+import { startDeepSeekAutoOverlayGuard } from '../utils/deepSeekAutoOverlayGuard'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
@@ -37,17 +38,43 @@ const viewReady = ref(false)
 let resizeObserver = null
 let rafId = null
 let overlayManuallyHidden = false // 外部手动隐藏标记，防止 ResizeObserver 自动重新显示
+let viewShown = false         // 原生层当前是否真的挂在窗口上（避免每帧重复 add/remove）
+let lastBounds = null         // 上一次下发的 bounds（没变就不重复走 IPC）
+let panelAnimating = false    // 侧边窗宽度动画进行中
+let animSafetyTimer = null
+let panelEl = null
+let stopAutoOverlayGuard = null
+
+// 原生层显隐：只在状态真正变化时才走 IPC。
+// 之前每次尺寸回调都会 show()（= addBrowserView），展开/收起侧边窗时每帧增删一次
+// 原生层，是界面卡顿的主要来源之一。
+const setViewVisible = (visible) => {
+  if (!window.electronAPI?.deepSeekView || !viewReady.value) return
+  if (visible === viewShown) return
+  viewShown = visible
+  if (visible) window.electronAPI.deepSeekView.show()
+  else window.electronAPI.deepSeekView.hide()
+}
 
 // 把容器的屏幕坐标转成窗口坐标（BrowserView 的 bounds 是相对于窗口的）
-const updateBounds = async () => {
+const updateBounds = async (force = false) => {
   if (!panelRef.value) return
+  // 侧边窗正在做宽度动画：动画期间原生层怎么改都跟不上，只会每帧拖慢界面，
+  // 因此先不动，等 transitionend 再一次性对齐。
+  if (panelAnimating && !force) return
   const rect = panelRef.value.getBoundingClientRect()
   
   // 容器不可见时隐藏 BrowserView
   if (rect.width <= 0 || rect.height <= 0) {
-    if (window.electronAPI?.deepSeekView && viewReady.value) {
-      window.electronAPI.deepSeekView.hide()
-    }
+    lastBounds = null
+    setViewVisible(false)
+    return
+  }
+  
+  if (!window.electronAPI?.deepSeekView) return
+  if (!viewReady.value) {
+    // 还没创建：创建
+    initView()
     return
   }
   
@@ -58,20 +85,16 @@ const updateBounds = async () => {
     height: Math.floor(rect.height)
   }
   
-  if (window.electronAPI?.deepSeekView) {
-    if (viewReady.value) {
-      // 已创建：更新位置
-      window.electronAPI.deepSeekView.setBounds(bounds)
-      // 如果不是被外部手动隐藏的，才自动显示
-      // （防止打开日志面板时，ResizeObserver 触发后又把 BrowserView 显示出来）
-      if (!overlayManuallyHidden) {
-        window.electronAPI.deepSeekView.show()
-      }
-    } else {
-      // 还没创建：创建
-      initView()
-    }
+  const changed = !lastBounds ||
+    lastBounds.x !== bounds.x || lastBounds.y !== bounds.y ||
+    lastBounds.width !== bounds.width || lastBounds.height !== bounds.height
+  if (changed) {
+    lastBounds = bounds
+    window.electronAPI.deepSeekView.setBounds(bounds)
   }
+  // 如果不是被外部手动隐藏的，才自动显示
+  // （防止打开日志面板时，ResizeObserver 触发后又把 BrowserView 显示出来）
+  setViewVisible(!overlayManuallyHidden)
 }
 
 // 用 rAF 节流的更新（避免 ResizeObserver 高频触发 IPC）
@@ -104,11 +127,13 @@ const initView = async () => {
     const res = await window.electronAPI.deepSeekView.create(bounds)
     if (res.success) {
       viewReady.value = true
+      viewShown = true
+      lastBounds = bounds
       // create 会把 BrowserView 挂进窗口（即显示）。若此刻正有浮层打开，
       // 必须立刻再隐藏，否则它会盖住设置/记事本等浮层
       if (deepSeekOverlayBlocked.value) {
         overlayManuallyHidden = true
-        window.electronAPI.deepSeekView.hide()
+        setViewVisible(false)
       }
     } else {
       ElMessage.error('DeepSeek 加载失败：' + (res.error || '未知错误'))
@@ -449,6 +474,41 @@ let removeExecuteTool = null
 let removeConsoleLog = null
 let removeIpcDebug = null
 
+// 只有窗口/文档级滚动才会带动面板位置
+const onWindowScroll = (e) => {
+  const t = e?.target
+  if (t === document || t === document.documentElement || t === document.body || t === window) {
+    scheduleUpdate()
+  }
+}
+
+// 侧边窗宽度动画：开始先隐藏原生层，结束再对齐位置。
+// 原生 BrowserView 在动画的每一帧都 setBounds/增删，会让整个界面明显掉帧。
+const onPanelTransitionStart = (e) => {
+  if (e.propertyName !== 'width') return
+  panelAnimating = true
+  setViewVisible(false)
+  // 兜底：transitionend 有可能不触发（元素被隐藏/动画被打断），别把原生层永久藏起来
+  if (animSafetyTimer) clearTimeout(animSafetyTimer)
+  animSafetyTimer = setTimeout(() => {
+    animSafetyTimer = null
+    if (!panelAnimating) return
+    panelAnimating = false
+    updateBounds(true)
+  }, 600)
+}
+
+const onPanelTransitionEnd = (e) => {
+  if (e.propertyName !== 'width') return
+  if (animSafetyTimer) {
+    clearTimeout(animSafetyTimer)
+    animSafetyTimer = null
+  }
+  if (!panelAnimating) return
+  panelAnimating = false
+  updateBounds(true)
+}
+
 onMounted(async () => {
   await nextTick()
   
@@ -501,8 +561,22 @@ onMounted(async () => {
   // 窗口 resize 时也更新
   window.addEventListener('resize', scheduleUpdate)
   
-  // 滚动时也要更新位置（容器可能随滚动移动）
-  window.addEventListener('scroll', scheduleUpdate, true)
+  // 滚动时也要更新位置：面板不在滚动容器内，只有窗口/文档级滚动才会带动它。
+  // 之前用捕获方式监听页面上所有滚动，聊天记录一滚就是一次 IPC，纯属白白增加开销。
+  window.addEventListener('scroll', onWindowScroll, true)
+  
+  // 侧边窗宽度动画期间先藏起原生层，动画结束再一次性对齐位置（消除展开/收起卡顿）
+  panelEl = panelRef.value?.closest('.ai-panel') || null
+  if (panelEl) {
+    panelEl.addEventListener('transitionstart', onPanelTransitionStart)
+    panelEl.addEventListener('transitionend', onPanelTransitionEnd)
+  }
+  
+  // 浮层兜底：任何高层浮层压住 DeepSeek 区域时自动隐藏原生层（漏登记的浮层也能兜住）
+  stopAutoOverlayGuard = startDeepSeekAutoOverlayGuard(() => {
+    if (!panelRef.value) return null
+    return panelRef.value.getBoundingClientRect()
+  })
 })
 
 onBeforeUnmount(() => {
@@ -515,7 +589,20 @@ onBeforeUnmount(() => {
     resizeObserver = null
   }
   window.removeEventListener('resize', scheduleUpdate)
-  window.removeEventListener('scroll', scheduleUpdate, true)
+  window.removeEventListener('scroll', onWindowScroll, true)
+  if (panelEl) {
+    panelEl.removeEventListener('transitionstart', onPanelTransitionStart)
+    panelEl.removeEventListener('transitionend', onPanelTransitionEnd)
+    panelEl = null
+  }
+  if (animSafetyTimer) {
+    clearTimeout(animSafetyTimer)
+    animSafetyTimer = null
+  }
+  if (stopAutoOverlayGuard) {
+    stopAutoOverlayGuard()
+    stopAutoOverlayGuard = null
+  }
   
   // 清理 IPC 监听
   if (removeRequestContext) {
@@ -542,9 +629,9 @@ onBeforeUnmount(() => {
   }
   
   // 隐藏 BrowserView（不销毁，保留登录状态）
-  if (window.electronAPI?.deepSeekView) {
-    window.electronAPI.deepSeekView.hide()
-  }
+  setViewVisible(false)
+  lastBounds = null
+
 })
 
 /**
@@ -554,16 +641,16 @@ onBeforeUnmount(() => {
  */
 watch(deepSeekOverlayBlocked, (blocked) => {
   overlayManuallyHidden = blocked
-  if (!window.electronAPI?.deepSeekView || !viewReady.value) return
+  if (!viewReady.value) return
   if (blocked) {
-    window.electronAPI.deepSeekView.hide()
+    setViewVisible(false)
     return
   }
   nextTick(() => {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        updateBounds()
-        window.electronAPI.deepSeekView.show()
+        updateBounds(true)
+        setViewVisible(true)
       })
     })
   })

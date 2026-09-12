@@ -456,7 +456,7 @@
           :activeNode="activeNode"
           :currentFilePath="currentFilePath"
           :currentFileName="currentFileName"
-          :compact="!aiPanelExpanded"
+          :compact="aiPanelCompact"
           :webSearch="webSearchEnabled"
           :mindMapWindows="mindMapWindows"
           :aiBindFileId="aiBindFileId"
@@ -2101,6 +2101,19 @@ const sidebarLeftOffset = computed(() => {
 
 // AI 面板折叠状态（启动时默认收起，可通过右侧按钮展开）
 const aiPanelExpanded = ref(false)
+// ChatPanel 是个很大的组件，compact 一变整棵子树就要重渲染。侧边窗宽度动画只有 180ms，
+// 若在动画期间切换 compact，就会"一边做布局动画一边重渲染"，展开/收起明显卡顿。
+// 这里让 compact 等动画结束再切：动画期间界面只管走宽度。
+const aiPanelCompact = ref(true)
+let aiPanelCompactTimer = null
+watch(aiPanelExpanded, (expanded) => {
+  if (aiPanelCompactTimer) clearTimeout(aiPanelCompactTimer)
+  aiPanelCompactTimer = setTimeout(() => {
+    aiPanelCompactTimer = null
+    aiPanelCompact.value = !expanded
+  }, 200)
+})
+
 // 右下角视图切换按钮应保持在画布区域内，右侧 AI 助手展开时向右偏移，避免盖在侧边窗上。
 const globalActionsRight = computed(() => {
   let offset = 16
@@ -4482,6 +4495,9 @@ const applyToggleStyleShortcut = (action, styleLabel, verb) => {
 
 // ========== 全屏节点搜索（Ctrl+F）：思维导图/大纲模式下的节点搜索 ==========
 const nodeSearchVisible = ref(false)
+// 搜索条横跨整个窗口，展开时会压在 DeepSeek 网页模式（原生层）下面
+watch(nodeSearchVisible, (val) => blockDeepSeekOverlay('node-search', val))
+
 const nodeSearchText = ref('')
 const nodeSearchCount = ref(0)
 const nodeSearchIndex = ref(-1)

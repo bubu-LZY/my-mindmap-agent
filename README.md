@@ -4,30 +4,26 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.19.3-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.19.4-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.19.3 更新
+## 🆕 v4.19.4 更新
 
-**界面细节修复与 DeepSeek 网页模式浮层遮挡**
+**DeepSeek 网页模式：修掉「点初始化后连环发消息」，浮层遮挡与展开卡顿**
 
 | 分类 | 内容 |
 |------|------|
-| 🎯 修复 | 设置页目录顺序与文档顺序不一致，导致滚动高亮落到错误区块 |
-| 🎯 修复 | 右键拖动画布平移后不再丢失已选中的多个节点 |
-| 🎯 修复 | 思维导图浮动工具条自动避让右侧 AI 面板，不再互相遮挡 |
-| 🎯 修复 | 标签栏「清空」按钮固定显示在最前（红色），不再需要悬浮才出现 |
-| 🌐 修复 | DeepSeek 网页模式悬浮球拖拽跟手，位置按布局像素存储并夹回可见区域 |
-| 🌐 修复 | DeepSeek 网页模式不再遮挡设置/记事本/快捷键等浮层：打开任意浮层时自动收起，全部关闭后恢复 |
-| ⚡ 优化 | 顶栏按钮间距收窄，文件名在窗口变窄时保持居中且标签不折行 |
-| ⚡ 优化 | 顶部标签宽度收窄，同屏可容纳更多标签 |
+| 🌐 修复 | 点「初始化」不再把提示词里的 mymindmap 示例当成工具执行，不再连环给 AI 发消息 |
+| 🌐 修复 | 网页版 DeepSeek 不再浮在其他面板之上：新增浮层兜底闸门，漏登记的浮层也能自动隐藏 |
+| 🌐 优化 | 展开/收起右侧 AI 助手不再卡顿（宽度动画期间不再逐帧重设原生层位置） |
+| ⚡ 优化 | compact 布局推迟到展开动画结束后再切换，少一次整树重渲染 |
 
-> v4.19.2 的设置界面滚动性能修复、v4.19.1 的自动更新链路修复与 v4.19.0 的应用内自动更新见上一版说明。
+> v4.19.3 的界面细节修复、v4.19.2 的设置界面滚动性能修复与 v4.19.1 的自动更新链路修复见上一版说明。
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.3)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.4)
 
 ---
 

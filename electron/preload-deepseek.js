@@ -49,6 +49,7 @@ const state = {
   summaryExpanded: false, // 总结面板是否展开
   isSendingMessage: false, // 正在发送消息（防止扫描自己刚发的内容）
   lastSendTime: 0,    // 上次发送时间（冷却期内不扫描）
+  initGraceUntil: 0,  // 点击初始化后的宽限期：此时间点前不做自动扫描，避免误读初始化提示词
 }
 
 // 修改类工具列表（初始化阶段和非用户明确指令时禁止执行）
@@ -106,6 +107,64 @@ function countUserMessages() {
   }
 }
 
+// ========== 自身注入消息指纹（防止"我们发出去的消息"被当成 AI 回复解析） ==========
+// 初始化提示词里带着 mymindmap 示例代码块。页面一旦把这条用户消息回显成带 markdown
+// 的消息（角色标记或 DOM 结构变化），扫描器就会把示例当成 AI 的真实工具调用去执行，
+// 执行结果又回传给 AI → 触发下一轮扫描，表现为"点完初始化就连续给 AI 发消息"。
+// 这里记录我们发出的每一条文本指纹（含去掉代码块围栏的归一化形式），命中即跳过。
+// 初始化宽限期长度：点完初始化后这段时间内不做自动扫描
+const INIT_GRACE_MS = 15000
+const SELF_SENT_MAX = 40
+const selfSentNormTexts = new Set()
+const selfSentNormPrefixes = new Set()
+
+function normalizeMessageText(s) {
+  return String(s || '')
+    // 代码块围栏在渲染后不显示，比对前统一去掉
+    .replace(/```[a-zA-Z0-9_-]*/g, '')
+    .replace(/\s+/g, '')
+}
+
+function markSelfSentText(text) {
+  const norm = normalizeMessageText(text)
+  if (norm.length < 10) return
+  selfSentNormTexts.add(norm)
+  selfSentNormPrefixes.add(norm.slice(0, 200))
+  while (selfSentNormTexts.size > SELF_SENT_MAX) {
+    const first = selfSentNormTexts.values().next().value
+    selfSentNormTexts.delete(first)
+  }
+  while (selfSentNormPrefixes.size > SELF_SENT_MAX) {
+    const first = selfSentNormPrefixes.values().next().value
+    selfSentNormPrefixes.delete(first)
+  }
+}
+
+function isSelfSentText(text) {
+  const norm = normalizeMessageText(text)
+  if (norm.length < 10) return false
+  if (selfSentNormTexts.has(norm)) return true
+  // 页面可能给消息补上额外内容（复制按钮文字等），因此再比对一次归一化后的头部
+  return selfSentNormPrefixes.has(norm.slice(0, 200))
+}
+
+// 自身注入文本的正文特征：即使代码块围栏被渲染掉也仍然存在
+const OWN_INJECTED_MARKERS = [
+  '操作节点前先用 search_nodes 获取节点 uid',
+  '工具执行结果会自动发送回来，你可以基于结果继续推理',
+  '### 🛠️ 元工具（查询工具本身）',
+  '以上是工具执行结果。请根据用户的实际需求决定下一步',
+]
+
+function isOwnInjectedText(text) {
+  const t = String(text || '')
+  if (!t) return false
+  if (INIT_MESSAGE_PREFIX_RE.test(t)) return true
+  for (const m of OWN_INJECTED_MARKERS) {
+    if (t.includes(m)) return true
+  }
+  return false
+}
 // ========== 发送频率限流（防止触发 DeepSeek 消息频率限制） ==========
 const MIN_SEND_INTERVAL = 6000 // 最小发送间隔 6 秒
 let sendQueue = [] // 待发送消息队列
@@ -226,6 +285,7 @@ async function doRawSend(text) {
   const sendBtn = findSendButton()
   if (sendBtn) {
     sendBtn.click()
+    markSelfSentText(text)
     state.lastSendTime = Date.now()
     state.isSendingMessage = true
     setTimeout(() => { state.isSendingMessage = false }, 3000)
@@ -238,6 +298,7 @@ async function doRawSend(text) {
     input.dispatchEvent(new KeyboardEvent('keydown', opts))
     input.dispatchEvent(new KeyboardEvent('keypress', opts))
     input.dispatchEvent(new KeyboardEvent('keyup', opts))
+    markSelfSentText(text)
     state.lastSendTime = Date.now()
     state.isSendingMessage = true
     setTimeout(() => { state.isSendingMessage = false }, 3000)
@@ -1192,6 +1253,9 @@ function injectBottomBar() {
     state.initialized = false
     state.detectedHashes.clear()
     state.lastAIMessage = ''
+    // 宽限期内不做自动扫描：等 AI 先对初始化提示词给出回应，
+    // 免得把刚发出去的提示词里的示例当成 AI 的工具调用
+    state.initGraceUntil = Date.now() + INIT_GRACE_MS
     
     // 点击初始化后，自动收起面板变成悬浮球
     const bar = document.getElementById('mma-bottom-bar')
@@ -1907,6 +1971,7 @@ function handleNewConversation(reason = '未知') {
   // 重置稳定性校验和已处理消息（原项目做法）
   lastContentHash = ''
   lastContentFirstSeen = 0
+  state.initGraceUntil = 0
   if (stableTimer) { clearTimeout(stableTimer); stableTimer = null }
   isProcessing = false
   // processedMessages 是 WeakSet，无法清空，但新对话消息节点都是新的，不影响
@@ -1975,6 +2040,7 @@ ipcRenderer.on('mindmap-context', async (event, context) => {
   const success = await injectAndSend(initMessage)
   
   if (success) {
+    state.initGraceUntil = Date.now() + INIT_GRACE_MS
     updateStatus('已初始化', 'done')
     addSystemLog('初始化完成', '消息已成功发送', 'success')
     setTimeout(() => updateStatus('就绪', ''), 2000)
@@ -2564,15 +2630,26 @@ function injectToolDetector() {
     const parts = []
     try {
       const messages = document.querySelectorAll('.ds-message')
-      for (const msg of messages) {
-        if (isUserMessage(msg)) continue
+      // 只收"当前这一轮"的 AI 消息：从最后一条往前收，遇到用户消息或我们自己注入的消息就停。
+      // 历史轮次里的旧工具调用绝不能拿来执行，否则会把很早以前的指令重放一遍。
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i]
         const t = msg.innerText || ''
-        if (t.trim()) parts.push(t)
+        if (isUserMessage(msg)) break
+        if (t.trim() && (isSelfSentText(t) || isOwnInjectedText(t))) break
+        if (t.trim()) parts.unshift(t)
       }
     } catch (e) {
       console.log(`[🧠 Agent] collectAIMessagesText: 收集 AI 消息失败: ${e.message}`)
     }
     return parts.join('\n')
+  }
+
+  // 工具名必须是 ASCII 小写 + 下划线（如 list_tools / add_child_nodes）。
+  // 初始化提示词里的 {"tool": "工具名"} 这类占位符必须在这里挡掉，
+  // 否则会被当成真实工具去执行，并把"执行失败"再回传给 AI。
+  function isValidToolName(name) {
+    return typeof name === 'string' && /^[a-z][a-z0-9_]{1,40}$/.test(name)
   }
 
   function parseToolCalls(markdownEl) {
@@ -2583,6 +2660,14 @@ function injectToolDetector() {
     }
     
     const text = markdownEl.innerText || ''
+
+    // 🛡️ 硬拦截：用户消息（含我们自己注入的初始化提示词）里也有 mymindmap 示例，
+    // 绝不能把它们当成 AI 的工具调用去执行。
+    if (isUserMessage(markdownEl) || isSelfSentText(text) || isOwnInjectedText(text)) {
+      console.log('[🧠 Agent] parseToolCalls: 来源为用户消息/自身注入消息，拒绝解析工具调用')
+      return calls
+    }
+
     console.log(`[🧠 Agent] parseToolCalls: markdown 文本总长度: ${text.length}`)
     
     // ========== 第一优先级：文本正则匹配（最可靠，不依赖 DOM 结构）==========
@@ -2600,7 +2685,7 @@ function injectToolDetector() {
           const obj = JSON.parse(codeStr)
           const name = obj.tool || obj.name
           const params = obj.params || obj.arguments || obj.args || {}
-          if (name && typeof name === 'string' && name.length > 1) {
+          if (isValidToolName(name)) {
             calls.push({ name, params })
             console.log(`[🧠 Agent] parseToolCalls: ✅ 从文本正则匹配到工具: ${name}`)
           }
@@ -2639,7 +2724,7 @@ function injectToolDetector() {
           const obj = JSON.parse(blockText.trim())
           const name = obj.tool || obj.name
           const params = obj.params || obj.arguments || obj.args || {}
-          if (name && typeof name === 'string' && name.length > 1) {
+          if (isValidToolName(name)) {
             // 额外校验：name 必须是合理的工具名（字母数字下划线），防止误识别普通 JSON
             if (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name) || /^[a-zA-Z][a-zA-Z0-9_]*_[a-zA-Z0-9_]+/.test(name)) {
               calls.push({ name, params })
@@ -2655,7 +2740,7 @@ function injectToolDetector() {
               const obj = JSON.parse(match[0])
               const name = obj.tool || obj.name
               const params = obj.params || obj.arguments || obj.args || {}
-              if (name && typeof name === 'string' && name.length > 1) {
+              if (isValidToolName(name)) {
                 if (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name) || /^[a-zA-Z][a-zA-Z0-9_]*_[a-zA-Z0-9_]+/.test(name)) {
                   calls.push({ name, params })
                   console.log(`[🧠 Agent] parseToolCalls: ✅ 从 pre 提取 JSON 解析到工具: ${name}`)
@@ -2680,7 +2765,7 @@ function injectToolDetector() {
           const obj = JSON.parse(jsonMatch[0])
           const name = obj.tool || obj.name
           const params = obj.params || obj.arguments || obj.args || {}
-          if (name && typeof name === 'string' && name.length > 1) {
+          if (isValidToolName(name)) {
             calls.push({ name, params })
             console.log(`[🧠 Agent] parseToolCalls: ✅ 宽松匹配到工具: ${name}`)
           }
@@ -2763,7 +2848,7 @@ function injectToolDetector() {
                 const obj = JSON.parse(jsonStr)
                 const name = obj.tool || obj.name
                 const params = obj.params || obj.arguments || obj.args || {}
-                if (name && typeof name === 'string' && name.length > 1) {
+                if (isValidToolName(name)) {
                   // 校验：必须是合理的工具名（避免误识别其他 JSON）
                   if (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name) || /^[a-zA-Z][a-zA-Z0-9_]*_[a-zA-Z0-9_]+/.test(name)) {
                     calls.push({ name, params })
@@ -2952,6 +3037,24 @@ function injectToolDetector() {
     }
     
     const text = getCleanText(markdownEl)
+    // 🛡️ 自身消息拦截：初始化提示词 / 工具结果回传 / 总结请求在页面里同样是带 markdown 的消息。
+    // 一旦被当成 AI 回复解析，提示词里的 mymindmap 示例就会被当成真实工具调用执行，
+    // 执行结果再回传 → 触发下一轮扫描，表现成"点完初始化就连续给 AI 发消息"。
+    // 这里直接跳过：不解析、不执行、不回传。
+    if (isSelfSentText(text) || isOwnInjectedText(text)) {
+      console.log('[🧠 Agent] checkForToolCalls: 命中自身注入消息（提示词/结果回传），跳过')
+      return
+    }
+
+    // 初始化宽限期：刚点完「初始化」先等 AI 对提示词给出回应，期间不做自动扫描，
+    // 避免把初始化过程误判成 AI 已经发出了工具调用。
+    if (!isManual && state.initGraceUntil && Date.now() < state.initGraceUntil) {
+      console.log('[🧠 Agent] checkForToolCalls: 初始化宽限期内，跳过自动扫描')
+      return
+    }
+
+    // 内容指纹提前算好：下面的「完成度兜底」判断要用到它
+    const h = hash(text)
     if (text.length < 30 && !isManual) {
       return
     }
@@ -2969,8 +3072,6 @@ function injectToolDetector() {
         console.log(`[🧠 Agent] checkForToolCalls: UI未检测到完成，但内容已稳定${stableTime}ms，兜底认为已完成`)
       }
     }
-    
-    const h = hash(text)
     
     // 非手动模式下，稳定性校验：内容 800ms 内没变化才认为稳定
     if (!isManual) {
@@ -3121,21 +3222,22 @@ function executeTool(toolId) {
     return
   }
 
-  // 🛡️ 初始化阶段硬拦截：用户还没说过话时，禁止执行修改类工具
-  // 防止 AI 在自我介绍阶段就自作主张修改导图
+  // 🛡️ 初始化阶段硬拦截：用户还没说过话时，一个工具都不执行（不只是修改类）。
+  // 理由：初始化提示词里带着 mymindmap 示例，只要示例被误当成 AI 的工具调用，
+  // 执行结果一回传就会引发下一轮扫描 → 表现成"点完初始化就连续给 AI 发消息"。
+  // 用户没提需求时本来也不该有任何主动操作。
   const userMsgCount = countUserMessages()
   const isWriteTool = WRITE_TOOLS.has(tc.name)
-  if (userMsgCount === 0 && isWriteTool) {
-    const warnMsg = `初始化阶段拦截：用户尚未发送任何消息，禁止执行修改类工具「${tc.name}」。请等待用户明确提出需求后再操作。`
+  if (userMsgCount === 0) {
+    const warnMsg = `初始化阶段拦截：用户尚未发送任何消息，不执行${isWriteTool ? '修改类' : ''}工具「${tc.name}」。`
     console.warn('[🧠 Agent]', warnMsg)
     tc.status = 'blocked'
     tc.error = warnMsg
     updateStatus(`${tc.name} 已拦截`, 'warning')
     renderLogPanel()
     updateLogBadge()
-    addSystemLog('已拦截', `初始化阶段禁止修改：${tc.name}`, 'warning')
-    // 回传给 AI，明确告知被拦截的原因
-    sendResultToAI(tc.name, null, warnMsg)
+    addSystemLog('已拦截', `用户尚未发言，跳过：${tc.name}`, 'warning')
+    // 刻意不回传：回传就是"连环发消息"的燃料
     return
   }
   
@@ -3279,6 +3381,7 @@ async function injectAndSend(text) {
     console.log('[🧠 Agent] injectAndSend: 找到发送按钮，执行点击')
     sendBtn.click()
     console.log('[🧠 Agent] injectAndSend: 发送按钮点击完成')
+    markSelfSentText(text)
     state.lastSendTime = Date.now()
     state.isSendingMessage = true
     setTimeout(() => { state.isSendingMessage = false }, 3000)
@@ -3292,6 +3395,7 @@ async function injectAndSend(text) {
     input.dispatchEvent(new KeyboardEvent('keypress', opts))
     input.dispatchEvent(new KeyboardEvent('keyup', opts))
     console.log('[🧠 Agent] injectAndSend: 已通过 Enter 键序列触发发送')
+    markSelfSentText(text)
     state.lastSendTime = Date.now()
     state.isSendingMessage = true
     setTimeout(() => { state.isSendingMessage = false }, 3000)
