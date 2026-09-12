@@ -11,7 +11,9 @@
  * 只实现"离线能跑通"的部分：
  *   - 已实现：默认保存目录、文件树 listDir/exists、打开 readFile/openFile、保存 writeFile/saveFile、
  *             新建/重命名/删除/移动、复制粘贴所需的读写、示例数据
- *   - 仅作展示：AI 对话返回固定文案（不发起真实请求）；更新/三方集成/云盘/MCP/OCR 等依赖主进程
+ *   - 仅作展示：AI 对话返回固定文案（不发起真实请求）；AI 定时任务给出完整界面所需的数据
+ *              （任务存在 localStorage，可新建/编辑/启停/删除），但不会真正触发——
+ *              真实调度依赖 Windows 任务计划程序；更新/三方集成/云盘/MCP/OCR 等依赖主进程
  *              或凭据的能力不在此定义，前端自身的 `window.electronAPI?.xxx` 守卫会提示或忽略
  *
  * 在 Electron 中运行时 window.electronAPI 已存在，本文件立即返回，不做任何事。
@@ -572,6 +574,128 @@
    * ============================================================ */
   var noop = function () { return Promise.resolve(null) }
   var unsubscribe = function () { return function () {} }
+
+  /* ============================================================
+   * AI 定时任务：完整展示，不真正触发
+   * 桌面版把任务注册到 Windows 任务计划程序（schtasks.exe）由系统到点拉起应用；
+   * 浏览器里没有这层能力，若直接缺失 taskScheduler，面板只会显示"仅在桌面应用模式下可用"，
+   * 在线演示就看不到这个功能。这里按 preload.js 的同名契约实现一份 localStorage 存储：
+   * 面板能正常渲染、可新建/编辑/启停/删除，任务数据留在访问者本机浏览器里。
+   * ============================================================ */
+  var TASK_KEY = 'MM_WEB_DEMO_TASKS_V1'
+
+  var pad2 = function (n) { return (n < 10 ? '0' : '') + n }
+  var fmtDatetime = function (d) {
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+      ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes())
+  }
+
+  // 首次进入时铺三条示例任务，分别覆盖 once / daily / weekly，
+  // 其中一条禁用，好把「启用」这类状态差异也展示出来
+  var seedTasks = function () {
+    var now = new Date()
+    var at = function (dayOffset, hh, mm) {
+      return fmtDatetime(new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset, hh, mm, 0, 0))
+    }
+    var from = function (id, name, prompt, datetime, cycle, enabled, agoDays) {
+      return [id, {
+        taskId: id,
+        name: name,
+        prompt: prompt,
+        datetime: datetime,
+        cycle: cycle,
+        enabled: enabled,
+        createdAt: now.getTime() - agoDays * 86400000
+      }]
+    }
+    return Object.fromEntries([
+      from('demo_task_daily', '每日学习总结',
+        '读取今天修改过的导图文件，按「已掌握 / 待巩固」两栏总结知识点，并把薄弱节点加入明天的复习计划。',
+        at(0, 21, 30), 'daily', true, 5),
+      from('demo_task_weekly', '每周知识库巡检',
+        '扫描知识库中超过 30 天未复习的文件，生成待复习清单，并统计每个文件的节点数变化。',
+        at(3, 9, 0), 'weekly', true, 3),
+      from('demo_task_once', '把读书笔记整理成导图',
+        '把《深度工作》读书笔记（.md）转换为思维导图，按章节分层，并为每个章节提炼 3 个关键点。',
+        at(1, 20, 0), 'once', false, 1)
+    ])
+  }
+
+  var saveTasks = function (tasks) {
+    try { localStorage.setItem(TASK_KEY, JSON.stringify(tasks)) } catch (e) { /* 容量超限忽略 */ }
+  }
+  var loadTasks = function () {
+    try {
+      var raw = localStorage.getItem(TASK_KEY)
+      if (raw) {
+        var parsed = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+      }
+    } catch (e) { /* 损坏则重建 */ }
+    var seeded = seedTasks()
+    saveTasks(seeded)
+    return seeded
+  }
+  // 与主进程一致：一次性任务的触发时间必须在将来，否则 Windows 会在创建后立即补触发
+  var isPastOnce = function (task) {
+    if (task.cycle !== 'once' || !task.datetime) return false
+    var t = new Date(String(task.datetime).replace(' ', 'T'))
+    return !isNaN(t.getTime()) && t.getTime() <= Date.now()
+  }
+
+  var upsertTask = function (task) {
+    if (!task || typeof task !== 'object') {
+      return { success: false, error: '无效的任务参数' }
+    }
+    if (!String(task.name || '').trim() || !task.datetime) {
+      return { success: false, error: '任务名称与触发时间不能为空' }
+    }
+    if (isPastOnce(task)) {
+      return { success: false, error: '一次性任务的触发时间已过去，请重新选择未来时间后再创建/保存' }
+    }
+    var tasks = loadTasks()
+    var taskId = task.taskId || ('demo_task_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6))
+    var prev = tasks[taskId]
+    tasks[taskId] = {
+      taskId: taskId,
+      name: String(task.name).trim(),
+      prompt: task.prompt || '',
+      datetime: task.datetime,
+      cycle: task.cycle || 'once',
+      enabled: task.enabled !== false,
+      createdAt: prev ? prev.createdAt : Date.now(),
+      updatedAt: Date.now()
+    }
+    saveTasks(tasks)
+    // skipped 与主进程同义：任务被禁用时不注册系统计划任务，只留元数据
+    return { success: true, taskId: taskId, skipped: tasks[taskId].enabled === false }
+  }
+
+  api.taskScheduler = {
+    create: function (task) { return Promise.resolve(upsertTask(task)) },
+    update: function (task) { return Promise.resolve(upsertTask(task)) },
+    delete: function (taskId) {
+      var tasks = loadTasks()
+      if (Object.prototype.hasOwnProperty.call(tasks, taskId)) {
+        delete tasks[taskId]
+        saveTasks(tasks)
+      }
+      return Promise.resolve({ success: true })
+    },
+    list: function () { return Promise.resolve(Object.keys(loadTasks())) },
+    getAll: function () { return Promise.resolve(loadTasks()) },
+    // 浏览器里没有系统任务计划程序可登记，如实返回 0 个创建，而不是伪造同步结果
+    syncAll: function () {
+      return Promise.resolve({
+        success: true,
+        synced: Object.keys(loadTasks()).length,
+        created: 0,
+        deleted: 0,
+        failed: 0
+      })
+    },
+    onScheduledTrigger: unsubscribe
+  }
 
   api.updater = {
     getState: function () { return Promise.resolve({ status: 'idle' }) },
