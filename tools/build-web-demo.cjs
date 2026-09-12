@@ -12,6 +12,7 @@
  * bridge.js 在 Electron 中检测到已有 window.electronAPI 会直接返回，因此桌面版不受影响；
  * 这里只在发布产物上注入，不改动 dist/ 与打包进安装包的 index.html。
  */
+const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 
@@ -35,12 +36,17 @@ fs.rmSync(outDir, { recursive: true, force: true })
 fs.mkdirSync(outDir, { recursive: true })
 fs.cpSync(distDir, outDir, { recursive: true })
 
-fs.copyFileSync(bridgeSrc, path.join(outDir, 'bridge.js'))
+// bridge.js 的文件名不像 vite 产物那样带内容哈希，浏览器会把旧副本一直用下去，
+// 于是改了桥接层却看不到变化（例如在线版仍显示"仅桌面模式可用"）。
+// 给它的 src 挂上内容哈希做缓存失效：文件一变，URL 就变。
+const bridgeBuf = fs.readFileSync(bridgeSrc)
+fs.writeFileSync(path.join(outDir, 'bridge.js'), bridgeBuf)
+const bridgeVer = crypto.createHash('sha256').update(bridgeBuf).digest('hex').slice(0, 8)
 
 const indexPath = path.join(outDir, 'index.html')
 let html = fs.readFileSync(indexPath, 'utf8')
 
-const TAG = '<script src="./bridge.js"></script>'
+const TAG = `<script src="./bridge.js?v=${bridgeVer}"></script>`
 if (html.includes('bridge.js')) {
   console.log('[web-demo] index.html 已包含 bridge.js，跳过注入')
 } else {
