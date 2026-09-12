@@ -370,12 +370,11 @@ body {
 .modal-btn.primary { background: var(--apple-blue); color: #fff; }
 .modal-btn.primary:hover { background: var(--apple-blue-hover); }
 .modal-btn.secondary { background: var(--bg-hover); color: var(--text-primary); }
+</style>
 
-/* ================================================================
- * 数据：与真实程序示例文件结构保持一致
- * ================================================================ */
-<script src="app.js" defer>
-  // 加载失败兜底：直接在页面提示，避免白屏看不到原因
+<script>
+  // 加载失败兜底：直接在页面提示，避免白屏看不到原因。
+  // 注意必须与 app.js 拆成两个 script：带 src 的 script 会忽略标签体内的内联代码。
   window.addEventListener('error', function (e) {
     if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
       console.error('[demo] 资源加载失败:', e.target.src || e.target.href);
@@ -386,6 +385,8 @@ body {
     }
   }, true);
 </script>
+
+<script src="app.js" defer></script>
 
 </head>
 <body>

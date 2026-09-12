@@ -1,5 +1,12 @@
 <template>
-  <div ref="settingsViewRef" class="settings-view" @scroll="onSettingsScroll">
+  <div
+    ref="settingsViewRef"
+    class="settings-view"
+    @scroll="onSettingsScroll"
+    @wheel="onUserScroll"
+    @touchstart="onUserScroll"
+    @mousedown="onUserScroll"
+  >
     <div class="settings-layout">
       <nav class="settings-toc">
         <ul>
@@ -974,7 +981,7 @@
       <p v-else-if="updateState.status === 'available'" style="color: #e6a23c;">
         发现新版本 {{ updateState.latestVersion }}（当前 {{ updateState.currentVersion }}）。
       </p>
-      <p>my-mindmap agent v4.19.1</p>
+      <p>my-mindmap agent v4.19.2</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
@@ -3445,35 +3452,71 @@ const selectRclonePath = async () => {
 
 // 缓存 section 元素引用，避免滚动时反复 getElementById
 const sectionElsCache = {}
+// 各 section 顶部相对滚动容器的偏移。缓存后按位置判定高亮，
+// 不再每帧对 19 个区块调 getBoundingClientRect 触发强制同步布局
+let sectionTops = []
 // rAF 节流标记：scroll 事件高频触发，合并到每帧最多一次
 let scrollRaf = null
+// 点击目录后的高亮锁定。平滑滚动过程中会连续触发 scroll 事件，位置判定会把高亮刷成
+// 沿途经过的区块；末尾几个区块又顶不到容器顶部（最多滚到 maxScroll），位置判定永远选不到它们，
+// 表现为「点两次才生效」。所以点击后先锁住高亮，等用户自己滚动（滚轮/触摸/拖动滚动条）再解锁
+let navLock = null
+
+const setActiveSection = (id) => {
+  if (id && activeSection.value !== id) activeSection.value = id
+}
+
+const refreshSectionTops = () => {
+  // 必须按文档位置排序：目录顺序和 DOM 顺序并不一致（部分区块在文档里排在目录更靠后的位置），
+  // applyActiveByScroll 依赖升序 + 提前 break，不排序会漏掉中间的区块
+  sectionTops = tocSections
+    .map(s => {
+      const el = sectionElsCache[s.id]
+      return el ? { id: s.id, top: el.offsetTop } : null
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.top - b.top)
+}
+
+const applyActiveByScroll = () => {
+  const c = settingsViewRef.value
+  if (!c || sectionTops.length === 0) return
+  // 滚到底时末尾区块无法顶到容器顶部，位置判定永远选不到它，这里直接兜底
+  if (c.scrollTop + c.clientHeight >= c.scrollHeight - 2) {
+    setActiveSection(sectionTops[sectionTops.length - 1].id)
+    return
+  }
+  const line = c.scrollTop + 100
+  let current = sectionTops[0].id
+  for (const s of sectionTops) {
+    if (s.top > line) break
+    current = s.id
+  }
+  setActiveSection(current)
+}
+
+// 用户自己滚动（滚轮 / 触摸 / 拖动滚动条）时解锁，之后高亮交回位置判定
+const onUserScroll = () => {
+  navLock = null
+}
 
 const onSettingsScroll = () => {
   if (scrollRaf) return
   scrollRaf = requestAnimationFrame(() => {
     scrollRaf = null
-    const container = settingsViewRef.value
-    if (!container) return
-    // 容器自身在视口内的位置不随内部滚动变化，缓存一次即可
-    if (!settingsTopCache) settingsTopCache = container.getBoundingClientRect().top
-    const top = settingsTopCache + 100
-    let current = 'sec-ai-config'
-    for (const s of tocSections) {
-      const el = sectionElsCache[s.id]
-      if (!el) continue
-      if (el.getBoundingClientRect().top <= top) current = s.id
-    }
-    if (current !== activeSection.value) activeSection.value = current
+    if (navLock) return
+    applyActiveByScroll()
   })
 }
 
 const scrollToSection = (id) => {
   const doScroll = () => {
     const el = sectionElsCache[id] || document.getElementById(id)
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      activeSection.value = id
-    }
+    if (!el) return
+    navLock = id
+    setActiveSection(id)
+    // 末尾区块滚不到容器顶部，scrollIntoView 停在 maxScroll，锁会一直保留到用户自己滚动
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
   // 进入「全局 Token 管理」目录：未设密码直接滚动（显示锁定提示）；
   // 已设密码但未解锁 → 先验证密码，验证通过后解锁并加载；已解锁 → 直接滚动（不再重复验证）
@@ -3492,28 +3535,26 @@ const scrollToSection = (id) => {
   doScroll()
 }
 
-let tocObserver = null
-let settingsTopCache = 0
+// 内容高度变化（展开/收起、异步加载的技能列表等）会改变各区块偏移，需重新量一次。
+// ResizeObserver 只在尺寸真正变化时回调，不参与滚动路径
+let tocResizeObserver = null
 
 const setupTocObserver = () => {
   const container = settingsViewRef.value
-  if (!container || typeof IntersectionObserver === 'undefined') return
-  // 预填充 section 元素缓存，供 onSettingsScroll 与 IntersectionObserver 共用
+  if (!container) return
+  // 预填充 section 元素缓存，供 scrollToSection 直接取用
   for (const s of tocSections) {
     const el = document.getElementById(s.id)
     if (el) sectionElsCache[s.id] = el
   }
-  // 用 IntersectionObserver 替代昂贵的 getBoundingClientRect 循环：
-  // root 指定为设置界面的滚动容器，滚动时浏览器异步回调，不阻塞主线程
-  tocObserver = new IntersectionObserver((entries) => {
-    const visible = entries
-      .filter(e => e.isIntersecting)
-      .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
-    if (visible.length > 0) {
-      activeSection.value = visible[0].target.id
+  refreshSectionTops()
+  if (typeof ResizeObserver !== 'undefined') {
+    const content = container.querySelector('.settings-content')
+    if (content) {
+      tocResizeObserver = new ResizeObserver(() => refreshSectionTops())
+      tocResizeObserver.observe(content)
     }
-  }, { root: container, rootMargin: '-80px 0px -70% 0px', threshold: 0 })
-  Object.values(sectionElsCache).forEach(el => tocObserver.observe(el))
+  }
 }
 
 onMounted(() => {
@@ -3544,7 +3585,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (tocObserver) { tocObserver.disconnect(); tocObserver = null }
+  if (tocResizeObserver) { tocResizeObserver.disconnect(); tocResizeObserver = null }
+  if (scrollRaf) { cancelAnimationFrame(scrollRaf); scrollRaf = null }
 })
 </script>
 
@@ -3632,9 +3674,9 @@ onBeforeUnmount(() => {
 
 /* ---------- 设置区块 ---------- */
 .settings-section {
-  background: rgba(255, 255, 255, 0.72);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  /* 不用 backdrop-filter：19 个区块各是一个模糊层，滚动时每帧都要重新合成，
+     实测占掉约 20% 的滚动帧时间；底色本就接近纯白，去掉视觉上几乎无差别 */
+  background: rgba(255, 255, 255, 0.92);
   border: 1px solid rgba(0, 0, 0, 0.06);
   border-radius: 16px;
   padding: 24px;

@@ -203,8 +203,17 @@ body {
 
 .el-overlay {
   background-color: var(--overlay-bg) !important;
-  -webkit-backdrop-filter: var(--blur-amount);
-  backdrop-filter: var(--blur-amount);
+  /* 不做整屏 backdrop-filter：20px 模糊覆盖整个视口，弹窗内每滚动一帧都要重新栅格化
+     底层内容（思维导图 + 多个毛玻璃面板），实测设置页滚动帧耗时从 23ms 涨到 48ms。
+     遮罩本身就是 40% 黑，去掉模糊视觉上几乎无差别 */
+}
+
+/* 模态弹窗打开时，底层应用被 40% 黑遮罩盖住，它的毛玻璃基本看不见，
+   却仍要跟着弹窗内容一起重新栅格化（实测约占设置页滚动 12ms/帧）。
+   el-popup-parent--hidden 由 Element Plus 在锁定滚动时加到 body 上，只有模态弹窗/抽屉会出现 */
+body.el-popup-parent--hidden .app-container * {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
 }
 
 /* Message */

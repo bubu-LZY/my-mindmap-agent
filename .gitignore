@@ -5,6 +5,9 @@ release/
 .DS_Store
 *.zip
 
+# GitHub Pages 落地页 + 在线演示的本地暂存产物（由 tools/build-web-demo.cjs 生成）
+site/
+
 # 临时文档与笔记
 对话总结.md
 多窗口多标签改造计划.md

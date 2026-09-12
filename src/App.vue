@@ -3898,17 +3898,11 @@ const saveFile = async () => {
         return false
       }
     } else {
-      const blob = new Blob([JSON.stringify(data, null, 2)], {
-        type: 'application/json'
-      })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'mind-map.json'
-      a.click()
-      URL.revokeObjectURL(url)
-      ElMessage.success('已下载文件')
-      return true
+      // 浏览器/在线演示环境没有文件系统能力，这里不做「静默下载」降级。
+      // 旧实现在这个分支里 download 一个 mind-map.json：用户在演示页点保存或按 Ctrl+S
+      // 就会莫名落下一个文件，且在 Web 端再也打不开，属于体验 bug。桌面版走上一个分支，不受影响。
+      ElMessage.info('在线演示版不支持保存到本地，下载桌面版即可完整保存')
+      return null
     }
   } catch (error) {
     console.error('保存失败:', error)
