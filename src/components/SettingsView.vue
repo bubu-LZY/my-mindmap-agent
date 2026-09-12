@@ -981,7 +981,7 @@
       <p v-else-if="updateState.status === 'available'" style="color: #e6a23c;">
         发现新版本 {{ updateState.latestVersion }}（当前 {{ updateState.currentVersion }}）。
       </p>
-      <p>my-mindmap agent v4.19.2</p>
+      <p>my-mindmap agent v4.19.3</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
@@ -3180,24 +3180,26 @@ const onCustomToolFolderDrop = async (event) => {
 }
 
 // ========== 侧边目录导航 ==========
+// 顺序必须与模板中 id="sec-*" 区块的出现顺序一致：目录按此数组渲染，
+// 滚动高亮也按区块在文档中的位置判定，两边顺序不一致时目录会与内容错位
 const tocSections = [
   { id: 'sec-ai-config', label: 'AI 模型配置' },
-  { id: 'sec-thinking', label: '深度思考模式' },
   { id: 'sec-temperature', label: 'AI temperature 设置' },
+  { id: 'sec-thinking', label: '深度思考模式' },
   { id: 'sec-timeout', label: 'AI 请求超时设置' },
   { id: 'sec-vision', label: '多模态识别' },
   { id: 'sec-embedding', label: 'Embedding 配置' },
+  { id: 'sec-safety', label: 'AI 安全与记忆' },
+  { id: 'sec-system', label: '系统' },
+  { id: 'sec-token', label: '全局 Token 管理' },
+  { id: 'sec-password', label: '全局管理访问密码' },
+  { id: 'sec-extension-doc', label: '官方扩展文档' },
   { id: 'sec-mcp', label: 'MCP 服务' },
   { id: 'sec-skills', label: 'Skills' },
   { id: 'sec-custom-tools', label: '工具目录' },
-  { id: 'sec-extension-doc', label: '官方扩展文档' },
-  { id: 'sec-safety', label: 'AI 安全与记忆' },
-  { id: 'sec-token', label: '全局 Token 管理' },
-  { id: 'sec-password', label: '全局管理访问密码' },
-  { id: 'sec-system', label: '系统' },
   { id: 'sec-integrations', label: '三方集成' },
-  { id: 'sec-desk-calendar', label: '同步 desktop todo calendar' },
   { id: 'sec-cloud-sync', label: '云盘同步' },
+  { id: 'sec-desk-calendar', label: '同步 desktop todo calendar' },
   { id: 'sec-backup', label: '数据备份' },
   { id: 'sec-about', label: '关于' }
 ]
@@ -3467,8 +3469,8 @@ const setActiveSection = (id) => {
 }
 
 const refreshSectionTops = () => {
-  // 必须按文档位置排序：目录顺序和 DOM 顺序并不一致（部分区块在文档里排在目录更靠后的位置），
-  // applyActiveByScroll 依赖升序 + 提前 break，不排序会漏掉中间的区块
+  // 按文档位置排序只是兜底：applyActiveByScroll 依赖升序 + 提前 break，
+  // 即使目录数组顺序将来又被改乱，高亮仍按区块的真实文档位置判定
   sectionTops = tocSections
     .map(s => {
       const el = sectionElsCache[s.id]

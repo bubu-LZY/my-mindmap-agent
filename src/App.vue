@@ -2,20 +2,26 @@
   <div class="app-container">
     <!-- ============ 顶部导航栏 ============ -->
     <header class="top-navbar">
-      <!-- 当前文件名 -->
-      <div class="app-title" :title="currentFileName">{{ currentFileName }}</div>
+      <!-- 占位：与右侧 navbar-actions 等分剩余空间，把文件名挤到真正的水平中间 -->
+      <div class="navbar-spacer" aria-hidden="true"></div>
 
-      <!-- 刷新界面：先保存文档再软重启，用于界面卡死/异常显示时恢复 -->
-      <button
-        class="nav-btn title-refresh-btn"
-        title="保存并刷新界面（软重启，界面异常时恢复用）"
-        @click="refreshUI"
-      >
-        <svg viewBox="0 0 16 16" fill="none" width="13" height="13">
-          <path d="M13.5 8a5.5 5.5 0 11-1.62-3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          <path d="M13.8 1.6v3h-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
-      </button>
+      <!-- 当前文件名。刷新按钮绝对定位在文件名右侧，不参与宽度计算，
+           否则它会占去中线右侧的一段空间，文件名整体被推向左边 -->
+      <div class="app-title-wrap">
+        <div class="app-title" :title="currentFileName">{{ currentFileName }}</div>
+
+        <!-- 刷新界面：先保存文档再软重启，用于界面卡死/异常显示时恢复 -->
+        <button
+          class="nav-btn title-refresh-btn"
+          title="保存并刷新界面（软重启，界面异常时恢复用）"
+          @click="refreshUI"
+        >
+          <svg viewBox="0 0 16 16" fill="none" width="13" height="13">
+            <path d="M13.5 8a5.5 5.5 0 11-1.62-3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            <path d="M13.8 1.6v3h-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </div>
 
       <!-- 工具按钮组 -->
       <div class="navbar-actions">
@@ -63,14 +69,9 @@
     </header>
 
     <!-- ============ Tab 标签栏 ============ -->
-    <nav
-      class="tab-bar"
-      :class="{ 'has-clear': layoutGroups.length >= 2 }"
-      @dragover.prevent="onTabBarDragOver"
-      @drop.prevent="onTabBarDrop"
-      @wheel="onTabBarWheel"
-    >
-      <!-- 一键清空按钮（标签数>=2时，hover显示） -->
+    <nav class="tab-bar-shell">
+      <!-- 一键清空按钮（标签数>=2时常驻显示）。放在滚动容器之外，
+           标签再多也不会把它顶走，也不会有标签从它左侧透出来 -->
       <button
         v-if="layoutGroups.length >= 2"
         class="tab-clear-all"
@@ -82,36 +83,44 @@
         </svg>
         <span>清空</span>
       </button>
-      <!-- 标签组化：单 pane 组 = 普通文件标签；多 pane 组 = "多屏"组合标签 -->
+
       <div
-        v-for="g in layoutGroups"
-        :key="g.id"
-        class="tab-item"
-        :class="{ active: g.id === activeGroupId, 'multi-tab': isGroupMulti(g), 'drag-over': dragOverTabKey === g.id }"
-        :title="groupTabTitle(g)"
-        draggable="true"
-        @click="focusGroup(g.id)"
-        @dragstart="onGroupTabDragStart($event, g.id)"
-        @dragover.prevent.stop="onGroupTabDragOver($event, g.id)"
-        @dragleave="onGroupTabDragLeave(g.id)"
-        @drop.prevent.stop="onGroupTabDrop($event, g.id)"
-        @dragend="onGroupTabDragEnd"
+        class="tab-bar"
+        @dragover.prevent="onTabBarDragOver"
+        @drop.prevent="onTabBarDrop"
+        @wheel="onTabBarWheel"
       >
-        <span v-if="isGroupMulti(g)" class="tab-name multi-name">
-          <span class="multi-prefix">多屏：</span>
-          <template v-for="(p, i) in groupPanes(g)" :key="p.id">
-            <span v-if="i > 0" class="multi-sep">｜</span>
-            <span class="multi-item">{{ shortPaneTitle(p.title) }}</span>
-          </template>
-        </span>
-        <span v-else class="tab-name">{{ groupTabName(g) }}</span>
-        <span class="tab-close" @click.stop="closeGroup(g.id)" title="关闭标签">×</span>
+        <!-- 标签组化：单 pane 组 = 普通文件标签；多 pane 组 = "多屏"组合标签 -->
+        <div
+          v-for="g in layoutGroups"
+          :key="g.id"
+          class="tab-item"
+          :class="{ active: g.id === activeGroupId, 'multi-tab': isGroupMulti(g), 'drag-over': dragOverTabKey === g.id }"
+          :title="groupTabTitle(g)"
+          draggable="true"
+          @click="focusGroup(g.id)"
+          @dragstart="onGroupTabDragStart($event, g.id)"
+          @dragover.prevent.stop="onGroupTabDragOver($event, g.id)"
+          @dragleave="onGroupTabDragLeave(g.id)"
+          @drop.prevent.stop="onGroupTabDrop($event, g.id)"
+          @dragend="onGroupTabDragEnd"
+        >
+          <span v-if="isGroupMulti(g)" class="tab-name multi-name">
+            <span class="multi-prefix">多屏：</span>
+            <template v-for="(p, i) in groupPanes(g)" :key="p.id">
+              <span v-if="i > 0" class="multi-sep">｜</span>
+              <span class="multi-item">{{ shortPaneTitle(p.title) }}</span>
+            </template>
+          </span>
+          <span v-else class="tab-name">{{ groupTabName(g) }}</span>
+          <span class="tab-close" @click.stop="closeGroup(g.id)" title="关闭标签">×</span>
+        </div>
+        <button class="tab-add" title="新建标签页" @click="createEmptyGroup">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none">
+            <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+          </svg>
+        </button>
       </div>
-      <button class="tab-add" title="新建标签页" @click="createEmptyGroup">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none">
-          <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
-        </svg>
-      </button>
     </nav>
 
     <!-- ============ 主内容区 ============ -->
@@ -735,6 +744,7 @@ import { indexFileRelations, removeFileRelations } from './services/fileRelation
 import * as cloudSyncService from './services/cloudSyncService'
 import { parseDocument, chunkText } from './services/docParseService'
 import { countNodes } from './utils/treeUtils'
+import { blockDeepSeekOverlay } from './utils/deepSeekOverlayGate'
 import { resolveRefAction, getBaseName } from './utils/refTarget'
 import { addToReviewPlan, isInReviewPlan, extractNodeText, removeOrphanReviewItems, remapReviewPaths, getTodayReviewItems, getReminderConfig, getToday } from './utils/reviewPlan'
 import {
@@ -857,12 +867,10 @@ const toolCallStatus = ref('')
 // 设置弹窗
 const settingsVisible = ref(false)
 
-// 设置打开时隐藏 DeepSeek BrowserView（防止遮住设置弹窗）
-watch(settingsVisible, (val) => {
-  if (chatPanelRef.value && chatPanelRef.value.setDeepSeekVisible) {
-    chatPanelRef.value.setDeepSeekVisible(!val)
-  }
-})
+// 浮层打开时隐藏 DeepSeek 网页模式的 BrowserView。
+// BrowserView 是原生层，永远盖在 DOM 之上，只能主动 hide；具体生效由 DeepSeekWebPanel 统一执行。
+// 这里只负责把 App 侧所有浮层的开关登记进闸门（见 deepSeekOverlayGate.js）。
+watch(settingsVisible, (val) => blockDeepSeekOverlay('settings', val))
 
 // 快捷键中心（悬浮小窗口）
 const shortcutCenterVisible = ref(false)
@@ -875,6 +883,12 @@ const notepadVisible = ref(false)
 
 // 消息中心（悬浮面板，微信端/飞书端/定时任务的消息记录）
 const messageCenterVisible = ref(false)
+
+// 顶栏悬浮浮层统一登记：任一打开都要遮住 DeepSeek 网页模式（原生层压不住 DOM）
+watch(shortcutCenterVisible, (val) => blockDeepSeekOverlay('shortcut-center', val))
+watch(browserVisible, (val) => blockDeepSeekOverlay('browser', val))
+watch(notepadVisible, (val) => blockDeepSeekOverlay('notepad', val))
+watch(messageCenterVisible, (val) => blockDeepSeekOverlay('message-center', val))
 
 // 文档查看器（PDF/DOCX/XLSX/CSV/MD/TXT）：点击目录树中的文档文件原样打开（内嵌中间区域，支持多标签）
 const showDocViewer = ref(false)
@@ -1835,6 +1849,7 @@ const onCanvasDrop = (e) => {
 const layoutTemplates = ref([])
 const layoutDialogVisible = ref(false)
 const layoutSaveName = ref('')
+watch(layoutDialogVisible, (val) => blockDeepSeekOverlay('layout-dialog', val))
 
 const LAYOUT_TEMPLATES_KEY = 'mindmap-layout-templates'
 const LAST_LAYOUT_KEY = 'mindmap-last-layout'
@@ -2044,6 +2059,7 @@ const releaseAiBindIfClosed = (fileId) => {
 
 // AI 定时任务面板
 const taskSchedulerPanelVisible = ref(false)
+watch(taskSchedulerPanelVisible, (val) => blockDeepSeekOverlay('task-scheduler', val))
 const toggleTaskSchedulerPanel = () => {
   taskSchedulerPanelVisible.value = !taskSchedulerPanelVisible.value
 }
@@ -2672,6 +2688,7 @@ const addNodeToReviewPlan = (node) => {
  * ============================================================ */
 
 const addTagDialogVisible = ref(false)
+watch(addTagDialogVisible, (val) => blockDeepSeekOverlay('add-tag', val))
 const addTagForm = ref({ tag: '', note: '' })
 // 待添加标签的目标信息：{ filePath, fileName, fileType, nodeUid, nodeText, page, scrollTop, locationText }
 const addTagTarget = ref({})
@@ -5135,33 +5152,42 @@ onBeforeUnmount(() => {
 }
 
 /* Tab 标签栏 */
-.tab-bar {
+/* 标签栏外壳：承载背景/边框，并固定住最前面的清空按钮 */
+.tab-bar-shell {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   padding: 0 8px;
   height: 26px;
   background-color: var(--navbar-bg);
   border-bottom: 1px solid var(--border-color);
+}
+/* 只有标签列表滚动，清空按钮不参与滚动 */
+.tab-bar {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
 }
 .tab-bar::-webkit-scrollbar { height: 4px; }
 
-/* 一键清空按钮：默认隐藏，hover 标签栏时显示 */
+/* 一键清空按钮：常驻显示在最前面，红色文字标识这是销毁类操作 */
 .tab-clear-all {
-  display: none;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
   height: 20px;
   padding: 0 8px;
-  margin-right: 4px;
   border: 1px solid var(--border-color);
   border-radius: 4px;
   background: var(--hover-bg, rgba(0,0,0,0.04));
-  color: var(--text-secondary, #6e6e73);
+  color: #e5484d;
   font-size: 11px;
   cursor: pointer;
   flex-shrink: 0;
@@ -5170,25 +5196,22 @@ onBeforeUnmount(() => {
 .tab-clear-all:hover {
   background: #fef0f0;
   border-color: #fbc4c4;
-  color: #f56c6c;
-}
-.tab-bar:hover .tab-clear-all {
-  display: inline-flex;
+  color: #c92a2f;
 }
 
 .tab-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   height: 22px;
-  padding: 0 10px;
+  padding: 0 8px;
   border-radius: 6px;
   font-size: 12.5px;
   color: var(--text-secondary, #6e6e73);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-  width: 160px;
+  width: 132px;
   flex-shrink: 0;
   transition: background-color 0.12s, color 0.12s;
 }
@@ -5196,7 +5219,7 @@ onBeforeUnmount(() => {
 .tab-item.active { background-color: var(--active-bg, rgba(0,122,255,0.10)); color: var(--text-primary, #1d1d1f); font-weight: 600; }
 .tab-item.drag-over { border-left: 2px solid var(--apple-blue, #007aff); }
 .tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-.multi-tab { width: 200px; }
+.multi-tab { width: 168px; }
 .multi-name {
   display: inline-flex;
   align-items: center;
@@ -5236,13 +5259,32 @@ onBeforeUnmount(() => {
 }
 .tab-add:hover { background-color: var(--active-bg, rgba(0,122,255,0.12)); color: var(--apple-blue, #007aff); }
 
+/* 顶栏左侧占位：与 .navbar-actions 等分剩余空间，据此把文件名居中 */
+.navbar-spacer {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.app-title-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  /* 宽度只由文件名决定；左右各留出与刷新按钮等宽的对称空位，
+     文件名因此落在中线，而刷新按钮待在预留位里，不会压到右侧按钮组 */
+  padding: 0 26px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 .app-title {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: -0.01em;
   user-select: none;
-  flex: 1;
+  /* 不参与伸展：宽度由内容决定，空间不足时先收缩出省略号，右侧按钮的位置不受影响 */
+  flex: 0 1 auto;
+  min-width: 0;
   text-align: center;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5253,14 +5295,15 @@ onBeforeUnmount(() => {
 /* 文件名右侧的刷新按钮：软重启恢复界面状态（红色醒目提示为重置类操作）
    用 .nav-btn.title-refresh-btn 复合选择器，避免被后定义的 .nav-btn 默认色覆盖 */
 .nav-btn.title-refresh-btn {
-  flex-shrink: 0;
+  /* 绝对定位到文件名右侧的预留空位：宽度不参与顶栏分配，文件名才能真正落在中线 */
+  position: absolute;
+  right: 0;
   width: 26px;
   height: 26px;
   padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-left: -2px;
   color: #e5484d;
 }
 
@@ -5415,8 +5458,12 @@ onBeforeUnmount(() => {
 .navbar-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
-  min-width: 40px;
+  gap: 2px;
+  /* 与左侧 .navbar-spacer 等分剩余空间：两侧对称，文件名才会落在顶栏正中。
+     min-width 用 max-content 而非固定值：等分会让本列在窄窗口下小于内容宽度，
+     不夹住就会压缩按钮、把标签挤成两行 */
+  flex: 1 1 0;
+  min-width: max-content;
   justify-content: flex-end;
 }
 
@@ -6201,11 +6248,14 @@ onBeforeUnmount(() => {
    ============================================ */
 .feishu-btn {
   width: auto;
-  padding: 0 10px;
-  font-size: 12px;
+  padding: 0 7px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text-secondary);
   font-family: var(--font-family);
+  /* 窗口变窄时先让文件名出省略号，按钮本身不压缩、标签不折行 */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .feishu-btn:hover {

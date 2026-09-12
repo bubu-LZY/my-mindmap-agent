@@ -195,6 +195,7 @@ import MindMapLayout from 'simple-mind-map/src/layouts/MindMap.js'
 import LogicalStructureLayout from 'simple-mind-map/src/layouts/LogicalStructure.js'
 import { walk } from 'simple-mind-map/src/utils'
 import { clonePlainTree } from '../utils/treeUtils'
+import { useDeepSeekOverlayBlocker } from '../utils/deepSeekOverlayGate'
 import { CONSTANTS } from 'simple-mind-map/src/constants/constant'
 
 // Patch：概要节点富文本样式加载后仍被 RichText 插件的 handleSetData 强制
@@ -2067,11 +2068,33 @@ const initMindMap = () => {
     }
   })
 
+  // 右键拖动平移画布时，库会在 contextmenu 阶段清空多选，而平移分支直接 return 会丢掉快照。
+  // 平移不是「取消选择」的语义，所以拖动结束后按按下时的快照恢复多选；
+  // emitNodeActiveEvent 会让 node_active 重新派发，工具栏拿到的激活列表同步回多选状态
+  const restoreMultiSelectionAfterPan = () => {
+    const snapshot = rightDownActiveNodes
+    rightDownActiveNodes = []
+    if (!snapshot || snapshot.length < 2) return
+    const r = mindMap && mindMap.renderer
+    if (!r) return
+    try {
+      for (const n of snapshot) {
+        if (n && !n.getData?.('isActive') && typeof r.addNodeToActiveList === 'function') {
+          r.addNodeToActiveList(n, true)
+        }
+      }
+      if (typeof r.emitNodeActiveEvent === 'function') r.emitNodeActiveEvent(snapshot[0])
+    } catch (err) {
+      // 拖动过程中节点可能已失效，忽略
+    }
+  }
+
   // 节点右键菜单
   mindMap.on('node_contextmenu', (e, node) => {
     if (isRightDragging) {
       isRightDragging = false
       rightMouseDownPos = null
+      restoreMultiSelectionAfterPan()
       return
     }
     // 右键单击（未拖动）打开菜单：必须清掉按下位置，
@@ -2108,6 +2131,7 @@ const initMindMap = () => {
     if (isRightDragging) {
       isRightDragging = false
       rightMouseDownPos = null
+      restoreMultiSelectionAfterPan()
       return
     }
     // 同节点右键菜单：单击打开菜单时清掉按下位置，防止后续无按键移动触发幻影平移
@@ -3545,6 +3569,8 @@ const onAddTag = (nodes) => {
 
 /* ============ 节点备注（思维导图模式） ============ */
 const noteDialogVisible = ref(false)
+// 备注浮窗是 body 级浮层，压不住原生 BrowserView，需登记进闸门
+useDeepSeekOverlayBlocker('node-note-dialog', noteDialogVisible)
 const noteDialogText = ref('')
 const noteDialogNodeName = ref('')
 const noteDialogNodes = ref([])

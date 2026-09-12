@@ -4,26 +4,30 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.19.2-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.19.3-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.19.2 更新
+## 🆕 v4.19.3 更新
 
-**设置界面滚动性能与目录跳转修复**
+**界面细节修复与 DeepSeek 网页模式浮层遮挡**
 
 | 分类 | 内容 |
 |------|------|
-| ⚡ 性能 | 去掉弹窗遮罩的整屏 20px 背景模糊，以及弹窗打开时被遮罩盖住、看不见却仍要逐帧重算的底层毛玻璃；设置面板滚动帧耗时约 48ms → 22ms |
-| ⚡ 性能 | 设置区块不再各自使用毛玻璃层，滚动高亮改为缓存区块偏移量判定，去掉每帧对 19 个区块的强制同步布局读取 |
-| 🎯 修复 | 修复设置目录末尾两项（数据备份 / 关于）需点两次才跳转、且高亮落到错误区块的问题 |
-| 💾 修复 | 浏览器/在线演示环境下手动保存不再静默下载 `mind-map.json`，改为提示「在线演示版不支持保存到本地」 |
+| 🎯 修复 | 设置页目录顺序与文档顺序不一致，导致滚动高亮落到错误区块 |
+| 🎯 修复 | 右键拖动画布平移后不再丢失已选中的多个节点 |
+| 🎯 修复 | 思维导图浮动工具条自动避让右侧 AI 面板，不再互相遮挡 |
+| 🎯 修复 | 标签栏「清空」按钮固定显示在最前（红色），不再需要悬浮才出现 |
+| 🌐 修复 | DeepSeek 网页模式悬浮球拖拽跟手，位置按布局像素存储并夹回可见区域 |
+| 🌐 修复 | DeepSeek 网页模式不再遮挡设置/记事本/快捷键等浮层：打开任意浮层时自动收起，全部关闭后恢复 |
+| ⚡ 优化 | 顶栏按钮间距收窄，文件名在窗口变窄时保持居中且标签不折行 |
+| ⚡ 优化 | 顶部标签宽度收窄，同屏可容纳更多标签 |
 
-> v4.19.1 的自动更新链路修复与 v4.19.0 的应用内自动更新见上一版说明。
+> v4.19.2 的设置界面滚动性能修复、v4.19.1 的自动更新链路修复与 v4.19.0 的应用内自动更新见上一版说明。
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.2)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.3)
 
 ---
 

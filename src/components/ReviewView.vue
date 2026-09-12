@@ -193,6 +193,7 @@ import {
   getDeskCalendarSyncMeta
 } from '../services/deskCalendarSync'
 import { textFromHtmlInert } from '../utils/inertDom'
+import { useDeepSeekOverlayBlocker } from '../utils/deepSeekOverlayGate'
 
 const props = defineProps({
   mindMap: {
@@ -230,6 +231,8 @@ const today = ref(getToday())
 
 // 复习总览
 const showOverview = ref(false)
+// 总览弹窗 Teleport 到 body，但 DeepSeek 网页模式是原生 BrowserView，压不住，只能主动隐藏
+useDeepSeekOverlayBlocker('review-overview', showOverview)
 // 全部 5 个周期均显示（1天、3天、7天、15天、31天）
 const overviewCycles = computed(() => CYCLES)
 const overviewData = ref([])

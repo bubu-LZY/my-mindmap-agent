@@ -19,6 +19,7 @@ import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import { parseDocument } from '../services/docParseService.js'
 import { textFromHtmlInert } from '../utils/inertDom'
+import { deepSeekOverlayBlocked } from '../utils/deepSeekOverlayGate'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
@@ -103,6 +104,12 @@ const initView = async () => {
     const res = await window.electronAPI.deepSeekView.create(bounds)
     if (res.success) {
       viewReady.value = true
+      // create 会把 BrowserView 挂进窗口（即显示）。若此刻正有浮层打开，
+      // 必须立刻再隐藏，否则它会盖住设置/记事本等浮层
+      if (deepSeekOverlayBlocked.value) {
+        overlayManuallyHidden = true
+        window.electronAPI.deepSeekView.hide()
+      }
     } else {
       ElMessage.error('DeepSeek 加载失败：' + (res.error || '未知错误'))
     }
@@ -540,28 +547,29 @@ onBeforeUnmount(() => {
   }
 })
 
-// 外部控制显示/隐藏（设置弹窗等打开时调用）
-const setOverlayVisible = (visible) => {
+/**
+ * 浮层闸门：任一浮层打开就隐藏原生 BrowserView，全部关闭后才恢复。
+ * 恢复显示延迟到布局稳定后再算位置——浮层关闭往往伴随容器宽度变化
+ * （例如日志面板收起），立刻 setBounds 会拿到旧尺寸。
+ */
+watch(deepSeekOverlayBlocked, (blocked) => {
+  overlayManuallyHidden = blocked
   if (!window.electronAPI?.deepSeekView || !viewReady.value) return
-  if (visible) {
-    overlayManuallyHidden = false
-    // 显示时延迟更新位置，等 DOM 布局稳定后再计算（比如日志面板刚关闭，容器宽度会变）
-    // 用 nextTick + 双 rAF 确保布局已完成
-    nextTick(() => {
+  if (blocked) {
+    window.electronAPI.deepSeekView.hide()
+    return
+  }
+  nextTick(() => {
+    requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          updateBounds()
-          window.electronAPI.deepSeekView.show()
-        })
+        updateBounds()
+        window.electronAPI.deepSeekView.show()
       })
     })
-  } else {
-    overlayManuallyHidden = true
-    window.electronAPI.deepSeekView.hide()
-  }
-}
+  })
+})
 
-defineExpose({ setOverlayVisible, sendToolResult })
+defineExpose({ sendToolResult })
 </script>
 
 <style scoped>

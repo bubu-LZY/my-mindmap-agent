@@ -318,6 +318,17 @@ function injectStyles() {
     #mma-fab:active {
       transform: scale(0.95);
     }
+    /* 拖动期间关掉过渡与缩放：#mma-fab / #mma-bottom-bar 原本有 transition: all 0.2s，
+       拖动时每帧写 left/top 都会被缓动，表现为球明显落后于鼠标（跟手性差）；
+       hover/active 的 scale 也会让球在拖动中忽大忽小，干扰对落点的判断 */
+    #mma-fab.mma-dragging,
+    #mma-bottom-bar.mma-dragging {
+      transition: none !important;
+    }
+    #mma-fab.mma-dragging {
+      transform: none !important;
+      cursor: grabbing;
+    }
     #mma-fab .mma-fab-badge {
       position: absolute;
       top: -2px;
@@ -916,20 +927,53 @@ function injectBottomBar() {
   fab.draggable = false
   
   // 拖动功能
+  // 坐标空间：页面有 html{zoom}，getBoundingClientRect() 返回视觉像素（= 布局像素 × zoom），
+  // 而 style.left/top、offsetWidth、window.innerWidth 都是布局像素。
+  // 全程只在布局像素里算：鼠标位移先除以 zoom 再累加。此前把 rect.left（视觉像素）
+  // 当成布局像素做起点，每次按下球都会瞬移 (1/zoom - 1) 倍的位置，且越靠边偏得越多，
+  // 看起来就是「跟手性差 + 有些位置拖不到」
   let isDragging = false
-  let dragStartX = 0
-  let dragStartY = 0
-  let fabStartX = 0
-  let fabStartY = 0
+  let dragStartClientX = 0
+  let dragStartClientY = 0
+  let fabStartLeft = 0
+  let fabStartTop = 0
   let hasMoved = false
-  
+  let dragRaf = 0
+  let pendingLeft = 0
+  let pendingTop = 0
+
   // 获取页面缩放比例（html 上的 zoom）
   function getPageZoom() {
     const html = document.documentElement
     const zoom = parseFloat(getComputedStyle(html).zoom) || 1
     return zoom
   }
-  
+
+  const setDragging = (on) => {
+    fab.classList.toggle('mma-dragging', on)
+    const bar = document.getElementById('mma-bottom-bar')
+    if (bar) bar.classList.toggle('mma-dragging', on)
+  }
+
+  const applyDragPosition = () => {
+    dragRaf = 0
+    fab.style.left = pendingLeft + 'px'
+    fab.style.top = pendingTop + 'px'
+    fab.style.right = 'auto'
+    fab.style.bottom = 'auto'
+
+    // 面板跟随：右边界同样要在布局像素里夹取，否则面板会被推出视口
+    const bar = document.getElementById('mma-bottom-bar')
+    if (bar) {
+      const barLeft = Math.min(pendingLeft, Math.max(4, window.innerWidth - bar.offsetWidth - 4))
+      bar.style.right = 'auto'
+      bar.style.bottom = 'auto'
+      bar.style.left = barLeft + 'px'
+      bar.style.top = (pendingTop + fab.offsetHeight + 8) + 'px'
+      bar.style.transformOrigin = 'top left'
+    }
+  }
+
   // 恢复保存的位置
   try {
     const savedPos = localStorage.getItem('mma_fab_pos')
@@ -941,79 +985,74 @@ function injectBottomBar() {
       if (pos.top !== undefined) { fab.style.top = pos.top + 'px'; fab.style.bottom = 'auto' }
     }
   } catch(e) {}
-  
+
+  // 夹回可见区域。存量位置可能来自旧版本（存的是视觉像素，与布局像素差 1/zoom 倍）
+  // 或来自上一次更大的窗口，直接写回会让球停在视口外，表现为「怎么都拖不回来」
+  if (fab.style.left && fab.style.left !== 'auto') {
+    const maxLeft = Math.max(4, window.innerWidth - fab.offsetWidth - 4)
+    const maxTop = Math.max(4, window.innerHeight - fab.offsetHeight - 4)
+    const savedLeft = parseFloat(fab.style.left) || 4
+    const savedTop = parseFloat(fab.style.top) || 4
+    fab.style.left = Math.max(4, Math.min(maxLeft, savedLeft)) + 'px'
+    fab.style.top = Math.max(4, Math.min(maxTop, savedTop)) + 'px'
+  }
+
   fab.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return
     isDragging = true
     hasMoved = false
     const zoom = getPageZoom()
-    // 关键：页面有 zoom 缩放时，clientX/Y 是视口像素（物理像素），
-    // 而 getBoundingClientRect() 和 style.left 是 CSS 像素（受 zoom 影响）
-    // 需要统一到 CSS 像素坐标系：CSS 像素 = 视口像素 / zoom
-    dragStartX = e.clientX / zoom
-    dragStartY = e.clientY / zoom
-    
+    dragStartClientX = e.clientX
+    dragStartClientY = e.clientY
+
     const rect = fab.getBoundingClientRect()
-    // getBoundingClientRect 返回的也是 CSS 像素
-    fabStartX = rect.left
-    fabStartY = rect.top
-    
+    // rect 是视觉像素，除以 zoom 换回布局像素，才是 style.left/top 的坐标系
+    fabStartLeft = rect.left / zoom
+    fabStartTop = rect.top / zoom
+
     e.preventDefault()
     e.stopPropagation()
   })
-  
+
   document.addEventListener('mousemove', (e) => {
     if (!isDragging) return
-    
+
     const zoom = getPageZoom()
-    // 将鼠标坐标转换为 CSS 像素
-    const mouseX = e.clientX / zoom
-    const mouseY = e.clientY / zoom
-    const dx = mouseX - dragStartX
-    const dy = mouseY - dragStartY
-    
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+    const dx = (e.clientX - dragStartClientX) / zoom
+    const dy = (e.clientY - dragStartClientY) / zoom
+
+    if (!hasMoved) {
+      if (Math.abs(dx) <= 3 && Math.abs(dy) <= 3) return
       hasMoved = true
+      setDragging(true)
     }
-    
-    if (hasMoved) {
-      let newLeft = fabStartX + dx
-      let newTop = fabStartY + dy
-      
-      // 限制在视口内（window.innerWidth 也是 CSS 像素）
-      const maxLeft = window.innerWidth - fab.offsetWidth - 4
-      const maxTop = window.innerHeight - fab.offsetHeight - 4
-      newLeft = Math.max(4, Math.min(maxLeft, newLeft))
-      newTop = Math.max(4, Math.min(maxTop, newTop))
-      
-      fab.style.left = newLeft + 'px'
-      fab.style.top = newTop + 'px'
-      fab.style.right = 'auto'
-      fab.style.bottom = 'auto'
-      
-      // 面板跟随
-      const bar = document.getElementById('mma-bottom-bar')
-      if (bar) {
-        bar.style.right = 'auto'
-        bar.style.left = newLeft + 'px'
-        bar.style.bottom = 'auto'
-        bar.style.top = (newTop + fab.offsetHeight + 8) + 'px'
-        bar.style.transformOrigin = 'top left'
-      }
-    }
+
+    const maxLeft = Math.max(4, window.innerWidth - fab.offsetWidth - 4)
+    const maxTop = Math.max(4, window.innerHeight - fab.offsetHeight - 4)
+    pendingLeft = Math.max(4, Math.min(maxLeft, fabStartLeft + dx))
+    pendingTop = Math.max(4, Math.min(maxTop, fabStartTop + dy))
+
+    // 合并到 rAF：mousemove 可能高于刷新率，逐次写样式只会触发多余的布局
+    if (!dragRaf) dragRaf = requestAnimationFrame(applyDragPosition)
   })
-  
+
   document.addEventListener('mouseup', (e) => {
     if (!isDragging) return
     isDragging = false
-    
+
+    if (dragRaf) {
+      cancelAnimationFrame(dragRaf)
+      dragRaf = 0
+      applyDragPosition()
+    }
+    setDragging(false)
+
     if (hasMoved) {
-      // 拖动结束，保存位置（用 getBoundingClientRect 的值，是 CSS 像素）
+      // 存布局像素，和上面的恢复逻辑（直接写 style.left/top）保持一致
       try {
-        const rect = fab.getBoundingClientRect()
         localStorage.setItem('mma_fab_pos', JSON.stringify({
-          left: rect.left,
-          top: rect.top
+          left: pendingLeft,
+          top: pendingTop
         }))
       } catch(e) {}
       e.preventDefault()

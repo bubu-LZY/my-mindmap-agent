@@ -1121,6 +1121,7 @@ import { Setting } from '@element-plus/icons-vue'
 import DeepSeekWebPanel from './DeepSeekWebPanel.vue'
 import { treeToText, treeToSkeletonText, countNodes } from '../utils/treeUtils'
 import { textFromHtmlInert } from '../utils/inertDom'
+import { blockDeepSeekOverlay } from '../utils/deepSeekOverlayGate'
 import { parseMarkdownToTree } from '../utils/markdownParser'
 import { createUid } from 'simple-mind-map/src/utils'
 import { aiService, buildBaseURL, resetWebSearchTask, createAIService } from '../services/aiService'
@@ -2573,30 +2574,30 @@ const onGlobalClick = (e) => {
  * 日志面板
  * ============================================================ */
 
+// 日志面板会压住网页模式的原生 BrowserView，开关必须同步登记进浮层闸门
+const setLogPanel = (visible) => {
+  logPanelVisible.value = visible
+  blockDeepSeekOverlay('chat-log-panel', visible)
+}
+
 const toggleLogPanel = () => {
-  logPanelVisible.value = !logPanelVisible.value
+  setLogPanel(!logPanelVisible.value)
   emit('toggle-log-panel', logPanelVisible.value)
-  // 网页模式下，日志面板打开时隐藏 BrowserView（避免被遮挡）
-  if (chatMode.value === 'web') {
-    if (deepseekWebRef.value?.setOverlayVisible) {
-      deepseekWebRef.value.setOverlayVisible(!logPanelVisible.value)
-    }
-  }
 }
 
 // 顶部下拉菜单显示变化时控制 BrowserView（网页模式下避免下拉被遮挡）
 const headerDropdownCount = ref(0)
 const onHeaderDropdownVisible = (visible, name) => {
-  if (chatMode.value !== 'web') return
+  // 不按 chatMode 提前返回：下拉在网页模式下打开、随后切回 API 模式时，
+  // 若这里直接 return，登记就不会被清除，下次切回网页模式会永久隐藏面板
   if (visible) {
     headerDropdownCount.value++
   } else {
     headerDropdownCount.value = Math.max(0, headerDropdownCount.value - 1)
   }
-  // 当有任何下拉打开时，隐藏 BrowserView；全部关闭时显示
-  if (deepseekWebRef.value?.setOverlayVisible) {
-    deepseekWebRef.value.setOverlayVisible(headerDropdownCount.value === 0)
-  }
+  // 用独立 reason 登记：下拉与日志面板可能同时打开，
+  // 共用一条 reason 会被先关闭的一方抢先恢复显示
+  blockDeepSeekOverlay('chat-header-dropdown', headerDropdownCount.value > 0)
 }
 
 // 打开 DeepSeek 调试工具
@@ -8411,15 +8412,10 @@ defineExpose({
   pushThirdPartyNotice,
   addToInput,
   addTextToInput,
-  setLogPanelVisible: (visible) => { logPanelVisible.value = visible },
+  setLogPanelVisible: setLogPanel,
   reloadModel: loadCurrentModel,
   listMcpTools,
   callMcpTool,
-  setDeepSeekVisible: (visible) => {
-    if (deepseekWebRef.value && deepseekWebRef.value.setOverlayVisible) {
-      deepseekWebRef.value.setOverlayVisible(visible)
-    }
-  },
   openDeepSeekDevTools: () => {
     if (window.electronAPI?.deepSeekView?.openDevTools) {
       window.electronAPI.deepSeekView.openDevTools()

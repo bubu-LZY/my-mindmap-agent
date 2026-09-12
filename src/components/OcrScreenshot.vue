@@ -51,8 +51,11 @@
 <script setup>
 import { ref, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useDeepSeekOverlayBlocker } from '../utils/deepSeekOverlayGate'
 
 const capturing = ref(false)
+// 截屏是全屏遮罩，原生 BrowserView 会盖在上面，采集期间必须隐藏
+useDeepSeekOverlayBlocker('ocr-screenshot', capturing)
 const bgImage = ref('')
 const bgW = ref(0)
 const bgH = ref(0)
