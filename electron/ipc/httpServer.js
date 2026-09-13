@@ -8,7 +8,7 @@ const WebSocketServer = wsModule.WebSocketServer || wsModule.Server
 const store = require('../utils/store')
 const mcpServer = require('./mcpServer')
 const { encryptString, decryptString } = require('../utils/secureStore')
-const { resolvePhysicalSize, computePlacement, compositeBitmaps } = require('../utils/viewComposite')
+const { resolvePhysicalSize, computePlacement, compositeBitmaps, pickTopmostIndexAtPoint } = require('../utils/viewComposite')
 
 const STORE_KEY = 'httpRemoteServer'
 const DEFAULT_PORT = 17800
@@ -606,13 +606,94 @@ const stopStream = () => {
   }
 }
 
+// 当前「接输入」的那个面：主窗口页面，或某个原生子视图的页面。
+// 鼠标事件按坐标命中决定注入到哪个面；键盘与文本没有坐标，跟随最近一次鼠标落点。
+let inputSurface = null
+
+const currentInputSurface = (win) => {
+  const surface = inputSurface
+  if (surface && !surface.isDestroyed()) {
+    if (surface === win.webContents) return surface
+    // 视图可能只是被摘下来（面板收起走的是 removeBrowserView，webContents 还活着）。
+    // 这时它已经不在画面上，输入必须回到主页面，否则键盘/文本会打进看不见的视图里。
+    try {
+      if (win.getBrowserViews().some((view) => view && view.webContents === surface)) return surface
+    } catch { /* 拿不到视图列表时按下线处理 */ }
+    inputSurface = null
+  }
+  return win.webContents
+}
+
+/**
+ * 找出坐标落在哪个原生子视图上（后挂的在上层），返回它的 webContents 与 bounds；
+ * 没命中返回 null。判定用的是 DIP 坐标——客户端映射过来的 x/y 与 BrowserView 的
+ * bounds 本来就在同一个坐标系里（都相对窗口内容区）。
+ */
+const findViewSurfaceAtPoint = (win, x, y) => {
+  let views = []
+  try {
+    views = win.getBrowserViews()
+  } catch {
+    return null
+  }
+  if (!Array.isArray(views) || !views.length) return null
+  const rects = views.map((view) => {
+    try {
+      if (!view || !view.webContents || view.webContents.isDestroyed()) return null
+      return view.getBounds()
+    } catch {
+      return null
+    }
+  })
+  const index = pickTopmostIndexAtPoint(rects, x, y)
+  if (index < 0) return null
+  return { webContents: views[index].webContents, bounds: rects[index] }
+}
+
+/**
+ * 把远程输入注入到正确的那个面。
+ *
+ * 以前一律注入主窗口页面，于是原生子视图（DeepSeek 网页版）虽然已经能在镜像里看到，
+ * 却怎么点都没反应——事件全打在主窗口页面上了，根本没送到那个视图。
+ */
 const forwardInput = (event) => {
   const win = getMainWindow()
   if (!win || win.isDestroyed() || !event) return { ok: false, error: '主窗口不可用' }
   try {
     if (win.isMinimized()) win.restore()
-    win.webContents.sendInputEvent(event)
-    return { ok: true }
+
+    const hasPoint = Number.isFinite(event.x) && Number.isFinite(event.y)
+    const previous = currentInputSurface(win)
+    let surface = previous
+    let payload = event
+
+    if (hasPoint) {
+      const hit = findViewSurfaceAtPoint(win, event.x, event.y)
+      if (hit) {
+        surface = hit.webContents
+        // 子视图的坐标原点是它自己的左上角，必须把窗口坐标换算过去
+        payload = { ...event, x: Math.round(event.x - hit.bounds.x), y: Math.round(event.y - hit.bounds.y) }
+      } else {
+        surface = win.webContents
+      }
+    }
+
+    if (surface !== previous) {
+      // 换面：先给旧面补一次 mouseLeave 清掉悬停态，再让新面拿到焦点，
+      // 否则键盘事件还会落在原来那一面上。
+      try {
+        if (hasPoint && !previous.isDestroyed()) {
+          previous.sendInputEvent({ type: 'mouseLeave', x: 0, y: 0 })
+        }
+      } catch { /* 旧面可能正在销毁 */ }
+      try {
+        surface.focus()
+      } catch { /* 焦点失败不影响本次事件注入 */ }
+      inputSurface = surface
+    }
+
+    surface.sendInputEvent(payload)
+    return { ok: true, target: surface === win.webContents ? 'main' : 'view' }
   } catch (e) {
     return { ok: false, error: e.message || String(e) }
   }
@@ -645,13 +726,14 @@ const insertRemoteText = async (text) => {
     }
   })()`
   try {
-    return await win.webContents.executeJavaScript(script, true)
+    // 文本要插进「当前接输入的那个面」，否则在 DeepSeek 面板里打字会落到主窗口 
+    return await currentInputSurface(win).executeJavaScript(script, true)
   } catch (e) {
     return false
   }
 }
 
-const isMainEditable = async () => {
+const isActiveEditable = async () => {
   const win = getMainWindow()
   if (!win || win.isDestroyed()) return false
   const script = `(() => {
@@ -661,7 +743,7 @@ const isMainEditable = async () => {
     return el.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA';
   })()`
   try {
-    return !!(await win.webContents.executeJavaScript(script, true))
+    return !!(await currentInputSurface(win).executeJavaScript(script, true))
   } catch (e) {
     return false
   }
@@ -988,7 +1070,7 @@ const handleUpgrade = (req, socket, head) => {
           requestImmediateFrame()
           if (message.event.type === 'mouseUp' && message.event.button === 'left') {
             try {
-              const editable = await isMainEditable()
+              const editable = await isActiveEditable()
               ws.send(JSON.stringify({ type: 'editableFocus', editable: !!editable }))
             } catch (e) {}
           }

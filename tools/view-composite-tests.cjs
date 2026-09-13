@@ -13,7 +13,8 @@ const ROOT = path.resolve(__dirname, '..')
 const {
   resolvePhysicalSize,
   computePlacement,
-  compositeBitmaps
+  compositeBitmaps,
+  pickTopmostIndexAtPoint
 } = require(path.join(ROOT, 'electron/utils/viewComposite.js'))
 
 let pass = 0
@@ -189,12 +190,46 @@ function testCompositeBitmaps () {
   })
 }
 
+// ------------------------------------------------- 命中判定（远程输入路由）
+
+function testPickTopmostIndexAtPoint () {
+  const main = { x: 0, y: 0, width: 100, height: 100 }
+
+  eq(pickTopmostIndexAtPoint([main], 50, 50), 0, '命中唯一矩形')
+  eq(pickTopmostIndexAtPoint([main], 150, 50), -1, '点在矩形外返回 -1')
+  eq(pickTopmostIndexAtPoint([], 50, 50), -1, '空列表返回 -1')
+  eq(pickTopmostIndexAtPoint(null, 50, 50), -1, '非数组返回 -1')
+  eq(pickTopmostIndexAtPoint([main], NaN, 50), -1, '坐标为 NaN 返回 -1')
+
+  // 左上角含、右下边界不含：相邻两个面在边界线上不能同时命中
+  eq(pickTopmostIndexAtPoint([main], 0, 0), 0, '左上角属于该矩形')
+  eq(pickTopmostIndexAtPoint([main], 99, 99), 0, '右下角内侧仍属于该矩形')
+  eq(pickTopmostIndexAtPoint([main], 100, 50), -1, '右边线（开区间）不算命中')
+  eq(pickTopmostIndexAtPoint([main], 50, 100), -1, '下边线（开区间）不算命中')
+
+  // 后添加的视图画在上面，重叠时优先命中它
+  const view = { x: 20, y: 20, width: 40, height: 40 }
+  eq(pickTopmostIndexAtPoint([main, view], 30, 30), 1, '重叠区域命中上面那层视图')
+  eq(pickTopmostIndexAtPoint([main, view], 10, 10), 0, '只落在主窗口时命中主窗口')
+  eq(pickTopmostIndexAtPoint([main, view], 20, 20), 1, '视图左上角属于视图')
+
+  // 已销毁的视图传 null：跳过它，落到下层的面
+  eq(pickTopmostIndexAtPoint([main, null], 30, 30), 0, 'null 层被跳过')
+
+  // 尺寸为 0 的视图不参与命中（避免 0 宽高把边线也算进去）
+  eq(pickTopmostIndexAtPoint([main, { x: 30, y: 30, width: 0, height: 0 }], 30, 30), 0, '零尺寸视图被忽略')
+
+  eq(pickTopmostIndexAtPoint([main], 50.5, 60.25), 0, '小数坐标正常命中')
+  eq(pickTopmostIndexAtPoint([main], -1, 50), -1, '负坐标不命中')
+}
+
 // ---------------------------------------------------------------- 汇总
 
 function main () {
   testResolvePhysicalSize()
   testComputePlacement()
   testCompositeBitmaps()
+  testPickTopmostIndexAtPoint()
 
   console.log('')
   if (failures.length) {

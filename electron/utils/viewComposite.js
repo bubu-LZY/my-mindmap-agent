@@ -120,9 +120,30 @@ function compositeBitmaps (dstBitmap, baseSize, layers) {
   return dstBitmap
 }
 
+/**
+ * 在一组矩形（DIP，相对窗口内容区）里找出包含指定点的那一个，返回下标；没命中返回 -1。
+ *
+ * 后添加的视图画在上面，所以从后往前找。远程输入路由靠它决定「这一下点在了哪个面」——
+ * 点在主窗口页面上就注入主窗口，点在原生子视图上就必须注入那个子视图，
+ * 否则面板看得见却点不动。矩形传 null（视图已销毁）会被跳过。
+ */
+function pickTopmostIndexAtPoint (rects, x, y) {
+  if (!Array.isArray(rects)) return -1
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return -1
+  for (let i = rects.length - 1; i >= 0; i--) {
+    const r = rects[i]
+    if (!r) continue
+    if (!(r.width > 0) || !(r.height > 0)) continue
+    // 右/下边界取开区间，避免相邻两个面在边界线上同时命中
+    if (x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height) return i
+  }
+  return -1
+}
+
 module.exports = {
   BYTES_PER_PIXEL,
   resolvePhysicalSize,
   computePlacement,
-  compositeBitmaps
+  compositeBitmaps,
+  pickTopmostIndexAtPoint
 }
