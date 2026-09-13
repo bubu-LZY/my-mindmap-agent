@@ -4,26 +4,24 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.19.4-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.19.5-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.19.4 更新
+## 🆕 v4.19.5 更新
 
-**DeepSeek 网页模式：修掉「点初始化后连环发消息」，浮层遮挡与展开卡顿**
+**局域网远程画面：DeepSeek 网页版的内容不再是一片空白**
 
 | 分类 | 内容 |
 |------|------|
-| 🌐 修复 | 点「初始化」不再把提示词里的 mymindmap 示例当成工具执行，不再连环给 AI 发消息 |
-| 🌐 修复 | 网页版 DeepSeek 不再浮在其他面板之上：新增浮层兜底闸门，漏登记的浮层也能自动隐藏 |
-| 🌐 优化 | 展开/收起右侧 AI 助手不再卡顿（宽度动画期间不再逐帧重设原生层位置） |
-| ⚡ 优化 | compact 布局推迟到展开动画结束后再切换，少一次整树重渲染 |
+| 🌐 修复 | 局域网网页端（远程操作 / 仅查看镜像）里，DeepSeek 网页版面板不再空白：原生子视图的画面会单独抓取，并叠回窗口里的同一位置 |
+| 🌐 修复 | 子视图截图偶发不可用时沿用最近一次成功画面，面板不会一帧一帧地闪没 |
 
-> v4.19.3 的界面细节修复、v4.19.2 的设置界面滚动性能修复与 v4.19.1 的自动更新链路修复见上一版说明。
+> v4.19.4 的「初始化后连环发消息」、浮层遮挡与展开卡顿修复见上一版说明。
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.4)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.5)
 
 ---
 

@@ -1,4 +1,4 @@
-const { ipcMain } = require('electron')
+const { ipcMain, nativeImage } = require('electron')
 const http = require('http')
 const https = require('https')
 const crypto = require('crypto')
@@ -8,6 +8,7 @@ const WebSocketServer = wsModule.WebSocketServer || wsModule.Server
 const store = require('../utils/store')
 const mcpServer = require('./mcpServer')
 const { encryptString, decryptString } = require('../utils/secureStore')
+const { resolvePhysicalSize, computePlacement, compositeBitmaps } = require('../utils/viewComposite')
 
 const STORE_KEY = 'httpRemoteServer'
 const DEFAULT_PORT = 17800
@@ -396,15 +397,94 @@ const sendStateToAll = (state) => {
   }
 }
 
+// 子视图截图缓存：合成器偶尔拿不到 BrowserView 的画面（窗口刚创建、或子视图
+// 还没产出过帧时会抛 "display surface not available"）。失败时沿用最近一次
+// 成功的画面，避免镜像里的面板一帧一帧地闪没。按视图对象存，视图销毁即回收。
+const VIEW_SHOT_CACHE_TTL_MS = 5000
+const viewShotCache = new WeakMap()
+
+/**
+ * 把挂在窗口上的原生子视图（BrowserView）拍下来，算好它们该贴在主窗口截图的哪个位置。
+ *
+ * capturePage 只抓窗口自己的页面；DeepSeek 网页版这类面板由原生子视图渲染，属于
+ * 另一棵渲染树，必须单独抓一次再贴回去 —— 否则局域网镜像里就是「面板框在、里面空白」。
+ * 单个视图抓失败只跳过它（或退回缓存），不能让整个镜像断流。
+ */
+const collectAttachedViewLayers = async (win, contentSize, baseSize) => {
+  let views = []
+  try {
+    views = win.getBrowserViews()
+  } catch {
+    return []
+  }
+  if (!Array.isArray(views) || !views.length) return []
+
+  const layers = []
+  const now = Date.now()
+  for (const view of views) {
+    try {
+      if (!view || !view.webContents || view.webContents.isDestroyed()) continue
+      const viewBounds = view.getBounds()
+      if (!viewBounds || !(viewBounds.width > 0) || !(viewBounds.height > 0)) continue
+
+      const wc = view.webContents
+      let bitmap = null
+      try {
+        const shot = await wc.capturePage()
+        if (shot && !shot.isEmpty()) bitmap = shot.toBitmap()
+      } catch {
+        // 这一帧拿不到子视图画面，下面用缓存兜底
+      }
+
+      if (bitmap) {
+        viewShotCache.set(wc, { bitmap, width: viewBounds.width, height: viewBounds.height, at: now })
+      } else {
+        const cached = viewShotCache.get(wc)
+        if (cached && now - cached.at <= VIEW_SHOT_CACHE_TTL_MS &&
+            cached.width === viewBounds.width && cached.height === viewBounds.height) {
+          bitmap = cached.bitmap
+        }
+      }
+      if (!bitmap) continue
+
+      const sourceSize = resolvePhysicalSize(bitmap.length, viewBounds.width, viewBounds.height)
+      if (!sourceSize) continue
+      const placement = computePlacement({ baseSize, contentSize, viewBounds, sourceSize })
+      if (!placement) continue
+      layers.push({ target: placement.target, clip: placement.clip, bitmap })
+    } catch {
+      // 单个视图出问题不能影响主画面
+    }
+  }
+  return layers
+}
+
 const captureFrame = async () => {
   const win = getMainWindow()
   if (!win || win.isDestroyed()) return null
   if (isMainWindowClosed(win)) return null
   if (win.isMinimized()) return null
   try {
-    const image = await win.webContents.capturePage()
+    let image = await win.webContents.capturePage()
     if (!image || image.isEmpty()) return null
     const bounds = win.getContentBounds()
+
+    // 原生子视图不在这张截图里，单独抓一次叠回去（没有子视图时零开销，直接跳过）
+    const baseBitmap = image.toBitmap()
+    const baseSize = resolvePhysicalSize(baseBitmap.length, bounds.width, bounds.height)
+    if (baseSize) {
+      const layers = await collectAttachedViewLayers(win, bounds, baseSize)
+      if (layers.length) {
+        compositeBitmaps(baseBitmap, baseSize, layers)
+        // 尺寸语义与 capturePage 保持一致（物理像素），下面的缩放与编码逻辑无需改动
+        image = nativeImage.createFromBitmap(baseBitmap, {
+          width: baseSize.width,
+          height: baseSize.height,
+          scaleFactor: 1
+        })
+      }
+    }
+
     const qualityKey = getCachedQuality()
     const jpegQuality = QUALITY_JPEG[qualityKey] || QUALITY_JPEG.medium
     // 以 capturePage 返回的真实物理像素为基准缩放；高分屏下不做这个修正会
