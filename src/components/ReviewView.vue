@@ -492,8 +492,7 @@ const formatDateDisplay = (dateStr) => {
   const d = new Date(dateStr)
   const month = d.getMonth() + 1
   const day = d.getDate()
-  const weekday = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()]
-  return `${month}月${day}日 周${weekday}`
+  return `${month}月${day}日`
 }
 
 /**
@@ -715,7 +714,9 @@ defineExpose({ refreshData, addCurrentNodeToReview })
 
 .panel-stats {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  column-gap: 10px;
+  row-gap: 4px;
   font-size: 12px;
   margin-top: 6px;
 }
@@ -745,8 +746,8 @@ defineExpose({ refreshData, addCurrentNodeToReview })
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 4px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--border-color);
   overflow-x: auto;
   overflow-y: hidden;
@@ -780,12 +781,12 @@ defineExpose({ refreshData, addCurrentNodeToReview })
 
 .date-chip {
   flex-shrink: 0;
-  padding: 5px 10px;
+  padding: 3px 6px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 11px;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 3px;
   transition: background-color var(--transition-fast);
   color: var(--text-primary);
   background-color: rgba(0, 0, 0, 0.035);

@@ -126,7 +126,7 @@
     <!-- ============ 主内容区 ============ -->
     <div class="main-content">
       <!-- ===== 左侧栏 ===== -->
-      <aside class="sidebar" :class="{ collapsed: !sidebarExpanded, 'wide-mode': viewMode === 'review' || viewMode === 'tag' }">
+      <aside class="sidebar" :class="{ collapsed: !sidebarExpanded }">
         <!-- 侧边栏内容 -->
         <div class="sidebar-content">
         <!-- 视图切换 Segmented Control（三模式） -->
@@ -2068,10 +2068,10 @@ const toggleTaskSchedulerPanel = () => {
 const startOcrScreenshot = () => {
   ocrScreenshotRef.value?.startCapture?.()
 }
-// 侧边栏当前宽度（像素）：复习/标签模式加宽以容纳完整布局
+// 侧边栏当前宽度（像素）：文件目录/标签/复习三种视图统一宽度
 const sidebarWidthPx = computed(() => {
   if (!sidebarExpanded.value) return '0px'
-  return (viewMode.value === 'review' || viewMode.value === 'tag') ? '400px' : '300px'
+  return '300px'
 })
 
 // 定时任务面板左侧偏移（跟随侧边栏展开/折叠）
@@ -5550,14 +5550,9 @@ onBeforeUnmount(() => {
   width: var(--sidebar-width);
 }
 
-.sidebar.collapsed,
-.sidebar.collapsed.wide-mode {
+.sidebar.collapsed {
   width: 0;
   border-right: none;
-}
-
-.sidebar.wide-mode {
-  width: var(--sidebar-width-review);
 }
 
 /* View toggle - Segmented Control */

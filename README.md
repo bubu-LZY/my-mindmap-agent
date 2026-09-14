@@ -4,26 +4,23 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.19.6-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.19.7-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.19.6 更新
+## 🆕 v4.19.7 更新
 
-**局域网远程操作：DeepSeek 网页版面板现在能点了**
+**左侧栏统一宽度 + 复习日期条更紧凑**
 
 | 分类 | 内容 |
 |------|------|
-| 🌐 修复 | 局域网网页端点击 DeepSeek 网页版面板不再「没反应」：远程鼠标事件按坐标命中判定注入目标，面板内的点击会换算成面板局部坐标再送进去 |
-| 🌐 修复 | 键盘与文本输入跟随最近一次点击的面，在面板里打字不会再落到主界面上 |
-| 🌐 修复 | 收起面板后键盘/文本输入自动回到主界面，不再打进已经看不见的面板 |
-| ✅ 测试 | 合成与命中判定回归用例增至 37 项 |
+| 📐 优化 | 「标签」「复习」与「文件目录」侧栏宽度统一，切换 tab 时不再整栏跳宽 |
+| 📅 优化 | 复习页日期标签只显示「几月几号」并调小字号，一屏能看到更多日期 |
+| 🧹 优化 | 移除废弃的加宽样式与变量；窄侧栏下「复习总览」统计行可自动换行 |
 
-> v4.19.5 的「局域网镜像里 DeepSeek 面板一片空白」修复见上一版说明。
-
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.6)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.7)
 
 ---
 
