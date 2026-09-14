@@ -321,7 +321,10 @@ const jumpTo = ({ page, scrollTop } = {}) => {
 }
 
 // ============ 浏览位置缓存（切换文档标签时保留位置，避免重新加载后跳回顶部） ============
-// 按 filePath 缓存浏览位置快照：PDF 记页码，其他文档记滚动位置
+// 按 filePath 缓存浏览位置快照：PDF 记页码，其他文档记滚动位置。
+// 必须限量：单条快照很小，但长期不关的程序里翻过的文件会一直累积（每个被看过的文件
+// 都留一份），属于只增不减的泄漏。超限就淘汰「最久未访问」的一条。
+const VIEW_STATE_CACHE_MAX = 30
 const viewStateCache = new Map()
 let prevFilePath = ''
 
@@ -335,13 +338,23 @@ const captureViewState = () => {
     scrollTop: docBodyRef.value?.scrollTop ?? 0,
     outlineVisible: outlineVisible.value
   }
+  // 先删后设：让这条记录移到 Map 尾部，成为最近使用的一条（Map 保持插入序）
+  viewStateCache.delete(fp)
   viewStateCache.set(fp, state)
+  while (viewStateCache.size > VIEW_STATE_CACHE_MAX) {
+    const oldest = viewStateCache.keys().next().value
+    if (oldest === undefined) break
+    viewStateCache.delete(oldest)
+  }
 }
 
 // 恢复目标文件的浏览位置（在 load 重置状态后、内容渲染完成前调用）
 const restoreViewState = (fp) => {
   const state = viewStateCache.get(fp)
   if (!state) return
+  // 读取也算一次访问，刷新它的淘汰优先级（否则正在用的文档反而先被淘汰）
+  viewStateCache.delete(fp)
+  viewStateCache.set(fp, state)
   // 通过 pendingJump 复用现有定位逻辑：PDF 跳页，文本恢复滚动位置
   pendingJump = {
     page: state.type === 'pdf' ? (state.page ?? null) : null,

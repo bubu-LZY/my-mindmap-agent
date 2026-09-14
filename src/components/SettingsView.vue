@@ -981,7 +981,7 @@
       <p v-else-if="updateState.status === 'available'" style="color: #e6a23c;">
         发现新版本 {{ updateState.latestVersion }}（当前 {{ updateState.currentVersion }}）。
       </p>
-      <p>my-mindmap agent v4.19.9</p>
+      <p>my-mindmap agent v4.20.0</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
@@ -1955,13 +1955,15 @@ Content-Type: application/json
 Authorization: Bearer ${token}
 
 Body:
-{"message":"你的指令","source":"other-agent"}
+{"message":"你的指令"}
 
 Example:
-curl -X POST "${addr}/api/agent/chat" -H "Content-Type: application/json" -H "Authorization: Bearer ${token}" -d '{"message":"生成一张关于时间管理的思维导图","source":"other-agent"}'
+curl -X POST "${addr}/api/agent/chat" -H "Content-Type: application/json" -H "Authorization: Bearer ${token}" -d '{"message":"生成一张关于时间管理的思维导图"}'
 
 ## Status check
-GET ${addr}/api/status?token=${token}
+GET ${addr}/api/status
+Headers: Authorization: Bearer ${token}
+（兼容旧写法 GET ${addr}/api/status?token=${token}，但令牌会留在 URL、浏览器历史和访问日志里，不推荐）
 
 ## Rules
 - Main app must be running and HTTP service enabled.
@@ -1969,6 +1971,7 @@ GET ${addr}/api/status?token=${token}
 - Token invalid/expired => HTTP 401.
 - Timeout at least 120 seconds.
 - If the task creates/saves/renames/moves/exports/modifies a file, the final reply must include the absolute filePath.
+- 外部调用一律按「外部 Agent」通道处理（危险操作仍需用户在电脑前确认）；请求体里的 source 字段会被忽略，请勿传入。
 `
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {

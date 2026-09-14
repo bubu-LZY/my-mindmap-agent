@@ -22,18 +22,14 @@ const decodeXmlEntities = (s) => String(s ?? '')
   .replace(/&apos;|&#39;/g, "'")
   .replace(/&nbsp;/g, ' ')
 
-// 后台解析线程模式：文件字节已随消息转移进来，读盘函数直接复用它（不再走 IPC）。
-// 该变量只在 Worker 那份模块实例里被赋值，渲染进程里恒为 null。
-let workerInputBuffer = null
-
-// 供 docParse.worker.js 使用：注入本次要解析的字节；解析结束由 parseInWorker 清空
-export function setWorkerInput(buffer) { workerInputBuffer = buffer || null }
-
 // 读取文件 → ArrayBuffer
 // 优先向主进程要 raw 字节：结构化克隆只拷一次，既没有 base64 的 1/3 体积膨胀，
 // 也不必在渲染进程里用逐字符循环把上千万字符还原成字节（大文件卡顿的主因之一）。
-async function readBinaryBuffer(filePath) {
-  if (workerInputBuffer) return workerInputBuffer
+//
+// buffer 参数供后台解析线程使用：字节随消息转移进线程后逐层传参，不再用模块级变量。
+// 模块级变量在两次并发解析之间会互相踩踏，线程终止后还可能一直钉住整份文件字节。
+async function readBinaryBuffer(filePath, buffer = null) {
+  if (buffer) return buffer
   const r = await window.electronAPI.fs.readBinary(filePath, { raw: true })
   if (!r || !r.success) throw new Error(r?.error || '读取文件失败')
   if (r.data) {
@@ -106,10 +102,10 @@ const cellToText = (v) => {
 }
 
 // 旧版 .xls（BIFF8）走 SheetJS：exceljs 只支持 .xlsx
-async function parseXls(filePath) {
+async function parseXls(filePath, buffer = null) {
   const XLSX = await import('xlsx')
   const lib = XLSX.default || XLSX
-  const buf = await readBinaryBuffer(filePath)
+  const buf = await readBinaryBuffer(filePath, buffer)
   const wb = lib.read(new Uint8Array(buf), { type: 'array' })
   const sheets = []
   for (const name of wb.SheetNames || []) {
@@ -131,10 +127,10 @@ async function parseXls(filePath) {
   }
 }
 
-async function parseXlsx(filePath) {
+async function parseXlsx(filePath, buffer = null) {
   const mod = await import('exceljs')
   const ExcelJS = mod.default || mod
-  const buf = await readBinaryBuffer(filePath)
+  const buf = await readBinaryBuffer(filePath, buffer)
   const wb = new ExcelJS.Workbook()
   await wb.xlsx.load(buf)
   const sheets = []
@@ -156,9 +152,9 @@ async function parseXlsx(filePath) {
   }
 }
 
-async function parseCsv(filePath, ext) {
+async function parseCsv(filePath, ext, buffer = null) {
   // 统一走字节读取：既能在后台线程里解析（字节随消息转移进来），也不再依赖 IPC 读文本
-  const raw = new TextDecoder('utf-8').decode(new Uint8Array(await readBinaryBuffer(filePath)))
+  const raw = new TextDecoder('utf-8').decode(new Uint8Array(await readBinaryBuffer(filePath, buffer)))
   const delimiter = ext === 'tsv' ? '\t' : undefined
   const result = Papa.parse(raw, { skipEmptyLines: 'greedy', delimiter })
   if (!result.data?.length) return { success: false, error: '表格中没有数据行' }
@@ -172,8 +168,8 @@ async function parseCsv(filePath, ext) {
   }
 }
 
-async function parseDocx(filePath) {
-  const buf = await readBinaryBuffer(filePath)
+async function parseDocx(filePath, buffer = null) {
+  const buf = await readBinaryBuffer(filePath, buffer)
   const [raw, html] = await Promise.all([
     mammoth.extractRawText({ arrayBuffer: buf.slice(0) }),
     mammoth.convertToHtml({ arrayBuffer: buf.slice(0) })
@@ -189,9 +185,9 @@ async function parseDocx(filePath) {
   }
 }
 
-async function parsePdf(filePath, opts = {}) {
+async function parsePdf(filePath, opts = {}, buffer = null) {
   const shouldAbort = typeof opts.shouldAbort === 'function' ? opts.shouldAbort : null
-  const buf = await readBinaryBuffer(filePath)
+  const buf = await readBinaryBuffer(filePath, buffer)
   // 统一用 pdfjs-dist（与 DocViewer/pdfToImage 同版本），避免 unpdf 内置的 pdfjs 6.x
   // 与项目 pdfjs-dist 4.x 产生 worker 版本冲突（"API 4.10.38 vs Worker 6.1.200"）
   const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs')
@@ -240,8 +236,8 @@ async function parsePdf(filePath, opts = {}) {
   }
 }
 
-async function parsePptx(filePath) {
-  const buf = await readBinaryBuffer(filePath)
+async function parsePptx(filePath, buffer = null) {
+  const buf = await readBinaryBuffer(filePath, buffer)
   const zip = await JSZip.loadAsync(buf)
   const slideFiles = Object.keys(zip.files)
     .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
@@ -284,13 +280,13 @@ const BINARY_EXTS = ['pdf', 'docx', 'pptx', 'xlsx', 'xls', 'csv', 'tsv']
 const TEXT_EXTS = ['txt', 'md', 'markdown', 'json', 'log', 'html', 'xml']
 
 // 按扩展名分发到具体解析实现（主线程与后台解析线程共用同一份实现）
-async function parseByExt(ext, filePath, opts = {}) {
-  if (ext === 'pdf') return await parsePdf(filePath, opts)
-  if (ext === 'docx') return await parseDocx(filePath)
-  if (ext === 'pptx') return await parsePptx(filePath)
-  if (ext === 'xlsx') return await parseXlsx(filePath)
-  if (ext === 'xls') return await parseXls(filePath)
-  if (ext === 'csv' || ext === 'tsv') return await parseCsv(filePath, ext)
+async function parseByExt(ext, filePath, opts = {}, buffer = null) {
+  if (ext === 'pdf') return await parsePdf(filePath, opts, buffer)
+  if (ext === 'docx') return await parseDocx(filePath, buffer)
+  if (ext === 'pptx') return await parsePptx(filePath, buffer)
+  if (ext === 'xlsx') return await parseXlsx(filePath, buffer)
+  if (ext === 'xls') return await parseXls(filePath, buffer)
+  if (ext === 'csv' || ext === 'tsv') return await parseCsv(filePath, ext, buffer)
   return { success: false, error: `不支持的文件类型 .${ext}` }
 }
 
@@ -302,16 +298,26 @@ async function parseByExt(ext, filePath, opts = {}) {
  * 线程不可用或线程内出错时自动退回主线程解析，保证功能始终可用。
  */
 let parseWorker = null
-let parseWorkerFailed = false
+// 线程失败的「冷却截止时间」。旧实现用布尔量 + 永久置位：一次线程加载失败后，
+// 之后所有解析都永远退回主线程（大文件照样卡界面），环境恢复也无法自愈。
+// 改成时间戳后，超过冷却期就会重新尝试后台线程。
+let parseWorkerFailedAt = 0
 let parseSeq = 0
 const pendingParse = new Map()
+const PARSE_WORKER_COOLDOWN_MS = 30 * 1000
+
+// 线程被硬中断（终止线程以响应用户停止）时抛出的错误：可重试。
+// 与 cancelledDocError 区分开——那个表示「用户要求停止」，这个表示「线程没了，换一个再来」。
+const errParseRetryable = () => { const e = new Error('文档解析线程被中断'); e.retryable = true; return e }
 
 function getParseWorker() {
-  if (parseWorkerFailed) return null
+  if (parseWorkerFailedAt && Date.now() - parseWorkerFailedAt < PARSE_WORKER_COOLDOWN_MS) return null
   if (parseWorker) return parseWorker
   try {
-    parseWorker = new Worker(new URL('./docParse.worker.js', import.meta.url), { type: 'module' })
-    parseWorker.onmessage = (event) => {
+    const worker = new Worker(new URL('./docParse.worker.js', import.meta.url), { type: 'module' })
+    worker.onmessage = (event) => {
+      // 线程能回消息说明它是健康的，清掉冷却标记
+      parseWorkerFailedAt = 0
       const { id, ok, res, error } = event.data || {}
       const pending = pendingParse.get(id)
       if (!pending) return
@@ -319,17 +325,17 @@ function getParseWorker() {
       if (ok) pending.resolve(res)
       else pending.reject(new Error(error || '文档解析失败'))
     }
-    parseWorker.onerror = () => {
-      // 线程级失败（脚本加载/运行异常）：标记不可用，并让等待中的请求立即失败，
+    worker.onerror = () => {
+      // 线程级失败（脚本加载/运行异常）：终止并进入冷却期，让等待中的请求立即失败，
       // 由调用方退回主线程解析，避免界面一直停在「解析中」。
-      parseWorkerFailed = true
-      // 是「线程本身不可用」而不是用户停止：让调用方退回主线程解析，
-      // 绝不能报成 cancelled，否则会被上层误判成「用户已停止」。
-      killParseWorker(true)
+      // 是「线程本身不可用」而不是用户停止：绝不能报成 cancelled，否则会被上层误判成
+      // 「用户已停止」。冷却期过后下次解析会重新尝试后台线程（可自愈）。
+      killParseWorker({ failed: true })
     }
-    return parseWorker
+    parseWorker = worker
+    return worker
   } catch (e) {
-    parseWorkerFailed = true
+    parseWorkerFailedAt = Date.now()
     parseWorker = null
     return null
   }
@@ -337,28 +343,28 @@ function getParseWorker() {
 
 // 终止后台线程，等待中的请求随之结束，下次解析会自动重建线程。
 // docx / xlsx 这类解析是一次性调用、库本身不支持中断，终止线程是唯一可靠的停止方式。
-// @param failed true 表示线程本身不可用（脚本加载/运行异常），此时上报普通错误让上层退回主线程解析；
-//               false 表示用户主动停止，上报 cancelled。
-function killParseWorker(failed = false) {
-  if (parseWorker) {
-    try { parseWorker.terminate() } catch (e) { /* 忽略 */ }
-  }
+// @param cancelledId 触发本次终止的请求 id（用户停止：只有它算「被取消」，其它请求可换线程重试）
+// @param failed      true 表示线程本身不可用（脚本加载/运行异常），此时所有等待中的请求都退回主线程解析
+function killParseWorker({ cancelledId = null, failed = false } = {}) {
+  const worker = parseWorker
   parseWorker = null
+  if (worker) {
+    try { worker.terminate() } catch (e) { /* 忽略 */ }
+  }
+  if (failed) parseWorkerFailedAt = Date.now()
   if (pendingParse.size) {
-    const err = failed ? new Error('文档解析线程不可用') : cancelledDocError()
-    for (const pending of pendingParse.values()) pending.reject(err)
+    for (const [id, pending] of pendingParse.entries()) {
+      if (failed) pending.reject(new Error('文档解析线程不可用'))
+      else if (cancelledId != null && id === cancelledId) pending.reject(cancelledDocError())
+      else pending.reject(errParseRetryable())
+    }
     pendingParse.clear()
   }
 }
 
 /** Worker 内部入口：字节已随消息转移进来，直接解析（仅 docParse.worker.js 调用） */
 export async function parseInWorker(ext, buffer, filePath) {
-  setWorkerInput(buffer)
-  try {
-    return await parseByExt(ext, filePath)
-  } finally {
-    setWorkerInput(null)
-  }
+  return await parseByExt(ext, filePath, {}, buffer)
 }
 
 /**
@@ -380,32 +386,47 @@ export async function parseDocument(filePath, opts = {}) {
 
     const worker = getParseWorker()
     if (!worker) {
-      // 后台线程不可用（极老环境）：退回主线程解析，保底可用
+      // 后台线程不可用（极老环境，或正处在失败冷却期）：退回主线程解析，保底可用
       return await parseByExt(ext, filePath, opts)
     }
 
-    const buffer = await readBinaryBuffer(filePath)
-    try {
+    // 字节读进来后所有权转交后台线程（零拷贝），主线程不再持有整份数据；
+    // 因此需要重试时必须重新读盘，不能复用已被转移的 buffer。
+    let buffer = await readBinaryBuffer(filePath)
+    let attempt = 0
+    while (true) {
+      attempt++
       const id = ++parseSeq
-      return await new Promise((resolve, reject) => {
-        let timer = null
-        const settle = (fn) => (v) => { if (timer) { clearInterval(timer); timer = null } fn(v) }
-        pendingParse.set(id, { resolve: settle(resolve), reject: settle(reject) })
-        // 用户停止 → 终止后台线程
-        if (shouldAbort) timer = setInterval(() => { if (shouldAbort()) killParseWorker() }, 120)
-        try {
-          // 转移 buffer 所有权：零拷贝把字节交给后台线程，主线程不再持有整份数据
-          worker.postMessage({ id, ext, filePath, buffer }, [buffer])
-        } catch (postErr) {
-          pendingParse.delete(id)
-          settle(reject)(postErr)
+      try {
+        return await new Promise((resolve, reject) => {
+          let timer = null
+          const settle = (fn) => (v) => { if (timer) { clearInterval(timer); timer = null } fn(v) }
+          pendingParse.set(id, { resolve: settle(resolve), reject: settle(reject) })
+          // 用户停止 → 终止后台线程（线程内解析库不可中断，终止线程是唯一硬中断手段）
+          if (shouldAbort) timer = setInterval(() => { if (shouldAbort()) killParseWorker({ cancelledId: id }) }, 120)
+          try {
+            // 转移 buffer 所有权：零拷贝把字节交给后台线程，主线程不再持有整份数据
+            worker.postMessage({ id, ext, filePath, buffer }, [buffer])
+          } catch (postErr) {
+            pendingParse.delete(id)
+            settle(reject)(postErr)
+          }
+        })
+      } catch (err) {
+        if (err && err.cancelled) throw err
+        if (shouldAbort && shouldAbort()) throw cancelledDocError()
+        // 线程被中途终止（例如并发的另一次解析触发了「停止」）：换个线程重试一次，
+        // 否则一次无关的停止就会让这份文档退化成主线程解析、把界面卡住。
+        if (err && err.retryable && attempt < 2) {
+          const retryWorker = getParseWorker()
+          if (retryWorker) {
+            buffer = await readBinaryBuffer(filePath)
+            continue
+          }
         }
-      })
-    } catch (err) {
-      if (err && err.cancelled) throw err
-      if (shouldAbort && shouldAbort()) throw cancelledDocError()
-      // 后台线程内出错（例如线程里某个解析库加载失败）：退回主线程再解析一次
-      return await parseByExt(ext, filePath, opts)
+        // 后台线程内出错（例如线程里某个解析库加载失败）：退回主线程再解析一次
+        return await parseByExt(ext, filePath, opts)
+      }
     }
   } catch (err) {
     // 用户停止导致的取消：单独标记，让调用方中断整条转换（不要当成解析失败继续降级）

@@ -64,14 +64,17 @@ const LOGIN_RATE_LIMIT = {
 const loginFailures = new Map() // 主服务：ip -> { count, firstFail, lockedUntil, totalFailures, bannedUntil }
 const viewOnlyLoginFailures = new Map() // 仅查看服务独立计数
 
-// 获取客户端 IP
-const getClientIp = (req) => {
-  const forwarded = req.headers['x-forwarded-for']
-  if (forwarded) {
-    return String(forwarded).split(',')[0].trim()
-  }
-  return req.socket?.remoteAddress || 'unknown'
-}
+// 获取客户端 IP。
+// 绝不能采信 X-Forwarded-For：该请求头由客户端自由伪造，用它做登录限流/封禁等于告诉
+// 攻击者「换个头就换一个身份」（自己爆破时还能反过来把别人 IP 打进封禁名单）。
+// 局域网直连场景下（本服务直接监听端口、前面没有反向代理）socket 的 remoteAddress
+// 才是真实来源地址。
+const getClientIp = (req) => req.socket?.remoteAddress || 'unknown'
+
+// 从 Authorization: Bearer <token> 取令牌。
+// 用请求头传令牌可以避免令牌出现在 URL 里（URL 会进访问日志、浏览器历史与 Referer，
+// 容易被同机/同网段的旁观者拿到）。
+const bearerFrom = (req) => String(req.headers?.authorization || '').replace(/^Bearer\s+/i, '').trim()
 
 // 检查是否被限流/封禁（map 参数化，主/仅查看独立）
 const isLoginRateLimited = (ip, map = loginFailures) => {
@@ -815,7 +818,8 @@ const handleRequest = async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/api/status') {
     const config = readConfig()
-    const token = url.searchParams.get('token') || ''
+    // 优先读 Authorization 头，保留 ?token= 作为旧客户端/旧链接的兼容回退
+    const token = bearerFrom(req) || url.searchParams.get('token') || ''
     if (!config.enabled || Date.now() >= config.tokenExpiresAt || !tokenMatches(token)) {
       sendJson(res, 401, { ok: false, error: 'Token 无效或已过期' })
       return
@@ -857,7 +861,10 @@ const handleRequest = async (req, res) => {
       win.webContents.send('agent-api:request', {
         id,
         message,
-        source: String(body.source || 'agent')
+        // 固定为 'agent'，不接受调用方自报：source 决定下游信任级别，
+        // 'task'（定时任务）会跳过危险操作的二次确认，若允许外部程序自称 'task'，
+        // 任何拿到令牌的局域网客户端都能直接删文件/外发内容。
+        source: 'agent'
       })
       try {
         const result = await promise
@@ -972,7 +979,8 @@ const handleViewOnlyRequest = async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/status') {
-    const token = url.searchParams.get('token') || ''
+    // 优先读 Authorization 头，保留 ?token= 作为旧客户端/旧链接的兼容回退
+    const token = bearerFrom(req) || url.searchParams.get('token') || ''
     if (!config.enabled || Date.now() >= config.tokenExpiresAt || !viewOnlyTokenMatches(token)) {
       sendJson(res, 401, { ok: false, error: 'Token 无效或已过期' })
       return
@@ -1855,7 +1863,7 @@ const REMOTE_PAGE = `<!DOCTYPE html>
 
   // 启动时验证 token：有效才连接，无效显示登录界面
   if (token) {
-    fetch('/api/status?token=' + encodeURIComponent(token)).then(function (r) {
+    fetch('/api/status', { headers: { Authorization: 'Bearer ' + token } }).then(function (r) {
       if (r.ok) {
         login.style.display = 'none';
         stage.style.display = 'flex';
@@ -1995,7 +2003,7 @@ const REMOTE_VIEW_PAGE = `<!DOCTYPE html>
   };
   // 已有有效 token 则验证后连接，否则显示登录框
   if (token) {
-    fetch('/api/status?token=' + encodeURIComponent(token)).then(function (r) {
+    fetch('/api/status', { headers: { Authorization: 'Bearer ' + token } }).then(function (r) {
       if (r.ok) {
         login.style.display = 'none';
         stage.style.display = 'flex';

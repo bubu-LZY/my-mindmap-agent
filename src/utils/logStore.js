@@ -137,6 +137,25 @@ function persistNow() {
   }
 }
 
+/**
+ * 存储配额告急时给其他写入让位：砍掉一半最旧的日志并立即落盘。
+ * 日志是可重建的调试数据，复习计划/对话记录不是，所以由后者在写入失败时调用。
+ * @returns {number} 瘦身后剩余的日志条数
+ */
+export function shrinkLogsForStorage() {
+  const logs = readCache()
+  if (!logs.length) return 0
+  logs.splice(0, Math.max(1, Math.floor(logs.length / 2)))
+  dirty = false
+  try {
+    localStorage.setItem(LOG_KEY, JSON.stringify(logs))
+  } catch (e) {
+    // 瘦身一半仍然写不下（说明这份日志本身已异常）：直接清掉，把空间让出来
+    try { localStorage.removeItem(LOG_KEY) } catch (e2) { /* 忽略 */ }
+  }
+  return logs.length
+}
+
 /** 合并写盘：窗口期内的多次 addLog 只落一次 localStorage */
 function schedulePersist() {
   dirty = true

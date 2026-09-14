@@ -4,24 +4,24 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.19.9-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.20.0-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.19.9 更新
+## 🆕 v4.20.0 更新
 
-**文档解析搬到后台线程：不再卡界面、停止是硬中断、大文件内存大幅下降**
+**安全加固 + 与 Desktop ToDo Calendar 的双向同步闭环修复**
 
 | 分类 | 内容 |
 |------|------|
-| 🧵 优化 | PDF / Word / PPT / Excel / CSV 的解析统一改到 Web Worker 后台线程执行，解析大文档时界面保持流畅；线程不可用或异常时自动退回主线程解析，功能不中断 |
-| ⏹ 优化 | 「停止」对 docx / xlsx 这类一次性解析也立即生效（直接终止后台线程并释放资源），不再出现「点了停止还在继续解析」 |
-| 💾 优化 | 读取文件新增直接回传字节的通道，不再走 base64 + 逐字符还原（46MB 的 PDF 原本要生成 6100 万字符的字符串并循环 4600 万次）；读取上限由 64MB 放宽到 256MB |
-| 🐞 修复 | 多模态上传按端点域名匹配参数（DeepSeek 只接受 `user_data`，此前固定发 `file-extract` 导致整批降级本地解析）；文档转导图全链路可停止，停止后不再产出文件；新导图首次打开自动把根节点居中 |
+| 🔐 安全 | 局域网服务的登录限流/封禁不再采信可伪造的 `X-Forwarded-For`；`/api/status` 优先用 `Authorization: Bearer` 头传令牌，避免令牌留在 URL 与访问日志里（`?token=` 仍兼容） |
+| 🔐 安全 | 外部 HTTP 调用不再接受调用方自报 `source`，统一按「外部 Agent」通道校验（此前自称 `task` 可跳过危险操作确认）；MCP 在目录树范围未知时拒绝删除/外发/导出类工具 |
+| 🔄 同步 | 与 Desktop ToDo Calendar 的同步闭环修复：计划读到空时不再误删日历任务、状态回推不再引发往返推送、按日期精确查询任务 |
+| 🛡 稳定 | 复习计划写盘失败不再静默丢失（日志让位后重试并明确提示）；解析/嵌入线程失败改为 30 秒冷却后自愈，不再永久降级；浏览位置缓存限量淘汰 |
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.9)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.20.0)
 
 ---
 

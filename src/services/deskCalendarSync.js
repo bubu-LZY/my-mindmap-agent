@@ -16,8 +16,6 @@ import {
   getReviewPlan,
   getReviewSyncEntries,
   getCycleStatusByKey,
-  markCycleCompleted,
-  markCycleUncompleted,
   setCycleStatusFromRemote
 } from '../utils/reviewPlan'
 
@@ -219,8 +217,12 @@ export const initDeskCalendarStatusListener = () => {
         const localTs = Number(c.statusUpdatedAt) || 0
         // 时间戳仲裁：本端更新的话忽略这次推送，避免把用户刚做的操作回退
         if (remoteTs > 0 && localTs > remoteTs) return
-        if (targetCompleted && !c.completed) markCycleCompleted(item.id, c.cycle)
-        else if (!targetCompleted && c.completed) markCycleUncompleted(item.id, c.cycle)
+        // 回写统一走 setCycleStatusFromRemote（事件类型 remote）：同步服务收到后不会再反向
+        // 触发一次推送，「日历推来 → 本端又推回去」的往返就没有了；时间戳也沿用远端给出的
+        // 值，而不是被本地 now 覆盖（否则下一次仲裁会误判成本端更新）。
+        if (targetCompleted !== !!c.completed) {
+          setCycleStatusFromRemote(item.id, c.cycle, targetCompleted, remoteTs)
+        }
         return
       }
     }
@@ -298,7 +300,7 @@ export const syncReviewCycleToDeskCalendar = async (itemId, cycleNum) => {
   try {
     const calendarId = await ensureCalendarTask(local)
     if (!calendarId) return { success: false, message: '日历任务创建失败' }
-    const remote = await fetchCalendarTask(calendarId)
+    const remote = await fetchCalendarTask(calendarId, local.date)
     if (!remote) return { success: false, message: '未找到日历任务' }
 
     const decision = resolveConflict(local, remote)
@@ -386,9 +388,11 @@ const applyRemoteCompletion = async (calendarId, completed, remote) => {
   await toolsCall(completed ? 'complete_task' : 'uncomplete_task', { id: calendarId })
 }
 
-// 按 id 精确取一条日历任务
-const fetchCalendarTask = async (calendarId) => {
-  const data = await toolsCall('query_tasks', { range: 'all' })
+// 按 id 精确取一条日历任务。
+// 优先按日期缩小查询范围：日历的 query_tasks 支持 date（精确到某一天），比拉全量
+// 任务列表再本地过滤便宜得多——用户每勾选/取消一次复习任务都会走到这里。
+const fetchCalendarTask = async (calendarId, date = '') => {
+  const data = await toolsCall('query_tasks', date ? { date } : { range: 'all' })
   const tasks = Array.isArray(data?.tasks) ? data.tasks : []
   return tasks.find(t => t?.id === calendarId) || null
 }
@@ -402,7 +406,8 @@ const ensureCalendarTask = async (entry) => {
   const mapped = lastTaskMap[entry.key]
   if (mapped) return mapped
 
-  const data = await toolsCall('query_tasks', { range: 'all' })
+  // 只在「同一日期」里找同名复习任务，按日期查询即可，不必拉全量列表
+  const data = await toolsCall('query_tasks', entry.date ? { date: entry.date } : { range: 'all' })
   const tasks = Array.isArray(data?.tasks) ? data.tasks : []
   const base = normalizeReviewTitle(title)
   const existing = tasks.find(t => t?.id && t?.date === entry.date && normalizeReviewTitle(t.title) === base)
@@ -487,14 +492,20 @@ const syncAll = async () => {
     }
   }
 
-  // 复习项/复习周期被删除时，移除对应的日历任务
-  for (const key of Object.keys(lastTaskMap)) {
-    if (validKeys.has(key)) continue
-    try {
-      await toolsCall('delete_task', { id: lastTaskMap[key] })
-      stats.deleted++
-    } catch (e) { /* 已被删除则忽略 */ }
-    delete lastTaskMap[key]
+  // 复习项/复习周期被删除时，移除对应的日历任务。
+  // 保护：本轮复习计划整体为空时绝不动手。计划读到空可能是本端数据出了问题
+  // （storage 被清空、配额写满导致 JSON 解析失败等）而不是用户真的删光了复习项，
+  // 此时按「空计划」清理会把日历上已同步的复习任务全部误删。
+  // 与 desktop_todo_Calendar 侧 ReviewSyncPlanner.Build 的同一保护保持语义一致。
+  if (entries.length > 0) {
+    for (const key of Object.keys(lastTaskMap)) {
+      if (validKeys.has(key)) continue
+      try {
+        await toolsCall('delete_task', { id: lastTaskMap[key] })
+        stats.deleted++
+      } catch (e) { /* 已被删除则忽略 */ }
+      delete lastTaskMap[key]
+    }
   }
 
   lastSyncAt = Date.now()

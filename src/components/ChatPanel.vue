@@ -7556,6 +7556,17 @@ const MCP_SCOPE_TOOLS = {
   export_mindmap_html: ['file_path']
 }
 
+// 不可逆、或会把本机内容送出机器的工具：范围信息缺失时不能降级放行。
+// 放行的含义是「路径必须落在左侧目录树内」；当目录树根为空时，任何路径都无法判定，
+// 对读类工具最多是多读一个文件，而对删除/外发/导出就是「无范围限制地删和发」。
+const MCP_STRICT_SCOPE_TOOLS = new Set([
+  'delete_local_file',
+  'send_wechat_file',
+  'send_feishu_file',
+  'export_to_markdown',
+  'export_mindmap_html'
+])
+
 const getMcpScopeRoots = async () => {
   const roots = []
   try {
@@ -7603,7 +7614,12 @@ const validateMcpScope = async (toolName, args) => {
   if (!fields) return { ok: true }
 
   const roots = await getMcpScopeRoots()
-  if (roots.length === 0) return { ok: true } // 拿不到根目录信息时降级放行（浏览器模式等）
+  if (roots.length === 0) {
+    // 拿不到根目录信息时（浏览器模式、目录树被清空等）：读类工具降级放行，
+    // 删除/外发/导出类工具拒绝执行——范围未知等于没有范围限制。
+    if (MCP_STRICT_SCOPE_TOOLS.has(toolName)) return { ok: false, path: '', roots, noScope: true }
+    return { ok: true }
+  }
 
   for (const f of fields) {
     const v = args?.[f]
@@ -7648,11 +7664,14 @@ const callMcpTool = async (toolName, args, mcpCtx = {}) => {
   // 范围校验：MCP 仅允许访问左侧目录树内的文件和文件夹（目录树内增删改查均放行）
   const scope = await validateMcpScope(toolName, args)
   if (!scope.ok) {
-    addLog('tool_rejected', `MCP 外部调用被拒绝：${toolName}（路径超出目录树范围：${scope.path}）`, { toolName, source: caller }, currentConversation.value?.id)
+    const reason = scope.noScope ? '无法确定目录树范围' : `路径超出目录树范围：${scope.path}`
+    addLog('tool_rejected', `MCP 外部调用被拒绝：${toolName}（${reason}）`, { toolName, source: caller }, currentConversation.value?.id)
     emit('log-updated')
     return {
       success: false,
-      message: `访问被拒绝：MCP 接口仅允许访问左侧目录树内的文件和文件夹（允许的根目录：${scope.roots.join('、')}）。请求的路径「${scope.path}」不在允许范围内，请改用目录树内的文件。`
+      message: scope.noScope
+        ? `访问被拒绝：当前无法确定左侧目录树范围，「${toolNameMap[toolName] || toolName}」属于删除/外发/导出类操作，在范围未知时不会执行。请先在左侧目录树中添加文件夹后重试。`
+        : `访问被拒绝：MCP 接口仅允许访问左侧目录树内的文件和文件夹（允许的根目录：${scope.roots.join('、')}）。请求的路径「${scope.path}」不在允许范围内，请改用目录树内的文件。`
     }
   }
   const toolCall = {
@@ -7734,12 +7753,20 @@ const channelRunChains = new Map()
 let bgRunSeq = 0
 const nextBgRunToken = () => ++bgRunSeq
 
-const processExternalMessage = async (text, source = 'task', extLogger = null) => {
+// source 默认值必须是「不受信任」的通道：
+// 'task'（定时任务）在下面 onToolCall 里是被直接信任、可跳过危险操作确认的，
+// 一旦某个调用方漏传 source，默认成 'task' 就等于把危险操作（删除/外发/覆盖）
+// 悄悄放行。默认 'agent'（外部 Agent）走正常校验，漏传时只会更保守。
+const processExternalMessage = async (text, source = 'agent', extLogger = null) => {
   // 通道内排队：链接到该通道上一个任务（若存在），保持同一通道消息顺序
   const prev = channelRunChains.get(source) || Promise.resolve()
   const run = prev.then(() => runExternalMessage(text, source, extLogger))
   // 存一个吞错的链尾，避免某个任务 reject 后整条队列断裂
-  channelRunChains.set(source, run.then(() => {}, () => {}))
+  const tail = run.then(() => {}, () => {})
+  channelRunChains.set(source, tail)
+  // 队列排空后清掉表项，并切断对已结束闭包的引用：否则每个用过的通道都会在
+  // Map 里留下一条永不释放的 Promise 链（长期运行、来源多变时属于只增不减的泄漏）。
+  tail.then(() => { if (channelRunChains.get(source) === tail) channelRunChains.delete(source) })
   return run
 }
 

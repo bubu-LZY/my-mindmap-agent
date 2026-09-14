@@ -6,9 +6,13 @@
  */
 
 let worker = null
-let workerFailed = false
+// 线程失败的「冷却截止时间」。旧实现是永久置位的布尔标记：线程一次加载/执行失败后，
+// 本地嵌入就永久失效（用户配好环境、模型就位了也不会再尝试）；而且失败的 worker
+// 实例还被留在变量里。改成时间戳 + 冷却期后可以自愈，超时即重建线程重试。
+let workerFailedAt = 0
 let requestSeq = 0
 const pendingRequests = new Map()
+const EMBED_WORKER_COOLDOWN_MS = 30 * 1000
 
 const embedViaApi = async (texts) => {
   try {
@@ -30,11 +34,13 @@ const embedViaApi = async (texts) => {
 }
 
 const getWorker = () => {
-  if (workerFailed) return null
+  if (workerFailedAt && Date.now() - workerFailedAt < EMBED_WORKER_COOLDOWN_MS) return null
   if (worker) return worker
   try {
     worker = new Worker(new URL('./embedding.worker.js', import.meta.url), { type: 'module' })
     worker.onmessage = (event) => {
+      // 线程能回消息说明它是健康的，清掉冷却标记
+      workerFailedAt = 0
       const { id, vectors, error } = event.data || {}
       const pending = pendingRequests.get(id)
       if (!pending) return
@@ -43,14 +49,20 @@ const getWorker = () => {
       else pending.resolve(vectors || [])
     }
     worker.onerror = () => {
-      workerFailed = true
+      // 线程级失败：进入冷却期、终止线程、让等待中的请求立即失败（调用方降级 BM25）。
+      // 冷却期结束后会重建线程重试本地嵌入，而不是永久降级。
+      workerFailedAt = Date.now()
+      const dead = worker
+      worker = null
+      if (dead) { try { dead.terminate() } catch (e) { /* 忽略 */ } }
       for (const pending of pendingRequests.values()) {
         pending.reject(new Error('Embedding Worker 执行失败'))
       }
       pendingRequests.clear()
     }
   } catch {
-    workerFailed = true
+    workerFailedAt = Date.now()
+    worker = null
     return null
   }
   return worker
@@ -76,7 +88,8 @@ const runEmbed = async (texts) => {
 
 export const embeddingService = {
   isFailed() {
-    return workerFailed
+    // 「正在冷却」才算失败降级；冷却结束后会自动重试本地嵌入
+    return !!workerFailedAt && Date.now() - workerFailedAt < EMBED_WORKER_COOLDOWN_MS
   },
 
   // 查询向量（E5 规范：query 前缀）

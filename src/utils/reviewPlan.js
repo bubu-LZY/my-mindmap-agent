@@ -4,6 +4,7 @@
  */
 
 import { textFromHtmlInert } from './inertDom'
+import { shrinkLogsForStorage } from './logStore'
 
 const REVIEW_KEY = 'MINDMAP_REVIEW_PLAN'
 const REMINDER_KEY = 'MINDMAP_REVIEW_REMINDER'
@@ -15,6 +16,16 @@ const notifyReviewPlanChanged = (detail) => {
   try {
     if (typeof window !== 'undefined' && window.dispatchEvent) {
       window.dispatchEvent(new CustomEvent('review-plan-changed', { detail: detail || null }))
+    }
+  } catch { /* 忽略 */ }
+}
+
+// 复习计划写盘失败时广播：存储配额不足/存储不可用时，调用方无法把失败反馈给用户，
+// 由 UI（复习面板）监听后明确提示，避免「勾了像没勾、数据其实丢了」。
+const notifyReviewPlanSaveFailed = () => {
+  try {
+    if (typeof window !== 'undefined' && window.dispatchEvent) {
+      window.dispatchEvent(new CustomEvent('review-plan-save-failed'))
     }
   } catch { /* 忽略 */ }
 }
@@ -148,15 +159,38 @@ export function getReviewPlan() {
   }
 }
 
-// 保存复习计划
+/**
+ * 保存复习计划。
+ *
+ * 不能只 try/catch 后返回 false —— 调用方全都忽略返回值，存储写不进去时
+ * 用户勾选会「看起来成功、实际丢失」，同步服务随后还会把旧状态推回日历。
+ * 因此分级处理：直接写 → 让日志（可重建的调试数据）让位后重试 → 仍失败就
+ * 广播事件让 UI 明确提示用户。
+ */
 function saveReviewPlan(list) {
+  let payload = ''
   try {
-    localStorage.setItem(REVIEW_KEY, JSON.stringify(list))
-    return true
+    payload = JSON.stringify(list)
   } catch (e) {
-    console.error('[复习计划] 保存失败:', e)
+    console.error('[复习计划] 序列化失败:', e)
+    notifyReviewPlanSaveFailed()
     return false
   }
+  const write = () => {
+    try {
+      localStorage.setItem(REVIEW_KEY, payload)
+      return true
+    } catch (e) {
+      return false
+    }
+  }
+  if (write()) return true
+  // 配额不足：日志是可重建的调试数据，复习计划不是——先给日志瘦身再重试一次
+  try { shrinkLogsForStorage() } catch (e) { /* 忽略 */ }
+  if (write()) return true
+  console.error('[复习计划] 保存失败：本地存储空间不足或被禁用，本次修改可能丢失')
+  notifyReviewPlanSaveFailed()
+  return false
 }
 
 // 计算从当前时间开始的 5 个复习日期

@@ -635,12 +635,18 @@ onMounted(() => {
     refreshData()
   }
   refreshDeskCalendarState()
+  // 复习计划写盘失败（本地存储配额不足/被禁用）：必须让用户看见，否则勾选会静默丢失
+  const onReviewSaveFailed = () => {
+    ElMessage.error('复习计划保存失败：本地存储空间不足或被禁用，本次操作可能未保存。请清理日志或数据后重试。')
+  }
   window.addEventListener('review-plan-changed', onReviewChanged)
   // 设置页改动同步开关/Token 后即时刷新按钮显隐
   window.addEventListener('desk-calendar-sync-changed', refreshDeskCalendarState)
+  window.addEventListener('review-plan-save-failed', onReviewSaveFailed)
   onBeforeUnmount(() => {
     window.removeEventListener('review-plan-changed', onReviewChanged)
     window.removeEventListener('desk-calendar-sync-changed', refreshDeskCalendarState)
+    window.removeEventListener('review-plan-save-failed', onReviewSaveFailed)
   })
 })
 
