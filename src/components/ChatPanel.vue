@@ -1163,7 +1163,7 @@ import { smartClozeNodes, smartClozeFullMap } from '../utils/aiCloze'
 import { parseReferenceLink, isReferenceLink } from '../services/referenceService'
 import { classifyMindMap, mindMapTypePrompt } from '../utils/mindMapType'
 import { parseDocument } from '../services/docParseService'
-import { ConcurrencyLimiter } from '../utils/concurrencyLimiter'
+import { ConcurrencyLimiter, isRateLimitError, isNetworkError } from '../utils/concurrencyLimiter'
 import { ensureBackgroundMindMap, extractFilePathFromText, normalizeFileId } from '../services/backgroundMindMapService'
 import {
   createConversation,
@@ -1313,6 +1313,9 @@ const activePlan = computed(() => {
 // 后台任务运行状态：Set<source>（多通道并行，各自独立；不影响主界面发送按钮）
 // 使用 reactive(new Set()) 保证 .add/.delete 能触发模板更新。
 const backgroundRunning = reactive(new Set())
+// 后台「文档转导图」通道的独立 aiService：点停止时要一并 abort，否则已发出的分段请求仍会跑完，
+// 界面看起来像「点了停止没反应」。
+let convertAbortService = null
 const backgroundSourceLabel = computed(() => {
   const map = { feishu: '飞书', wechat: '微信', task: '定时任务', agent: '外部 Agent', convert: '文档转导图' }
   const list = [...backgroundRunning].map(s => map[s] || s)
@@ -2237,6 +2240,8 @@ const stopGeneration = () => {
   dismissDangerDialog()
   stopRequested.value = true
   aiService.abort()
+  // 后台文档转换走的是独立 aiService，必须一起中止，否则正在跑的分段请求不会停
+  try { convertAbortService?.abort() } catch (e) { /* 忽略 */ }
   runSeq++
 
   // 取消等待用户回答的 AI 续写提问
@@ -7090,6 +7095,15 @@ const convertDocToMindmap = async (filePath, fileName, options = {}) => {
     emit('tool-call-status', 'thinking')
     stopRequested.value = false
   }
+  // 通过上面的并发/占用校验、确定本次转换真正开始后，才登记中止句柄；
+  // 否则被提前 return 拒绝的重复调用会覆盖掉正在运行任务的中止句柄，令「停止」失效。
+  convertAbortService = svc
+
+  // 取消支持：用户点「停止」后 stopRequested 置位，下面每个耗时阶段前后都会检查。
+  // 此前整条转换链路没有任何停止检查，停止后仍会一路解析完并写出 .smm 文件。
+  const cancelledError = () => { const err = new Error('已停止转换'); err.cancelled = true; return err }
+  const isCancelledError = (err) => !!(err && err.cancelled)
+  const ensureNotStopped = () => { if (stopRequested.value) throw cancelledError() }
 
   // 进度更新统一入口：工具通道写日志，前台通道写消息气泡
   // 同时更新 toolCall 的 summary，让工具卡片上直接显示进度（用户不用点进日志也能看到）
@@ -7151,33 +7165,30 @@ const convertDocToMindmap = async (filePath, fileName, options = {}) => {
         setProgress('已启用多模态，正在通过 files API 发送文档...')
         const prompt = MINDMAP_TEMPLATE_PROMPT + '\n\n（本条消息附带该文档文件，请直接查看文件内容作答，无需调用 read_local_file 等工具重复读取）'
         try {
-          const r = await window.electronAPI.fs.readBinary(fp)
-          if (r && r.success && r.base64) {
-            const up = await uploadFileForProvider({
-              baseURL: visionOverride.baseURL,
-              profileId: visionOverride.profileId,
-              fileName: fp.split(/[\\/]/).pop() || 'file',
-              mimeType,
-              base64: r.base64,
-              customFilesURL: visionOverride.filesURL || ''
-            })
-            if (up && up.success && up.ref) {
-              addLog('tool_call', `工具: files API 上传 [files-api]\n文件: ${fp}\nMIME: ${mimeType}`, {}, currentConversation.value?.id)
-              emit('log-updated')
-              const choice = await svc.chat([{ type: 'text', text: prompt }, up.ref], systemPrompt, null, { configOverride: visionOverride })
-              markdown = String(choice?.message?.content || '').trim()
-            } else {
-              // files API 上传失败 → 标记批次失败，后续文件直接跳过
-              batchFilesApiFailed = true
-              addLog('tool_call', `工具: files API 上传 [files-api]\n原因: ${up?.error || '上传失败'}，批次内跳过后续文件，降级本地文档解析\n上传地址: ${up?.uploadURL || '未知'}`, {}, currentConversation.value?.id)
-              emit('log-updated')
-            }
+          // 只把路径交给主进程：上传前不再把整份文件读成 base64（大文档内存与卡顿的主因）
+          const up = await uploadFileForProvider({
+            baseURL: visionOverride.baseURL,
+            profileId: visionOverride.profileId,
+            fileName: fp.split(/[\\/]/).pop() || 'file',
+            mimeType,
+            filePath: fp,
+            customFilesURL: visionOverride.filesURL || ''
+          })
+          ensureNotStopped()
+          if (up && up.success && up.ref) {
+            addLog('tool_call', `工具: files API 上传 [files-api]\n文件: ${fp}\nMIME: ${mimeType}`, {}, currentConversation.value?.id)
+            emit('log-updated')
+            const choice = await svc.chat([{ type: 'text', text: prompt }, up.ref], systemPrompt, null, { configOverride: visionOverride })
+            markdown = String(choice?.message?.content || '').trim()
           } else {
+            // files API 上传失败 → 标记批次失败，后续文件直接跳过
             batchFilesApiFailed = true
-            addLog('tool_call', '工具: files API 上传 [files-api]\n原因: 读取文件二进制失败，批次内跳过后续文件，降级本地文档解析', {}, currentConversation.value?.id)
+            addLog('tool_call', `工具: files API 上传 [files-api]\n原因: ${up?.error || '上传失败'}，批次内跳过后续文件，降级本地文档解析\n上传地址: ${up?.uploadURL || '未知'}`, {}, currentConversation.value?.id)
             emit('log-updated')
           }
         } catch (e) {
+          // 用户停止：直接中断，不要降级继续跑（否则停止后仍会解析完并写出文件）
+          if (isCancelledError(e) || stopRequested.value) throw cancelledError()
           batchFilesApiFailed = true
           addLog('tool_call', `工具: files API 多模态 [files-api]\n原因: ${e?.message || '调用异常'}，批次内跳过后续文件，降级本地文档解析`, {}, currentConversation.value?.id)
           emit('log-updated')
@@ -7187,8 +7198,10 @@ const convertDocToMindmap = async (filePath, fileName, options = {}) => {
 
       // 2. 降级：files API 未配置 / 上传或调用失败 → 本地文档解析（文本提取）
       if (!markdown) {
+        ensureNotStopped()
         setProgress('多模态不可用，正在本地解析文档内容...')
-        const res = await parseDocument(fp)
+        const res = await parseDocument(fp, { shouldAbort: () => stopRequested.value })
+        if (res && res.cancelled) throw cancelledError()
         if (!res || !res.success || !String(res.text || '').trim()) {
           throw new Error(res?.error || '无法提取该文档的文本内容（可能是扫描版 PDF 或空文件）')
         }
@@ -7199,21 +7212,33 @@ const convertDocToMindmap = async (filePath, fileName, options = {}) => {
         setProgress(chunks.length > 1 ? `文档较长，正在分段整理（共 ${chunks.length} 段）...` : '正在用 AI 语义整理文档结构...')
         // 并发分段整理：用并发控制器（支持限流降级）并行处理各段，提升长文档转换速度
         const limiter = new ConcurrencyLimiter({ maxConcurrency: 4 })
-        const parts = await limiter.runAll(
-          chunks.map((chunk, i) => ({ chunk, i })),
-          async ({ chunk, i }) => {
-            const segLabel = chunks.length > 1 ? `（第 ${i + 1}/${chunks.length} 段）` : ''
-            const textPrompt = `${MINDMAP_TEMPLATE_PROMPT}\n\n【文档内容${segLabel}】\n${chunk}`
-            try {
-              const choice = await svc.chat(textPrompt, systemPrompt)
-              const part = String(choice?.message?.content || '').trim()
-              return part || buildFallbackMarkdown(chunk, `${fpBase}（第${i + 1}段）`)
-            } catch (e) {
-              // 该段 AI 整理失败（如 429 限流）→ 该段本地规则兜底，保证内容仍进入导图
-              return buildFallbackMarkdown(chunk, `${fpBase}（第${i + 1}段）`)
-            }
-          }
-        )
+        let parts
+        try {
+          parts = await limiter.runAll(
+            chunks.map((chunk, i) => ({ chunk, i })),
+            async ({ chunk, i }) => {
+              const segLabel = chunks.length > 1 ? `（第 ${i + 1}/${chunks.length} 段）` : ''
+              const textPrompt = `${MINDMAP_TEMPLATE_PROMPT}\n\n【文档内容${segLabel}】\n${chunk}`
+              try {
+                const choice = await svc.chat(textPrompt, systemPrompt)
+                if (stopRequested.value) throw cancelledError()
+                const part = String(choice?.message?.content || '').trim()
+                return part || buildFallbackMarkdown(chunk, `${fpBase}（第${i + 1}段）`)
+              } catch (e) {
+                // 用户已停止：直接中断，不再本地兜底（否则停止后仍会一路跑完并写出文件）
+                if (isCancelledError(e) || stopRequested.value) throw cancelledError()
+                // 限频/网络类错误交给并发控制器按档位重试与降级，不再一次性降成本地规则兜底
+                if (isRateLimitError(e) || isNetworkError(e)) throw e
+                return buildFallbackMarkdown(chunk, `${fpBase}（第${i + 1}段）`)
+              }
+            },
+            { isAborted: () => stopRequested.value }
+          )
+        } catch (e) {
+          if (isCancelledError(e) || e?.aborted || stopRequested.value) throw cancelledError()
+          throw e
+        }
+        if (stopRequested.value) throw cancelledError()
         markdown = mergeMarkdownParts(parts)
         if (!markdown) {
           markdown = buildFallbackMarkdown(fullText, fpBase)
@@ -7244,6 +7269,7 @@ const convertDocToMindmap = async (filePath, fileName, options = {}) => {
     }
     if (!markdown) throw new Error('AI 未返回有效的大纲内容')
 
+    ensureNotStopped()
     // 3. Markdown → 树
     const tree = parseMarkdownToTree(markdown.replace(/^#\s*/m, ''))
     if (!tree || !tree.data || !tree.children || tree.children.length === 0) {
@@ -7282,6 +7308,18 @@ const convertDocToMindmap = async (filePath, fileName, options = {}) => {
     if (!viaTool) scrollToBottom()
     return aiMsg.content
   } catch (error) {
+    // 用户停止：按「已停止」收尾，不算错误，也不写文件（文件在保存阶段之后才产生）
+    if (isCancelledError(error)) {
+      if (aiMsg && aiMsg.toolCalls && aiMsg.toolCalls[0]) aiMsg.toolCalls[0].status = 'stopped'
+      if (aiMsg) aiMsg.content = '（已手动停止）'
+      if (!viaTool) {
+        aiStatus.value = 'idle'
+        emit('tool-call-status', 'idle')
+      }
+      addLog('tool_result', '工具: AI转换为思维导图\n结果: 已手动停止，未生成文件', { toolName: 'convert_doc_to_mindmap' }, currentConversation.value?.id)
+      emit('log-updated')
+      return aiMsg ? aiMsg.content : ''
+    }
     aiMsg.toolCalls[0].status = 'error'
     aiMsg.content = `转换失败：${error.message || '未知错误'}`
     if (!viaTool) {
@@ -7295,6 +7333,7 @@ const convertDocToMindmap = async (filePath, fileName, options = {}) => {
   } finally {
     if (!viaTool) setTimeout(() => { aiStatus.value = 'idle' }, 500)
     backgroundRunning.delete('convert')
+    if (convertAbortService === svc) convertAbortService = null
     svc.resetAbort()
     persistConversation()
   }

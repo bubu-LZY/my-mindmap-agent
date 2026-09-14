@@ -735,6 +735,8 @@ let mindMap = null
 let offscreenContainer = null
 let imgResizeRenderTimer = null
 let mindMapViewSaveTimer = null
+// 「首次打开该文件时把根节点居中」的待办标记（见 initMindMap / node_tree_render_end）
+let rootCenterPending = false
 let miniMapUpdateTimer = null
 let miniMapGeneration = 0
 let miniMapViewBoxDrag = null
@@ -1631,6 +1633,8 @@ const initMindMap = () => {
 
   const normalizedData = cloneAndNormalize(props.data)
   const savedViewData = readMindMapViewState()
+  // 没有历史视图状态的首次打开：等首次渲染完成后把根节点挪到画布正中
+  rootCenterPending = !savedViewData
 
   // 确定初始化容器：真实容器 0 尺寸时（大纲/关联图模式被 v-show 隐藏为 display:none），
   // 用离屏容器兜底，保证 mindMap 实例在这些模式下也能创建（renderer.renderTree 可用，
@@ -1949,6 +1953,13 @@ const initMindMap = () => {
     emit('node-tree-render-end', ...args)
     // 渲染完成后重新应用挖空样式
     setTimeout(() => applyClozeStyles(), 100)
+    // 首次渲染完成且该文件没有历史视图状态 → 把根节点居中。
+    // 库默认的 fit 只保证「整张图」落在画布内，大图（如刚由文档生成、左右严重不对称的导图）
+    // 的根节点会明显偏离正中，表现为打开后一眼看不到根节点，要手动按 Ctrl+Enter 才回中间。
+    if (rootCenterPending) {
+      rootCenterPending = false
+      try { mindMap.renderer.setRootNodeCenter() } catch (e) { /* 忽略 */ }
+    }
   })
 
   // 视图隐藏期间发生过渲染则置位：隐藏中（display:none）渲染会导致 foreignObject 文本丢失，

@@ -7,6 +7,8 @@
 import mammoth from 'mammoth'
 import Papa from 'papaparse'
 import JSZip from 'jszip'
+// 「用户已停止」专用错误：解析中途取消时抛出，由 parseDocument 转成 { cancelled: true }
+const cancelledDocError = () => { const e = new Error('已取消'); e.cancelled = true; return e }
 
 const escapeHtml = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -26,7 +28,11 @@ async function readBinaryBuffer(filePath) {
   if (!r || !r.success) throw new Error(r?.error || '读取文件失败')
   if (r.data) {
     const u8 = r.data instanceof Uint8Array ? r.data : new Uint8Array(r.data)
-    return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength)
+    // 视图正好覆盖整个 buffer 时直接复用，避免再复制一份：大 PDF 动辄上百 MB，
+    // 多一次 slice 就是多一份同尺寸内存 + 一次全量拷贝（卡顿来源之一）。
+    return (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength)
+      ? u8.buffer
+      : u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength)
   }
   // 旧版 base64 回退
   const bin = atob(r.base64)
@@ -172,7 +178,8 @@ async function parseDocx(filePath) {
   }
 }
 
-async function parsePdf(filePath) {
+async function parsePdf(filePath, opts = {}) {
+  const shouldAbort = typeof opts.shouldAbort === 'function' ? opts.shouldAbort : null
   const buf = await readBinaryBuffer(filePath)
   // 统一用 pdfjs-dist（与 DocViewer/pdfToImage 同版本），避免 unpdf 内置的 pdfjs 6.x
   // 与项目 pdfjs-dist 4.x 产生 worker 版本冲突（"API 4.10.38 vs Worker 6.1.200"）
@@ -186,18 +193,27 @@ async function parsePdf(filePath) {
   }).promise
   const totalPages = pdf.numPages || 0
   const parts = []
-  for (let i = 1; i <= totalPages; i++) {
-    // 每 5 页让出主线程，避免大 PDF 同步解析把界面卡死。
-    if (i % 5 === 0) await new Promise((resolve) => setTimeout(resolve, 0))
-    let page
-    try {
-      page = await pdf.getPage(i)
-      const content = await page.getTextContent()
-      const t = (content.items || []).map(it => it.str || '').join(' ')
-      if (t.trim()) parts.push(t)
-    } finally {
-      if (page) { try { page.cleanup() } catch {} }
+  try {
+    for (let i = 1; i <= totalPages; i++) {
+      // 用户已停止：立刻中断，不继续把整份 PDF 解析完（否则停止后仍会长时间占 CPU）
+      if (shouldAbort && shouldAbort()) throw cancelledDocError()
+      // 每 5 页让出主线程，避免大 PDF 同步解析把界面卡死。
+      if (i % 5 === 0) await new Promise((resolve) => setTimeout(resolve, 0))
+      let page
+      try {
+        page = await pdf.getPage(i)
+        const content = await page.getTextContent()
+        const t = (content.items || []).map(it => it.str || '').join(' ')
+        if (t.trim()) parts.push(t)
+      } finally {
+        if (page) { try { page.cleanup() } catch {} }
+      }
     }
+  } finally {
+    // 释放 pdfjs 文档与 worker 持有的整份 PDF 数据（字体缓存、页面对象等）。
+    // 不释放时大 PDF 会一直占住数百 MB 内存，直到刷新窗口；停止/完成后也降不下来。
+    try { await pdf.cleanup() } catch (e) { /* 忽略 */ }
+    try { await pdf.destroy() } catch (e) { /* 忽略 */ }
   }
   const merged = parts.join('\n\n')
   const clean = merged.replace(/\u0000/g, '').trim()
@@ -261,7 +277,7 @@ async function parsePptx(filePath) {
 export async function parseDocument(filePath, opts = {}) {
   const ext = String(filePath || '').split('.').pop().toLowerCase()
   try {
-    if (ext === 'pdf') return await parsePdf(filePath)
+    if (ext === 'pdf') return await parsePdf(filePath, opts)
     if (ext === 'docx') return await parseDocx(filePath)
     if (ext === 'pptx') return await parsePptx(filePath)
     if (ext === 'xlsx') return await parseXlsx(filePath)
@@ -273,6 +289,8 @@ export async function parseDocument(filePath, opts = {}) {
     }
     return { success: false, error: `不支持的文件类型 .${ext}` }
   } catch (err) {
+    // 用户停止导致的取消：单独标记，让调用方中断整条转换（不要当成解析失败继续降级）
+    if (err && err.cancelled) return { success: false, cancelled: true, error: '已取消' }
     return { success: false, error: err?.message || String(err) }
   }
 }

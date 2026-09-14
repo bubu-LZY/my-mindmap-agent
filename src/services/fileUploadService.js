@@ -75,6 +75,36 @@ function buildPurpose(provider, isImage) {
   return 'file-extract' // zhipu / volcengine / qwen / ernie / spark / siliconflow 等
 }
 
+// 从（自定义）Files 端点域名识别厂商；认不出返回空串，交由调用方回退到 baseURL 的厂商
+function pickVendor(url) {
+  const s = String(url || "").toLowerCase()
+  if (!s) return ""
+  const table = [
+    ["moonshot", "kimi"],
+    ["bigmodel", "zhipu"], ["zhipu", "zhipu"],
+    ["volcengine", "volcengine"], ["ark.cn", "volcengine"], ["byteplus", "volcengine"], ["doubao", "volcengine"],
+    ["dashscope", "qwen"], ["aliyun", "qwen"],
+    ["generativelanguage", "gemini"], ["googleapis", "gemini"],
+    ["anthropic", "anthropic"], ["claude", "anthropic"],
+    ["deepseek", "deepseek"],
+    ["minimax", "minimax"], ["minimaxi", "minimax"],
+    ["baidubce", "ernie"], ["wenxin", "ernie"], ["yiyan", "ernie"],
+    ["xf-yun", "spark"], ["xunfei", "spark"], ["spark-api", "spark"],
+    ["siliconflow", "siliconflow"],
+    ["openai", "openai"]
+  ]
+  for (const [kw, p] of table) if (s.includes(kw)) return p
+  return ""
+}
+
+// 从 400 返回体里解析服务端声明的可用 purpose（形如 Supported purposes: ["user_data"]）
+function pickSupportedPurpose(text) {
+  const m = String(text || "").match(/supported purposes?\s*:\s*\[([^\]]*)\]/i)
+  if (!m) return ""
+  const vm = m[1].match(/[A-Za-z_][A-Za-z0-9_-]*/)
+  return vm ? vm[0] : ""
+}
+
 /**
  * 上传文件到对应厂商的 files API
  * @param {object} opts
@@ -82,13 +112,15 @@ function buildPurpose(provider, isImage) {
  *   - profileId 配置档 id（主进程据此注入 Authorization，渲染进程不持有明文 apiKey）
  *   - fileName  文件名
  *   - mimeType  MIME 类型
- *   - base64    文件二进制 base64（不含 data: 前缀）
+ *   - base64    文件二进制 base64（不含 data: 前缀）；与 filePath 二选一
+ *   - filePath  本地文件绝对路径（优先；主进程直接读盘上传，渲染进程不必持有整份 base64）
  *   - customFilesURL  用户手动指定的 Files API 端点（留空则用内置按厂商推导）
  * @returns {Promise<{ success: boolean, provider?: string, ref?: object, error?: string }>}
  *   ref 为消息 content part 结构（各厂商不同），失败时 success=false
  */
-export async function uploadFileForProvider({ baseURL, profileId, fileName, mimeType, base64, customFilesURL }) {
-  if (!base64) return { success: false, error: '缺少文件数据' }
+export async function uploadFileForProvider({ baseURL, profileId, fileName, mimeType, base64, filePath, customFilesURL }) {
+  // 有路径时交给主进程读盘上传：渲染进程不再持有整份文件的 base64（大文档内存/卡顿主因）
+  if (!base64 && !filePath) return { success: false, error: '缺少文件数据' }
   const provider = detectProvider(baseURL)
   const isImage = isImageMime(mimeType)
 
@@ -106,20 +138,39 @@ export async function uploadFileForProvider({ baseURL, profileId, fileName, mime
 
   if (!uploadURL) return { success: false, error: '无法确定 files API 上传地址' }
 
-  const purpose = customFilesURL ? (isImage ? 'image' : 'file-extract') : buildPurpose(provider, isImage)
+  // 自定义 Files 端点也按端点域名推导厂商的 purpose：曾无条件发 file-extract，
+  // 而 DeepSeek 的 files API 只接受 user_data，上传直接 400 → 整批降级本地解析。
+  const customVendor = pickVendor(customFilesURL)
+  const effectiveProvider = customVendor || provider
+  const purpose = customVendor
+    ? buildPurpose(customVendor, isImage)
+    : (customFilesURL && isImage ? 'image' : buildPurpose(provider, isImage))
 
   // 走主进程代理上传（避免 CORS；主进程 fetch + FormData）
   if (!window.electronAPI || !window.electronAPI.aiUploadFile) {
     return { success: false, error: '当前环境不支持文件上传（请使用桌面应用）' }
   }
-  const resp = await window.electronAPI.aiUploadFile({
+  // 有 filePath 就走路径模式：主进程直接读盘组 multipart，渲染进程不必把整份文件读成 base64
+  const callUpload = (p) => window.electronAPI.aiUploadFile({
     url: uploadURL,
     profileId,
     fileName,
-    base64,
     mimeType,
-    purpose
+    purpose: p,
+    ...(filePath ? { filePath } : { base64 })
   })
+
+  let usedPurpose = purpose
+  let resp = await callUpload(usedPurpose)
+  // 有的厂商只接受特定 purpose，并在 400 里明确列出支持值（如 DeepSeek 仅 user_data）。
+  // 命中这类错误时按服务端给的值再试一次，避免一次 purpose 不匹配就让整批降级到本地解析。
+  if ((!resp || !resp.success) && resp?.status === 400) {
+    const supported = pickSupportedPurpose(resp.error)
+    if (supported && supported !== usedPurpose) {
+      usedPurpose = supported
+      resp = await callUpload(usedPurpose)
+    }
+  }
 
   if (!resp || !resp.success) {
     const statusInfo = resp?.status ? `HTTP ${resp.status}` : ''
@@ -159,7 +210,7 @@ export async function uploadFileForProvider({ baseURL, profileId, fileName, mime
   const url = ids.url
 
   // 构造 content part（消息里引用）
-  const ref = buildContentPart(provider, { fileId, fileUri, url, mimeType, fileName })
+  const ref = buildContentPart(effectiveProvider, { fileId, fileUri, url, mimeType, fileName })
   if (!ref) {
     // 打印完整返回体（截断 + 剥离敏感信息），让任何厂商的异常都能一眼定位，不再靠猜
     let body = ''
@@ -168,7 +219,7 @@ export async function uploadFileForProvider({ baseURL, profileId, fileName, mime
     return { success: false, error: `上传成功但无法解析文件引用标识。返回体：${body || '空'}`, uploadURL }
   }
 
-  return { success: true, provider, ref, fileId, fileUri, url }
+  return { success: true, provider: effectiveProvider, ref, fileId, fileUri, url }
 }
 
 /**

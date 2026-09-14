@@ -5,6 +5,8 @@
 const { ipcMain } = require('electron')
 const { getAiTimeoutMs } = require('../utils/store')
 const { assertSafeAiEndpoint, fetchWithGuard } = require('../utils/netGuard')
+const fs = require('fs')
+const path = require('path')
 
 /**
  * 构建 chat completions API URL
@@ -20,6 +22,23 @@ function buildChatURL(baseURL, autoComplete = true) {
   // 已带版本号（/v1、/v4、/v1beta、/compatible-mode/v1 等）→ 只补 /chat/completions，避免拼出 /v4/v1/... 双重路径
   if (/\/v\d+[a-z]*$/i.test(url)) return url + '/chat/completions'
   return url + '/v1/chat/completions'
+}
+
+// 按扩展名推断 MIME：仅当渲染进程未显式给 mimeType 时兜底
+function guessMimeByPath(filePath) {
+  const ext = String(filePath || '').split('.').pop().toLowerCase()
+  const map = {
+    pdf: 'application/pdf',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
+    txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  }
+  return map[ext] || 'application/octet-stream'
 }
 
 function buildEmbeddingURL(baseURL, autoComplete = true) {
@@ -252,18 +271,29 @@ ipcMain.on('ai:chatCancel', (event, id) => {
  *   - extraFields: 厂商特定附加表单字段（如 Gemini 的 metadata、通义的其它字段）
  * 返回: { success, data } 或 { success: false, status, error }
  */
-ipcMain.handle('ai:uploadFile', async (event, { url, apiKey, profileId, fileName, base64, mimeType, purpose, extraFields }) => {
-  if (!url || !base64) {
+ipcMain.handle('ai:uploadFile', async (event, { url, apiKey, profileId, fileName, base64, mimeType, purpose, extraFields, filePath }) => {
+  if (!url || (!base64 && !filePath)) {
     return { success: false, error: '缺少上传地址或文件数据' }
   }
   const controller = new AbortController()
   const timeoutMs = getAiTimeoutMs()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const buf = Buffer.from(base64, 'base64')
+    // 优先按路径读盘：大文档转 base64 会膨胀 1/3 体积，再经 IPC 拷贝一份，
+    // 是渲染进程内存暴涨与卡顿的主要来源；有路径就完全不走 base64。
+    let buf
+    let name = fileName || 'file'
+    let type = mimeType || 'application/octet-stream'
+    if (filePath) {
+      buf = await fs.promises.readFile(filePath)
+      if (!fileName) name = path.basename(filePath)
+      if (!mimeType) type = guessMimeByPath(filePath)
+    } else {
+      buf = Buffer.from(base64, 'base64')
+    }
     const form = new FormData()
-    const blob = new Blob([buf], { type: mimeType || 'application/octet-stream' })
-    form.append('file', blob, fileName || 'file')
+    const blob = new Blob([buf], { type })
+    form.append('file', blob, name)
     if (purpose) form.append('purpose', purpose)
     if (extraFields && typeof extraFields === 'object') {
       for (const [k, v] of Object.entries(extraFields)) {

@@ -4,23 +4,24 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.19.7-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.19.8-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.19.7 更新
+## 🆕 v4.19.8 更新
 
-**左侧栏统一宽度 + 复习日期条更紧凑**
+**多模态上传参数按厂商匹配 + 文档转换可中断、更省内存**
 
 | 分类 | 内容 |
 |------|------|
-| 📐 优化 | 「标签」「复习」与「文件目录」侧栏宽度统一，切换 tab 时不再整栏跳宽 |
-| 📅 优化 | 复习页日期标签只显示「几月几号」并调小字号，一屏能看到更多日期 |
-| 🧹 优化 | 移除废弃的加宽样式与变量；窄侧栏下「复习总览」统计行可自动换行 |
+| 🐞 修复 | 自定义 Files 端点上传时固定发 `file-extract`，DeepSeek 只接受 `user_data` → 直接 400，整批文件被跳过、降级为本地解析。现按端点域名推导厂商参数，并在 400 时按服务端声明的可用值自动重试一次 |
+| ⏹ 修复 | 「停止」对后台的文档转导图无效：解析、分段整理、写文件前都没有中断检查，停止后仍会跑完并生成 `.smm`；现在全链路可中断，停止后不再产出文件 |
+| 🧠 优化 | 上传改由主进程按路径读盘组装 multipart，渲染进程不再额外持有一份整文件 base64；PDF 解析结束后释放 pdfjs 文档与资源，二进制读取也不再多余拷贝一份，显著降低大文档转换的内存峰值与卡顿 |
+| 🎯 修复 | 新生成的导图首次打开时根节点不在画布正中，要手动按 Ctrl+Enter 才居中；现在首次打开自动居中（有历史视角的文件仍保留用户视角） |
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.7)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.19.8)
 
 ---
 
