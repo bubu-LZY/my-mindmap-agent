@@ -509,17 +509,23 @@ ipcMain.handle('fs:stat', async (event, filePath) => {
   }
 })
 
-// 读取二进制文件（docx/pdf 等，返回 base64 供渲染进程解压解析）
-ipcMain.handle('fs:readBinary', async (event, filePath) => {
+// 读取二进制文件（docx/pdf 等）
+// - 默认返回 base64（兼容既有调用方）
+// - opts.raw=true 时直接回传字节：结构化克隆只拷一次，避免 base64 膨胀 1/3，
+//   也避免渲染进程再用逐字符循环把上千万字符还原成字节（大文件卡顿的主因）。
+ipcMain.handle('fs:readBinary', async (event, filePath, opts) => {
   try {
     assertSafePath(filePath)
     const stat = await fs.promises.stat(filePath)
-    // 上限 64MB，防御异常大文件撑爆 IPC
-    if (stat.size > 64 * 1024 * 1024) {
-      return { success: false, error: '文件过大（超过 64MB），不支持读取' }
+    const raw = !!(opts && opts.raw)
+    // base64 通道维持 64MB 上限；raw 通道不做 base64 膨胀，可放宽到 256MB
+    const maxBytes = raw ? 256 * 1024 * 1024 : 64 * 1024 * 1024
+    if (stat.size > maxBytes) {
+      return { success: false, error: `文件过大（超过 ${Math.round(maxBytes / 1024 / 1024)}MB），不支持读取` }
     }
     const buffer = await fs.promises.readFile(filePath)
-    return { success: true, base64: buffer.toString('base64'), size: stat.size, fileName: path.basename(filePath) }
+    const base = { success: true, size: stat.size, fileName: path.basename(filePath) }
+    return raw ? { ...base, data: buffer } : { ...base, base64: buffer.toString('base64') }
   } catch (error) {
     return { success: false, error: '读取文件失败: ' + error.message }
   }

@@ -18,6 +18,12 @@ export default defineConfig({
     port: 5173,
     strictPort: true
   },
+  // Web Worker（embedding / docParse）一律按 ES Module 构建：
+  // Vite 默认的 iife 格式不支持代码分割，而解析线程里有 pdfjs / xlsx / exceljs 等动态导入，
+  // 会产生多 chunk，必须用 es 格式；创建 Worker 时我们本来也是按 { type: 'module' } 创建的。
+  worker: {
+    format: 'es'
+  },
   build: {
     commonjsOptions: {
       transformMixedEsModules: true

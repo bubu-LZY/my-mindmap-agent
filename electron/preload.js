@@ -289,7 +289,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     selectFolder: () => ipcRenderer.invoke('fs:selectFolder'),
     listDir: (dirPath) => ipcRenderer.invoke('fs:listDir', dirPath),
     readFile: (filePath) => ipcRenderer.invoke('fs:readFile', filePath),
-    readBinary: (filePath) => ipcRenderer.invoke('fs:readBinary', filePath),
+    readBinary: (filePath, opts) => ipcRenderer.invoke('fs:readBinary', filePath, opts),
     writeFile: (filePath, content) => ipcRenderer.invoke('fs:writeFile', filePath, content),
     writeBinary: (filePath, base64) => ipcRenderer.invoke('fs:writeBinary', filePath, base64),
     getTempDir: () => ipcRenderer.invoke('fs:getTempDir'),

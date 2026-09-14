@@ -22,19 +22,29 @@ const decodeXmlEntities = (s) => String(s ?? '')
   .replace(/&apos;|&#39;/g, "'")
   .replace(/&nbsp;/g, ' ')
 
-// IPC 二进制读取 → ArrayBuffer（优先直接用主进程传来的 Uint8Array，兼容旧版 base64）
+// 后台解析线程模式：文件字节已随消息转移进来，读盘函数直接复用它（不再走 IPC）。
+// 该变量只在 Worker 那份模块实例里被赋值，渲染进程里恒为 null。
+let workerInputBuffer = null
+
+// 供 docParse.worker.js 使用：注入本次要解析的字节；解析结束由 parseInWorker 清空
+export function setWorkerInput(buffer) { workerInputBuffer = buffer || null }
+
+// 读取文件 → ArrayBuffer
+// 优先向主进程要 raw 字节：结构化克隆只拷一次，既没有 base64 的 1/3 体积膨胀，
+// 也不必在渲染进程里用逐字符循环把上千万字符还原成字节（大文件卡顿的主因之一）。
 async function readBinaryBuffer(filePath) {
-  const r = await window.electronAPI.fs.readBinary(filePath)
+  if (workerInputBuffer) return workerInputBuffer
+  const r = await window.electronAPI.fs.readBinary(filePath, { raw: true })
   if (!r || !r.success) throw new Error(r?.error || '读取文件失败')
   if (r.data) {
     const u8 = r.data instanceof Uint8Array ? r.data : new Uint8Array(r.data)
-    // 视图正好覆盖整个 buffer 时直接复用，避免再复制一份：大 PDF 动辄上百 MB，
-    // 多一次 slice 就是多一份同尺寸内存 + 一次全量拷贝（卡顿来源之一）。
+    // 视图正好覆盖整个 buffer 时直接复用，避免再复制一份同尺寸数据。
     return (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength)
       ? u8.buffer
       : u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength)
   }
-  // 旧版 base64 回退
+  if (!r.base64) throw new Error('读取文件失败：返回数据为空')
+  // 旧版主进程（不认 raw 参数）才走这里
   const bin = atob(r.base64)
   const buf = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
@@ -147,7 +157,8 @@ async function parseXlsx(filePath) {
 }
 
 async function parseCsv(filePath, ext) {
-  const raw = await window.electronAPI.fs.readFile(filePath)
+  // 统一走字节读取：既能在后台线程里解析（字节随消息转移进来），也不再依赖 IPC 读文本
+  const raw = new TextDecoder('utf-8').decode(new Uint8Array(await readBinaryBuffer(filePath)))
   const delimiter = ext === 'tsv' ? '\t' : undefined
   const result = Papa.parse(raw, { skipEmptyLines: 'greedy', delimiter })
   if (!result.data?.length) return { success: false, error: '表格中没有数据行' }
@@ -269,31 +280,140 @@ async function parsePptx(filePath) {
   }
 }
 
+const BINARY_EXTS = ['pdf', 'docx', 'pptx', 'xlsx', 'xls', 'csv', 'tsv']
+const TEXT_EXTS = ['txt', 'md', 'markdown', 'json', 'log', 'html', 'xml']
+
+// 按扩展名分发到具体解析实现（主线程与后台解析线程共用同一份实现）
+async function parseByExt(ext, filePath, opts = {}) {
+  if (ext === 'pdf') return await parsePdf(filePath, opts)
+  if (ext === 'docx') return await parseDocx(filePath)
+  if (ext === 'pptx') return await parsePptx(filePath)
+  if (ext === 'xlsx') return await parseXlsx(filePath)
+  if (ext === 'xls') return await parseXls(filePath)
+  if (ext === 'csv' || ext === 'tsv') return await parseCsv(filePath, ext)
+  return { success: false, error: `不支持的文件类型 .${ext}` }
+}
+
+/* ============================================================
+ * 后台解析线程
+ * ============================================================
+ * 文档解析（mammoth / JSZip / exceljs / pdfjs）是纯 CPU 密集型工作，放在渲染主线程上
+ * 会把界面卡住。这里统一交给 Worker 线程执行，主线程只负责读字节和接收结果文本。
+ * 线程不可用或线程内出错时自动退回主线程解析，保证功能始终可用。
+ */
+let parseWorker = null
+let parseWorkerFailed = false
+let parseSeq = 0
+const pendingParse = new Map()
+
+function getParseWorker() {
+  if (parseWorkerFailed) return null
+  if (parseWorker) return parseWorker
+  try {
+    parseWorker = new Worker(new URL('./docParse.worker.js', import.meta.url), { type: 'module' })
+    parseWorker.onmessage = (event) => {
+      const { id, ok, res, error } = event.data || {}
+      const pending = pendingParse.get(id)
+      if (!pending) return
+      pendingParse.delete(id)
+      if (ok) pending.resolve(res)
+      else pending.reject(new Error(error || '文档解析失败'))
+    }
+    parseWorker.onerror = () => {
+      // 线程级失败（脚本加载/运行异常）：标记不可用，并让等待中的请求立即失败，
+      // 由调用方退回主线程解析，避免界面一直停在「解析中」。
+      parseWorkerFailed = true
+      // 是「线程本身不可用」而不是用户停止：让调用方退回主线程解析，
+      // 绝不能报成 cancelled，否则会被上层误判成「用户已停止」。
+      killParseWorker(true)
+    }
+    return parseWorker
+  } catch (e) {
+    parseWorkerFailed = true
+    parseWorker = null
+    return null
+  }
+}
+
+// 终止后台线程，等待中的请求随之结束，下次解析会自动重建线程。
+// docx / xlsx 这类解析是一次性调用、库本身不支持中断，终止线程是唯一可靠的停止方式。
+// @param failed true 表示线程本身不可用（脚本加载/运行异常），此时上报普通错误让上层退回主线程解析；
+//               false 表示用户主动停止，上报 cancelled。
+function killParseWorker(failed = false) {
+  if (parseWorker) {
+    try { parseWorker.terminate() } catch (e) { /* 忽略 */ }
+  }
+  parseWorker = null
+  if (pendingParse.size) {
+    const err = failed ? new Error('文档解析线程不可用') : cancelledDocError()
+    for (const pending of pendingParse.values()) pending.reject(err)
+    pendingParse.clear()
+  }
+}
+
+/** Worker 内部入口：字节已随消息转移进来，直接解析（仅 docParse.worker.js 调用） */
+export async function parseInWorker(ext, buffer, filePath) {
+  setWorkerInput(buffer)
+  try {
+    return await parseByExt(ext, filePath)
+  } finally {
+    setWorkerInput(null)
+  }
+}
+
 /**
  * 解析入口。返回 { success, type, text, html?, meta }
  * @param {string} filePath 绝对路径
- * @param {object} opts { forView: 是否需要 HTML 查看 }
+ * @param {object} opts { shouldAbort: () => boolean 用户是否已停止 }
  */
 export async function parseDocument(filePath, opts = {}) {
   const ext = String(filePath || '').split('.').pop().toLowerCase()
+  const shouldAbort = typeof opts.shouldAbort === 'function' ? opts.shouldAbort : null
   try {
-    if (ext === 'pdf') return await parsePdf(filePath, opts)
-    if (ext === 'docx') return await parseDocx(filePath)
-    if (ext === 'pptx') return await parsePptx(filePath)
-    if (ext === 'xlsx') return await parseXlsx(filePath)
-    if (ext === 'xls') return await parseXls(filePath)
-    if (ext === 'csv' || ext === 'tsv') return await parseCsv(filePath, ext)
-    if (['txt', 'md', 'markdown', 'json', 'log', 'html', 'xml'].includes(ext)) {
+    // 纯文本类只有一次读盘，没有 CPU 密集工作，留在主线程即可
+    if (TEXT_EXTS.includes(ext)) {
       const text = await window.electronAPI.fs.readFile(filePath)
       return { success: true, type: ext === 'md' || ext === 'markdown' ? 'md' : 'text', text, meta: { chars: text.length } }
     }
-    return { success: false, error: `不支持的文件类型 .${ext}` }
+    if (!BINARY_EXTS.includes(ext)) return { success: false, error: `不支持的文件类型 .${ext}` }
+    if (shouldAbort && shouldAbort()) throw cancelledDocError()
+
+    const worker = getParseWorker()
+    if (!worker) {
+      // 后台线程不可用（极老环境）：退回主线程解析，保底可用
+      return await parseByExt(ext, filePath, opts)
+    }
+
+    const buffer = await readBinaryBuffer(filePath)
+    try {
+      const id = ++parseSeq
+      return await new Promise((resolve, reject) => {
+        let timer = null
+        const settle = (fn) => (v) => { if (timer) { clearInterval(timer); timer = null } fn(v) }
+        pendingParse.set(id, { resolve: settle(resolve), reject: settle(reject) })
+        // 用户停止 → 终止后台线程
+        if (shouldAbort) timer = setInterval(() => { if (shouldAbort()) killParseWorker() }, 120)
+        try {
+          // 转移 buffer 所有权：零拷贝把字节交给后台线程，主线程不再持有整份数据
+          worker.postMessage({ id, ext, filePath, buffer }, [buffer])
+        } catch (postErr) {
+          pendingParse.delete(id)
+          settle(reject)(postErr)
+        }
+      })
+    } catch (err) {
+      if (err && err.cancelled) throw err
+      if (shouldAbort && shouldAbort()) throw cancelledDocError()
+      // 后台线程内出错（例如线程里某个解析库加载失败）：退回主线程再解析一次
+      return await parseByExt(ext, filePath, opts)
+    }
   } catch (err) {
     // 用户停止导致的取消：单独标记，让调用方中断整条转换（不要当成解析失败继续降级）
     if (err && err.cancelled) return { success: false, cancelled: true, error: '已取消' }
     return { success: false, error: err?.message || String(err) }
   }
 }
+
 
 /**
  * 文本切块（知识库索引用）：按段落切，超长段落按句子再切
