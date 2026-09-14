@@ -120,10 +120,13 @@ function migrateItem(item) {
       c.statusUpdatedAt = c.completed && c.completedDate ? (parseDateMs(c.completedDate) || 0) : 0
     }
   })
-  const needs = CYCLES.some(c => !item.cycles.find(o => o.cycle === c.cycle && o.label === c.label))
+  // 已被用户在日历里删掉的周期不再补回来，否则「删除」是删不掉的（下一轮读取就复活）
+  const skipped = new Set(Array.isArray(item.skippedCycles) ? item.skippedCycles : [])
+  const wanted = CYCLES.filter(c => !skipped.has(c.cycle))
+  const needs = wanted.some(c => !item.cycles.find(o => o.cycle === c.cycle && o.label === c.label))
   if (!needs) return item
   const start = item.createdDateTs || Date.now()
-  item.cycles = CYCLES.map(c => {
+  item.cycles = wanted.map(c => {
     const old = item.cycles.find(o => o.label === c.label)
     const ts = start + c.ms
     return {
@@ -231,6 +234,67 @@ export function addToReviewPlan(nodeData) {
   saveReviewPlan(list)
   notifyReviewPlanChanged()
   return item
+}
+
+// 去掉标题前缀（[MM复习] / [复习]），与日历同步配对用的规范化保持一致
+const stripReviewPrefix = (title) => {
+  let t = String(title || '').trim()
+  if (t.startsWith('[MM复习]')) t = t.slice('[MM复习]'.length).trim()
+  else if (t.startsWith('[复习]')) t = t.slice('[复习]'.length).trim()
+  return t
+}
+
+/**
+ * 删除某个复习周期（用「日期 + 标题」定位），供桌面日历回写「用户在日历里删掉了这条复习任务」。
+ *
+ * 定位用的键与两端同步配对完全一致（日期 + 去前缀标题），所以两边对「同一条复习任务」的
+ * 理解始终一致。一个复习项的所有周期都被删完时，整条复习项也一并移除——只留一个没有周期的
+ * 空壳，复习面板里会显示成一条永远不会出现的待办。
+ *
+ * @returns {number} 实际删除的周期数（0 表示没有匹配到）
+ */
+export function removeCyclesByDateAndTitle(dateText, title) {
+  const date = String(dateText || '').trim()
+  const base = stripReviewPrefix(title)
+  if (!date || !base) return 0
+
+  const list = getReviewPlan()
+  const next = []
+  let removed = 0
+  for (const item of list) {
+    if (stripReviewPrefix(item.nodeText || item.fileName || '') !== base) {
+      next.push(item)
+      continue
+    }
+    const cycles = Array.isArray(item.cycles) ? item.cycles : []
+    const gone = cycles.filter(c => (c.reviewDate || formatDate(c.reviewDateTs)) === date)
+    if (!gone.length) {
+      next.push(item)
+      continue
+    }
+
+    removed += gone.length
+    const kept = cycles.filter(c => !gone.includes(c))
+    if (kept.length === 0) {
+      // 所有周期都被删完：整条复习项一并移除，否则会剩一个永远没有待办的空壳
+      continue
+    }
+
+    // 关键：把删掉的周期号记下来。复习计划有个「按 5 个标准周期补齐」的迁移逻辑，
+    // 不记这一笔的话，下一轮读取就会把刚删掉的周期原样重建出来（现象就是「删不掉」）。
+    const skipped = new Set(Array.isArray(item.skippedCycles) ? item.skippedCycles : [])
+    gone.forEach(c => skipped.add(c.cycle))
+    item.skippedCycles = Array.from(skipped).sort((a, b) => a - b)
+    item.cycles = kept
+    next.push(item)
+  }
+
+  if (removed > 0) {
+    saveReviewPlan(next)
+    // type='remote'：这是日历端发起的删除，同步服务收到后不再反向触发一次推送，避免两端来回触发
+    notifyReviewPlanChanged({ type: 'remote' })
+  }
+  return removed
 }
 
 // 按 ID 移除

@@ -4,24 +4,24 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.20.0-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.21.0-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.20.0 更新
+## 🆕 v4.21.0 更新
 
-**安全加固 + 与 Desktop ToDo Calendar 的双向同步闭环修复**
+**与 Desktop ToDo Calendar 的双向删除：日历里删掉的复习任务，思维导图这边一并删掉**
 
 | 分类 | 内容 |
 |------|------|
-| 🔐 安全 | 局域网服务的登录限流/封禁不再采信可伪造的 `X-Forwarded-For`；`/api/status` 优先用 `Authorization: Bearer` 头传令牌，避免令牌留在 URL 与访问日志里（`?token=` 仍兼容） |
-| 🔐 安全 | 外部 HTTP 调用不再接受调用方自报 `source`，统一按「外部 Agent」通道校验（此前自称 `task` 可跳过危险操作确认）；MCP 在目录树范围未知时拒绝删除/外发/导出类工具 |
-| 🔄 同步 | 与 Desktop ToDo Calendar 的同步闭环修复：计划读到空时不再误删日历任务、状态回推不再引发往返推送、按日期精确查询任务 |
-| 🛡 稳定 | 复习计划写盘失败不再静默丢失（日志让位后重试并明确提示）；解析/嵌入线程失败改为 30 秒冷却后自愈，不再永久降级；浏览位置缓存限量淘汰 |
+| 🗑 双向删除 | 日历里删掉一条 `[MM复习]` 任务，会立刻回传「日期 + 标题」，这里精确删掉对应的复习周期（新增 `POST /api/desk-calendar/delete` 接口） |
+| 🔄 闭环 | 删掉的周期不再被「按 5 个标准周期补齐」的迁移逻辑复活（删掉的周期号记进 `skippedCycles`）；周期全删完时整条复习项一并移除，不留空壳；同一节点重新加入复习计划时，拿到的仍是全新的 5 个周期 |
+| 🔐 安全 | 桌面日历同步接口的令牌统一从 `Authorization: Bearer` 读取（请求体 / 查询串仍兼容旧版日历），不再把令牌留在 URL 与访问日志里 |
+| ✅ 回归 | 新增 `npm run test:review-plan`（34 项断言）：覆盖按日期+标题精确删除、前缀兼容（`[MM复习]` / `[复习]` / 无前缀）、连删累积、未命中不误伤、删空移除整条、重新加入恢复 5 周期 |
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.20.0)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.21.0)
 
 ---
 

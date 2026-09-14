@@ -16,7 +16,8 @@ import {
   getReviewPlan,
   getReviewSyncEntries,
   getCycleStatusByKey,
-  setCycleStatusFromRemote
+  setCycleStatusFromRemote,
+  removeCyclesByDateAndTitle
 } from '../utils/reviewPlan'
 
 const CONFIG_KEY = 'MINDMAP_DESK_CALENDAR_SYNC'
@@ -231,7 +232,10 @@ export const initDeskCalendarStatusListener = () => {
 
 /**
  * 响应来自 desktop_todo_Calendar 的查询请求（经主进程本地 HTTP 服务转发）。
- * 目前只提供复习计划快照，供对方做时间戳仲裁后回写；HTTP 层已做 Token 鉴权。
+ * - review-plan：提供复习计划快照，供对方做时间戳仲裁后回写；
+ * - review-delete：对方用户删掉了某条复习任务，这里同步删掉对应的复习周期，
+ *   否则下一次同步会按复习计划把它重新建出来（用户看到的现象是「删不掉」）。
+ * HTTP 层已做 Token 鉴权。
  */
 export const initDeskCalendarQueryListener = () => {
   if (typeof window === 'undefined') return
@@ -244,9 +248,16 @@ export const initDeskCalendarQueryListener = () => {
         api.sendQueryResponse(payload.id, { tasks: getReviewSyncEntries() })
         return
       }
+      if (payload.action === 'review-delete') {
+        const req = payload.payload || {}
+        const removed = removeCyclesByDateAndTitle(req.date, req.title)
+        // removed=0 也算处理成功：说明这条复习周期本来就不在了，对方把待删记录清掉即可
+        api.sendQueryResponse(payload.id, { removed })
+        return
+      }
       api.sendQueryResponse(payload.id, null, `未知操作：${payload.action || ''}`)
     } catch (e) {
-      api.sendQueryResponse(payload.id, null, e?.message || '查询复习计划失败')
+      api.sendQueryResponse(payload.id, null, e?.message || '处理复习计划请求失败')
     }
   })
 }

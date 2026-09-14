@@ -76,6 +76,12 @@ const getClientIp = (req) => req.socket?.remoteAddress || 'unknown'
 // 容易被同机/同网段的旁观者拿到）。
 const bearerFrom = (req) => String(req.headers?.authorization || '').replace(/^Bearer\s+/i, '').trim()
 
+// 桌面日历同步接口的令牌：请求体 / Authorization 头 / 查询串依次尝试。
+// 前两者不会像查询串那样留在日志与浏览器历史里，所以优先；保留 ?token= 只为兼容老版本日历。
+const deskCalendarToken = (req, url, body = {}) => String(
+  body?.token || bearerFrom(req) || url?.searchParams?.get('token') || ''
+).trim()
+
 // 检查是否被限流/封禁（map 参数化，主/仅查看独立）
 const isLoginRateLimited = (ip, map = loginFailures) => {
   const record = map.get(ip)
@@ -886,9 +892,7 @@ const handleRequest = async (req, res) => {
       if (req.method === 'POST') {
         body = await readBody(req)
       }
-      const authToken = String(
-        body.token || url.searchParams.get('token') || req.headers['authorization'] || ''
-      ).replace(/^Bearer\s+/i, '').trim()
+      const authToken = deskCalendarToken(req, url, body)
       if (!config.enabled || Date.now() >= config.tokenExpiresAt || !tokenMatches(authToken)) {
         sendJson(res, 401, { ok: false, error: 'Token 无效或已过期' })
         return
@@ -905,7 +909,7 @@ const handleRequest = async (req, res) => {
     try {
       const body = await readBody(req)
       const config = readConfig()
-      const authToken = String(body.token || req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim()
+      const authToken = deskCalendarToken(req, url, body)
       if (!config.enabled || Date.now() >= config.tokenExpiresAt || !tokenMatches(authToken)) {
         sendJson(res, 401, { ok: false, error: 'Token 无效或已过期' })
         return
@@ -931,6 +935,32 @@ const handleRequest = async (req, res) => {
       sendJson(res, 200, { ok: true })
     } catch (e) {
       sendJson(res, 400, { ok: false, error: e.message })
+    }
+    return
+  }
+
+  // 复习任务删除：供 desktop_todo_Calendar 回写「用户在日历里删掉了这条复习任务」。
+  // 不做这件事的话，下一次同步会按复习计划把它重新建出来，用户看到的现象是「删不掉」。
+  if (req.method === 'POST' && url.pathname === '/api/desk-calendar/delete') {
+    try {
+      const body = await readBody(req)
+      const config = readConfig()
+      const authToken = deskCalendarToken(req, url, body)
+      if (!config.enabled || Date.now() >= config.tokenExpiresAt || !tokenMatches(authToken)) {
+        sendJson(res, 401, { ok: false, error: 'Token 无效或已过期' })
+        return
+      }
+      const title = String(body.title || '').trim()
+      const date = String(body.date || '').trim()
+      if (!title || !date) {
+        sendJson(res, 400, { ok: false, error: '缺少 title/date' })
+        return
+      }
+      // 复习计划存在渲染进程的 localStorage 里，必须交给它执行；removed=0 表示没匹配到
+      const data = await requestDeskCalendar('review-delete', { title, date })
+      sendJson(res, 200, { ok: true, removed: Number(data?.removed) || 0 })
+    } catch (e) {
+      sendJson(res, 503, { ok: false, error: e.message })
     }
     return
   }
