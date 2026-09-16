@@ -4,24 +4,24 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.21.0-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.21.1-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.21.0 更新
+## 🆕 v4.21.1 更新
 
-**与 Desktop ToDo Calendar 的双向删除：日历里删掉的复习任务，思维导图这边一并删掉**
+**AI 挖空与背诵改写质量修复：兜底不再夹带多余字、AI 挖空更快更准、改写结果不再显示 HTML/代码标签、口诀更贴合原文**
 
 | 分类 | 内容 |
 |------|------|
-| 🗑 双向删除 | 日历里删掉一条 `[MM复习]` 任务，会立刻回传「日期 + 标题」，这里精确删掉对应的复习周期（新增 `POST /api/desk-calendar/delete` 接口） |
-| 🔄 闭环 | 删掉的周期不再被「按 5 个标准周期补齐」的迁移逻辑复活（删掉的周期号记进 `skippedCycles`）；周期全删完时整条复习项一并移除，不留空壳；同一节点重新加入复习计划时，拿到的仍是全新的 5 个周期 |
-| 🔐 安全 | 桌面日历同步接口的令牌统一从 `Authorization: Bearer` 读取（请求体 / 查询串仍兼容旧版日历），不再把令牌留在 URL 与访问日志里 |
-| ✅ 回归 | 新增 `npm run test:review-plan`（34 项断言）：覆盖按日期+标题精确删除、前缀兼容（`[MM复习]` / `[复习]` / 无前缀）、连删累积、未命中不误伤、删空移除整条、重新加入恢复 5 周期 |
+| 🎯 挖空兜底 | 修复兜底规则「把多余的字一起挖进关键词」：新增边界清洗，剥离贪婪正则带进来的连接词/助词/标点（如「和客观性」→「客观性」、「普遍性等」→「普遍性」），并加安全闸避免误伤「和谐/平等/目的」这类首尾字本身是语素的词 |
+| ⚡ AI 挖空 | 精简挖空提示词（输入 token 约减半，请求更快），去掉与「宁缺毋滥」冲突的强制「数量下限」规则——不再为凑数挖无关紧要的词，挖空质量更高 |
+| 🧹 背诵改写 | 修复改写结果把 AI 返回的 HTML 标签 / markdown / 代码围栏原样显示进节点的问题：写入前统一剥成纯文本（`<br>`/`<span>`、`**粗体**`、`` `代码` ``、```围栏、链接、列表标记等全部清理） |
+| 🧠 记忆口诀 | 口诀不再生硬简短、与原文脱节：放宽到 4~10 字，要求从原文真实关键词提炼，可用数字概括/首字串联/自然谐音，禁止生造无关顺口溜；背诵改写要求忠于原文、语句通顺有逻辑衔接 |
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.21.0)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.21.1)
 
 ---
 
