@@ -473,11 +473,12 @@ ipcMain.handle('fs:listDir', async (event, dirPath) => {
     for (const entry of entries) {
       if (entry.name.startsWith('.')) continue // 隐藏文件不显示
       const full = path.join(dirPath, entry.name)
+      const isSymlink = entry.isSymbolicLink()
       if (entry.isDirectory()) {
-        dirs.push({ name: entry.name, path: full, isDir: true })
+        dirs.push({ name: entry.name, path: full, isDir: true, isSymlink })
       } else if (isSupportFile(entry.name)) {
         const stat = await fs.promises.stat(full)
-        files.push({ name: entry.name, path: full, isDir: false, mtime: stat.mtimeMs })
+        files.push({ name: entry.name, path: full, isDir: false, mtime: stat.mtimeMs, isSymlink })
       }
     }
     const byName = (a, b) => a.name.localeCompare(b.name, 'zh-CN')

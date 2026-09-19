@@ -762,13 +762,23 @@
       </div>
       <el-form v-if="showSkillForm" label-position="top" class="settings-form">
         <el-form-item label="名称"><el-input v-model="newSkill.name" /></el-form-item>
-        <el-form-item label="描述"><el-input v-model="newSkill.description" /></el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="newSkill.description" />
+          <div class="skill-desc-hint" :class="{ 'over-limit': newSkill.description.length > 60 }">
+            {{ newSkill.description.length }} / 建议 ≤ 60 字（过长会影响 AI 自动触发识别率）
+          </div>
+        </el-form-item>
         <el-form-item label="指令"><el-input v-model="newSkill.instructions" type="textarea" :rows="4" /></el-form-item>
         <el-button type="primary" size="small" @click="addSkill">保存新增</el-button>
       </el-form>
       <div v-for="s in skills" :key="s.id" class="skill-row">
         <el-input v-model="s.name" class="mini" />
-        <el-input v-model="s.description" class="mini" />
+        <div class="skill-desc-edit">
+          <el-input v-model="s.description" class="mini" />
+          <div class="skill-desc-hint inline" :class="{ 'over-limit': s.description.length > 60 }">
+            {{ s.description.length }} / ≤60
+          </div>
+        </div>
         <el-input v-model="s.instructions" type="textarea" :rows="2" class="grow" />
         <div class="skill-switches">
           <span class="skill-switch-label">启用</span>
@@ -4662,6 +4672,32 @@ onBeforeUnmount(() => {
 .skill-switch-label {
   font-size: 11px;
   color: #86868b;
+}
+
+.skill-desc-hint {
+  font-size: 11px;
+  color: #86868b;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.skill-desc-hint.over-limit {
+  color: #e6a23c;
+}
+
+.skill-desc-hint.inline {
+  margin-top: 2px;
+  text-align: right;
+}
+
+.skill-desc-edit {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+}
+
+.skill-desc-edit .mini {
+  width: 100%;
 }
 
 /* ---------- 滚动条 ---------- */

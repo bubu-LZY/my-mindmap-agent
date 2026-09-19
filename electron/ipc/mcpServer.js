@@ -284,76 +284,131 @@ const handleMcpRequest = async (req, res, url, readBody) => {
     sendRpcError(res, 400, -32700, '请求体不是合法 JSON：' + (e.message || ''))
     return true
   }
+
+  // JSON-RPC 2.0 批量请求：body 是数组时逐个处理，返回结果数组
+  if (Array.isArray(body)) {
+    const results = []
+    for (const reqItem of body) {
+      const r = await handleSingleRpc(reqItem, tokenCtx, ctx)
+      // notification（无 id）不返回结果
+      if (r !== null) {
+        const { _status, _headers, ...resp } = r
+        results.push(resp)
+      }
+    }
+    if (results.length === 0) {
+      res.writeHead(204)
+      res.end()
+    } else {
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'
+      })
+      res.end(JSON.stringify(results))
+    }
+    return true
+  }
+
+  const single = await handleSingleRpc(body, tokenCtx, ctx)
+  if (single === null) {
+    res.writeHead(202)
+    res.end()
+  } else {
+    const { _status, _headers, ...bodyResp } = single
+    res.writeHead(_status || 200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      ...(_headers || {})
+    })
+    res.end(JSON.stringify(bodyResp))
+  }
+  return true
+}
+
+// 处理单个 JSON-RPC 请求；返回 null 表示 notification（无响应），返回对象表示响应
+async function handleSingleRpc(body, tokenCtx, ctx) {
   const { id, method, params } = body || {}
   const isNotification = id === undefined || id === null
 
   try {
     // initialize：握手 + 分配会话
     if (method === 'initialize') {
+      if (isNotification) return null
       const requested = String((params && params.protocolVersion) || '')
       const protocolVersion = PROTOCOL_VERSIONS.includes(requested)
         ? requested
         : PROTOCOL_VERSIONS[0]
       const sessionId = crypto.randomUUID()
       mcpSessions.add(sessionId)
-      sendRpcResult(res, {
-        protocolVersion,
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'my-mindmap-agent', version: '4.21.1', title: 'My-Mindmap Agent（思维导图智能体）' }
-      }, id, { 'Mcp-Session-Id': sessionId })
-      return true
+      return {
+        jsonrpc: '2.0',
+        result: {
+          protocolVersion,
+          capabilities: { tools: { listChanged: false } },
+          serverInfo: { name: 'my-mindmap-agent', version: '4.21.2', title: 'My-Mindmap Agent（思维导图智能体）' }
+        },
+        id,
+        _headers: { 'Mcp-Session-Id': sessionId }
+      }
     }
 
     // 通知类消息：无 id，返回 202 Accepted
     if (typeof method === 'string' && method.startsWith('notifications/')) {
-      res.writeHead(202)
-      res.end()
-      return true
+      return null
     }
 
     if (method === 'ping') {
-      sendRpcResult(res, {}, id)
-      return true
+      if (isNotification) return null
+      return { jsonrpc: '2.0', result: {}, id }
     }
 
     if (method === 'tools/list') {
+      if (isNotification) return null
       const payload = await requestRenderer('list-tools', null, {}, ctx)
       let tools = Array.isArray(payload && payload.tools) ? payload.tools : []
       // 访问令牌只下发其权限范围内的工具（客户端看不到未授权工具）
       if (!tokenCtx.full) {
         tools = tools.filter(t => t && isToolAllowed(tokenCtx, t.name))
       }
-      sendRpcResult(res, { tools }, id)
-      return true
+      return { jsonrpc: '2.0', result: { tools }, id }
     }
 
     if (method === 'tools/call') {
+      if (isNotification) return null
       const toolName = params && params.name
       const toolArgs = (params && params.arguments) || {}
       if (!toolName) {
-        sendRpcError(res, 200, -32602, 'params.name 不能为空', id)
-        return true
+        return { jsonrpc: '2.0', error: { code: -32602, message: 'params.name 不能为空' }, id }
       }
       // 权限校验：访问令牌只能调用勾选的工具
       if (!isToolAllowed(tokenCtx, toolName)) {
-        sendRpcError(res, 200, -32003, `令牌「${tokenCtx.entry.name}」没有工具 ${toolName} 的调用权限，请在 设置 → 访问令牌管理 中调整该令牌的权限范围`, id)
-        return true
+        return {
+          jsonrpc: '2.0',
+          error: {
+            code: -32003,
+            message: `令牌「${tokenCtx.entry.name}」没有工具 ${toolName} 的调用权限，请在 设置 → 访问令牌管理 中调整该令牌的权限范围`
+          },
+          id
+        }
       }
       if (!tokenCtx.full) touchToken(tokenCtx.entry)
       const payload = await requestRenderer('call-tool', toolName, toolArgs, ctx)
       const { text, isError } = resultToContent(payload)
-      sendRpcResult(res, {
-        content: [{ type: 'text', text }],
-        isError
-      }, id)
-      return true
+      return {
+        jsonrpc: '2.0',
+        result: {
+          content: [{ type: 'text', text }],
+          isError
+        },
+        id
+      }
     }
 
-    sendRpcError(res, 200, -32601, `Method not found: ${method}`, id)
-    return true
+    if (isNotification) return null
+    return { jsonrpc: '2.0', error: { code: -32601, message: `Method not found: ${method}` }, id }
   } catch (error) {
-    sendRpcError(res, 200, -32000, error.message || 'MCP 服务器内部错误', id)
-    return true
+    if (isNotification) return null
+    return { jsonrpc: '2.0', error: { code: -32000, message: error.message || 'MCP 服务器内部错误' }, id }
   }
 }
 

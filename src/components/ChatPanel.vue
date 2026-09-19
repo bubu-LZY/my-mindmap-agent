@@ -7698,8 +7698,8 @@ const callMcpTool = async (toolName, args, mcpCtx = {}) => {
     return {
       success: false,
       message: scope.noScope
-        ? `访问被拒绝：当前无法确定左侧目录树范围，「${toolNameMap[toolName] || toolName}」属于删除/外发/导出类操作，在范围未知时不会执行。请先在左侧目录树中添加文件夹后重试。`
-        : `访问被拒绝：MCP 接口仅允许访问左侧目录树内的文件和文件夹（允许的根目录：${scope.roots.join('、')}）。请求的路径「${scope.path}」不在允许范围内，请改用目录树内的文件。`
+        ? `[MCP scope] 访问被拒绝：当前无法确定左侧目录树范围，「${toolNameMap[toolName] || toolName}」属于删除/外发/导出类操作，在范围未知时不会执行。请先在左侧目录树中添加文件夹后重试。`
+        : `[MCP scope] 访问被拒绝：MCP 接口仅允许访问左侧目录树内的文件和文件夹（允许的根目录：${scope.roots.join('、')}）。请求的路径「${scope.path}」不在允许范围内，请改用目录树内的文件。`
     }
   }
   const toolCall = {

@@ -445,7 +445,7 @@ const toolCatalog = [
   { name: 'convert_doc_to_mindmap', category: 'Mindmap', desc: 'Read a local document (PDF/DOCX/PPTX/XLSX/XLS/CSV/MD/TXT) and generate a new .smm mindmap file without overwriting the current map; use when user explicitly asks to convert a document to a mindmap' },
   { name: 'list_references', category: 'Refs', desc: 'Reference list & broken-link check: list @file/#node references in the current map (or all files) and verify the referenced file/node still exists' },
   { name: 'scheduled_task', category: 'Scheduler', desc: 'AI scheduled tasks: create / list / update / delete (action param)' },
-  { name: 'run_code', category: 'AI', desc: 'Execute JavaScript code in an isolated Web Worker with a minimal tool-calling API. Use for batch operations or complex logic. Tools available via await tools.toolName(args). Requires user confirmation before execution.' },
+  { name: 'run_code', category: 'AI', desc: 'Execute JavaScript code in an isolated Web Worker with a minimal tool-calling API. Use for batch operations or complex logic. Tools available via await tools.toolName(args). File ops must use allowlisted tools (list_directory/find_local_file), not raw fs/os.walk. Requires user confirmation before execution.' },
 ]
 
 
@@ -2810,13 +2810,13 @@ export const aiTools = [
     type: 'function',
     function: {
       name: 'run_code',
-      description: 'Execute JavaScript code in an isolated Web Worker with a minimal tool-calling API. Use for batch operations, complex multi-step logic, or data processing. Tools are available via await tools.toolName(args). The code has access to: tools (allowlisted tool-calling proxy), mindMap (serializable snapshot), console, context. Return a value to include it in the result. Requires user confirmation before execution.',
+      description: 'Execute JavaScript code in an isolated Web Worker with a minimal tool-calling API. Use for batch operations, complex multi-step logic, or data processing. Tools are available via await tools.toolName(args). The code has access to: tools (allowlisted tool-calling proxy), mindMap (serializable snapshot), console, context. Return a value to include it in the result. IMPORTANT: File system operations MUST use allowlisted tools (list_directory, find_local_file, read_local_file, etc.) — do NOT use raw fs/os.walk/require(fs), as they bypass MCP scope and may scan the wrong directories. Read-only tools have no side effects; if execution is interrupted, no files are modified. Requires user confirmation before execution.',
       parameters: {
         type: 'object',
         properties: {
           code: {
             type: 'string',
-            description: 'JavaScript code to execute. Use async/await pattern. Call tools with await tools.toolName(args). Access the mindmap via mindMap. Output via console.log(). Return a value to send it back as the result.'
+            description: 'JavaScript code to execute. Use async/await pattern. Call tools with await tools.toolName(args). Access the mindmap via mindMap. Output via console.log(). Return a value to send it back as the result. For file operations, use list_directory/find_local_file/read_local_file tools — NOT raw fs module or os.walk.'
           },
           description: {
             type: 'string',
@@ -10557,9 +10557,13 @@ ${block}`
         const fmtDate = (ms) => { try { return new Date(ms).toISOString().slice(0, 10) } catch { return '' } }
         const files = allEntries.filter(e => !e.isDir)
         const subdirs = allEntries.filter(e => e.isDir)
+        const symlinkDirs = subdirs.filter(d => d.isSymlink)
         const lines = []
-        if (subdirs.length) lines.push(`文件夹（${subdirs.length}）：${subdirs.map(d => d.name).join('、')}`)
-        if (files.length) lines.push(`文件（${files.length}）：${files.map(f => `${f.name}${f.mtime ? ` ${fmtDate(f.mtime)}` : ''}`).join('、')}`)
+        if (subdirs.length) {
+          const dirNames = subdirs.map(d => d.isSymlink ? `${d.name} 🔗` : d.name).join('、')
+          lines.push(`文件夹（${subdirs.length}${symlinkDirs.length ? `，含 ${symlinkDirs.length} 个软链` : ''}）：${dirNames}`)
+        }
+        if (files.length) lines.push(`文件（${files.length}）：${files.map(f => `${f.isSymlink ? f.name + ' 🔗' : f.name}${f.mtime ? ` ${fmtDate(f.mtime)}` : ''}`).join('、')}`)
         const label = uniqueDirs.length
           ? `目录树根（${uniqueDirs.join('、')}）${recursive ? '（递归）' : ''}`
           : `目录 ${dir}${recursive ? '（递归）' : ''}`

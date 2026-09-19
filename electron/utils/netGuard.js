@@ -143,14 +143,14 @@ async function inspectUrl(rawUrl, opts = {}) {
   try {
     parsed = new URL(String(rawUrl || '').trim())
   } catch {
-    throw new Error(`地址无效：${rawUrl}`)
+    throw new Error(`[netGuard] 地址无效：${rawUrl}`)
   }
   if (!allowSchemes.includes(parsed.protocol)) {
-    throw new Error(`不允许的协议 ${parsed.protocol}（仅支持 ${allowSchemes.join(' / ')}）：${rawUrl}`)
+    throw new Error(`[netGuard] 不允许的协议 ${parsed.protocol}（仅支持 ${allowSchemes.join(' / ')}）：${rawUrl}`)
   }
 
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '')
-  if (!hostname) throw new Error(`地址缺少主机名：${rawUrl}`)
+  if (!hostname) throw new Error(`[netGuard] 地址缺少主机名：${rawUrl}`)
 
   if (net.isIP(hostname)) {
     return { url: parsed, hostname, klass: classifyIp(hostname), addresses: [hostname] }
@@ -169,9 +169,9 @@ async function inspectUrl(rawUrl, opts = {}) {
   try {
     records = await dns.lookup(hostname, { all: true, verbatim: true })
   } catch (e) {
-    throw new Error(`域名解析失败（${hostname}）：${e.code || e.message}`)
+    throw new Error(`[netGuard] 域名解析失败（${hostname}）：${e.code || e.message}`)
   }
-  if (!records || records.length === 0) throw new Error(`域名未解析到任何地址：${hostname}`)
+  if (!records || records.length === 0) throw new Error(`[netGuard] 域名未解析到任何地址：${hostname}`)
 
   const addresses = records.map((r) => r.address)
   // 多记录里只要有一个落在更危险的段就按那个算，避免「一个公网 IP 掩护一个内网 IP」
@@ -211,7 +211,7 @@ async function assertSafeAiEndpoint(rawUrl) {
   const info = await inspectUrl(rawUrl)
   if (HARD_BLOCKED.has(info.klass)) {
     throw new Error(
-      `已拒绝访问${KLASS_LABEL[info.klass] || info.klass}（${info.hostname}` +
+      `[netGuard] 已拒绝访问${KLASS_LABEL[info.klass] || info.klass}（${info.hostname}` +
       `${info.addresses.length ? ' → ' + info.addresses.join(', ') : ''}），该地址不是合法的 AI 服务地址`
     )
   }
@@ -231,10 +231,10 @@ async function assertSafeAiEndpoint(rawUrl) {
 async function assertSafeWebTarget(rawUrl, opts = {}) {
   const info = await inspectUrl(rawUrl)
   if (HARD_BLOCKED.has(info.klass)) {
-    throw new Error(`已拒绝访问${KLASS_LABEL[info.klass] || info.klass}：${info.hostname}`)
+    throw new Error(`[netGuard] 已拒绝访问${KLASS_LABEL[info.klass] || info.klass}：${info.hostname}`)
   }
   if ((info.klass === 'loopback' || info.klass === 'private') && !opts.allowPrivateNetwork) {
-    throw new Error(`已拒绝访问${KLASS_LABEL[info.klass]}（${info.hostname}），网页抓取不允许指向本机或内网`)
+    throw new Error(`[netGuard] 已拒绝访问${KLASS_LABEL[info.klass]}（${info.hostname}），网页抓取不允许指向本机或内网`)
   }
   return info.url
 }
@@ -276,7 +276,7 @@ async function fetchWithGuard(rawUrl, opts = {}, assertTarget = assertSafeAiEndp
     }
     current = next
   }
-  throw new Error(`重定向次数超过上限（${MAX_REDIRECTS} 次），已中止请求`)
+  throw new Error(`[netGuard] 重定向次数超过上限（${MAX_REDIRECTS} 次），已中止请求`)
 }
 
 module.exports = {
