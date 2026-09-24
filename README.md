@@ -4,24 +4,24 @@
 >
 > **四视图 · AI 智能体 · 本地知识库 · 多分屏 · 云盘同步 · 飞书/微信**
 
-[![GitHub release](https://img.shields.io/badge/release-v4.21.1-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
+[![GitHub release](https://img.shields.io/badge/release-v4.22.0-blue)](https://github.com/bubu-LZY/my-mindmap-agent/releases)
 [![Demo](https://img.shields.io/badge/在线演示-bubu--lzy.github.io-success)](https://bubu-lzy.github.io/my-mindmap-agent/)
 [![License](https://img.shields.io/badge/license-Personal-lightgrey)](#license)
 
 ---
 
-## 🆕 v4.21.1 更新
+## 🆕 v4.22.0 更新
 
-**AI 挖空与背诵改写质量修复：兜底不再夹带多余字、AI 挖空更快更准、改写结果不再显示 HTML/代码标签、口诀更贴合原文**
+**开机自启动改为「静默启动」：登录 Windows 后只在系统托盘驻留图标、不再弹出主界面，开关状态也不会再误报为关闭**
 
 | 分类 | 内容 |
 |------|------|
-| 🎯 挖空兜底 | 修复兜底规则「把多余的字一起挖进关键词」：新增边界清洗，剥离贪婪正则带进来的连接词/助词/标点（如「和客观性」→「客观性」、「普遍性等」→「普遍性」），并加安全闸避免误伤「和谐/平等/目的」这类首尾字本身是语素的词 |
-| ⚡ AI 挖空 | 精简挖空提示词（输入 token 约减半，请求更快），去掉与「宁缺毋滥」冲突的强制「数量下限」规则——不再为凑数挖无关紧要的词，挖空质量更高 |
-| 🧹 背诵改写 | 修复改写结果把 AI 返回的 HTML 标签 / markdown / 代码围栏原样显示进节点的问题：写入前统一剥成纯文本（`<br>`/`<span>`、`**粗体**`、`` `代码` ``、```围栏、链接、列表标记等全部清理） |
-| 🧠 记忆口诀 | 口诀不再生硬简短、与原文脱节：放宽到 4~10 字，要求从原文真实关键词提炼，可用数字概括/首字串联/自然谐音，禁止生造无关顺口溜；背诵改写要求忠于原文、语句通顺有逻辑衔接 |
+| 🚀 静默启动 | 设置 → 系统 的「开机自启动」开关现在把启动项写成 `"...\my-mindmap agent.exe" --hidden`：登录系统后应用只在系统托盘显示图标，不打开主界面（双击托盘图标或托盘菜单「显示窗口」可随时唤出）。此前开关虽能写入注册表启动项，但命令行不带 `--hidden`，登录时会把主界面直接弹出来 |
+| 🩹 开关状态 | 修复开关恒显示为「已关闭」：Electron 在 Windows 上按「可执行文件 + 参数」整条命令行匹配启动项，写入时带 `--hidden`、读取时按空参数查询，`openAtLogin` 会永远返回 `false`。现在读、写使用同一组参数，并用 `executableWillLaunchAtLogin` 兜住历史遗留的无参启动项 |
+| ♻️ 自动迁移 | 已开启自启动的老用户升级后无需重新开关：启动时若发现旧写法（缺少 `--hidden`）会自动补写参数；未开启的用户不会被强制打开自启动 |
+| 🛡️ 结果可信 | 设置后回读真实状态再返回，被组策略或安全软件拦截时不会谎报成功，并提示到 Windows「设置 → 应用 → 启动」中确认本应用未被禁用 |
 
-[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.21.1)
+[完整更新日志 →](https://github.com/bubu-LZY/my-mindmap-agent/releases/tag/v4.22.0)
 
 ---
 

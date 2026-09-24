@@ -345,7 +345,7 @@ async function handleSingleRpc(body, tokenCtx, ctx) {
         result: {
           protocolVersion,
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: 'my-mindmap-agent', version: '4.21.2', title: 'My-Mindmap Agent（思维导图智能体）' }
+          serverInfo: { name: 'my-mindmap-agent', version: '4.22.0', title: 'My-Mindmap Agent（思维导图智能体）' }
         },
         id,
         _headers: { 'Mcp-Session-Id': sessionId }

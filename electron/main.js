@@ -670,31 +670,85 @@ ipcMain.handle('get-location', async () => {
   return { success: false, error: '定位失败：' + errors.join('；') }
 })
 
-// 开机自启动：Windows 下 app.setLoginItemSettings 会写入注册表
-// HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-ipcMain.handle('auto-launch:get', () => {
+// === 开机自启动（登录后静默驻留托盘）===
+// Windows 下 app.setLoginItemSettings 会写入注册表
+// HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run，写入形态：
+//   "C:\...\my-mindmap agent.exe" --hidden
+// --hidden 由 createWindow() 消费：登录时只点亮托盘图标，不弹主窗口。
+//
+// 坑：Electron 在 Windows 上把 path + args 当作启动项的完整命令行来匹配，
+// 读取时必须传入与写入完全相同的 path/args，否则 openAtLogin 恒为 false
+// （官方文档：传过 path/args 给 setLoginItemSettings，就要在 get 时传同样的值）。
+const AUTO_LAUNCH_HIDDEN_ARG = '--hidden'
+
+// 启动项指向的目标：固定带 --hidden，打包后是应用 exe，开发态是 electron.exe + 应用目录
+function getAutoLaunchTarget() {
+  const args = []
+  if (!app.isPackaged) {
+    // 开发态 process.execPath 是 electron.exe，必须把应用目录一起写进命令行，
+    // 否则开机拉起的是 Electron 自带示例页而不是本项目
+    args.push(path.resolve(__dirname, '..'))
+  }
+  args.push(AUTO_LAUNCH_HIDDEN_ARG)
+  return { path: process.execPath, args }
+}
+
+// 读取启动项状态。executableWillLaunchAtLogin 会忽略 args，
+// 用它兜住历史遗留的「不带 --hidden」启动项，避免用户明明开着自启动却显示为关闭。
+function readAutoLaunchState() {
   try {
-    return app.getLoginItemSettings().openAtLogin
+    const settings = app.getLoginItemSettings(getAutoLaunchTarget())
+    return {
+      enabled: !!settings.openAtLogin || !!settings.executableWillLaunchAtLogin,
+      silent: !!settings.openAtLogin
+    }
   } catch (error) {
     console.error('读取开机自启动状态失败:', error)
-    return false
+    return { enabled: false, silent: false }
   }
-})
+}
+
+ipcMain.handle('auto-launch:get', () => readAutoLaunchState().enabled)
 
 ipcMain.handle('auto-launch:set', (event, enable) => {
   try {
+    const target = getAutoLaunchTarget()
     app.setLoginItemSettings({
       openAtLogin: !!enable,
-      // 打包后指向应用 exe；开发态指向 electron.exe（便于本地调试）
-      path: process.execPath,
-      args: []
+      path: target.path,
+      args: target.args
     })
-    return { success: true, enabled: app.getLoginItemSettings().openAtLogin }
+    if (!enable) {
+      // 旧版本写入的启动项不带参数，Run 键同名但命令行不同，补删一次以彻底关闭
+      try {
+        app.setLoginItemSettings({ openAtLogin: false, path: process.execPath, args: [] })
+      } catch {}
+    }
+    // 回读真实状态再返回：写入可能被组策略/安全软件拦截，不能让开关显示成已开启
+    const state = readAutoLaunchState()
+    return { success: true, enabled: state.enabled, silent: state.silent }
   } catch (error) {
     console.error('设置开机自启动失败:', error)
     return { success: false, error: error.message }
   }
 })
+
+// 启动项自愈：只处理「已经开着自启动」的用户——旧版本写入的启动项不带 --hidden，
+// 登录时会直接弹出主窗口。这里重写一次让静默启动立即生效。
+// 启动项不存在时什么都不做（不默认强制开启，避免应用无故常驻后台）。
+function repairAutoLaunchEntry() {
+  if (!app.isPackaged) return // 开发态不碰注册表，避免留下指向 electron.exe 的启动项
+  try {
+    const target = getAutoLaunchTarget()
+    const settings = app.getLoginItemSettings(target)
+    if (settings.openAtLogin) return
+    if (!settings.executableWillLaunchAtLogin) return
+    app.setLoginItemSettings({ openAtLogin: true, path: target.path, args: target.args })
+    console.log('[auto-launch] 历史启动项已迁移为静默启动（--hidden）')
+  } catch (error) {
+    console.error('[auto-launch] 启动项自愈失败:', error)
+  }
+}
 
 // === DeepSeek BrowserView 管理（替代 webview 标签，彻底解决尺寸问题）===
 let deepSeekView = null
@@ -1039,7 +1093,7 @@ function verifyExternalDist(externalDir) {
 
 function createWindow() {
   // 开机自启动带 --hidden 参数：静默驻留托盘，不弹窗口；用户手动双击则正常显示
-  const startHidden = process.argv.includes('--hidden')
+  const startHidden = process.argv.includes(AUTO_LAUNCH_HIDDEN_ARG)
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -1243,6 +1297,9 @@ if (!gotTheLock) {
     // 开机自启动：不再默认强制开启（原逻辑打包后每次启动幂等写入注册表 + --hidden 静默驻留）。
     // 改为由用户在设置界面通过 auto-launch:set 手动控制，避免应用默认持续后台驻留增大攻击面。
     // （若用户曾手动开启，注册表项已存在，app 启动仍会自动拉起，符合用户预期）
+    // 唯一例外是启动项自愈：仅当启动项已存在但缺少 --hidden（旧版本写法）时补写参数，
+    // 让「已开启自启动」的用户立刻获得静默启动，不会凭空新建启动项。
+    repairAutoLaunchEntry()
 
     createWindow()
     createTray()

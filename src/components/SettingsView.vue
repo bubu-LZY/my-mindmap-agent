@@ -498,7 +498,7 @@
         <div class="auto-launch-row">
           <div class="auto-launch-info">
             <div class="safety-block-title">开机自启动</div>
-            <p class="safety-block-desc">启用后，登录 Windows 时自动启动本应用（写入注册表启动项）。</p>
+            <p class="safety-block-desc">启用后，登录 Windows 时自动在后台静默启动（写入注册表启动项）：只在系统托盘显示图标，不会打开主界面；双击托盘图标即可随时唤出窗口。</p>
           </div>
           <el-switch
             v-model="autoLaunch"
@@ -991,7 +991,7 @@
       <p v-else-if="updateState.status === 'available'" style="color: #e6a23c;">
         发现新版本 {{ updateState.latestVersion }}（当前 {{ updateState.currentVersion }}）。
       </p>
-      <p>my-mindmap agent v4.21.1</p>
+      <p>my-mindmap agent v4.22.0</p>
       <p>基于 simple-mind-map + Vue3 + Electron</p>
       <p>本项目由 bubu-lzy 结合 AI 工具制作，基于思维导图二创。若有疑问请联系 2995136355@qq.com</p>
       <p>
@@ -2042,13 +2042,18 @@ const onAutoLaunchChange = async (enabled) => {
   autoLaunchLoading.value = true
   try {
     const res = await window.electronAPI.autoLaunch.set(enabled)
-    if (res && res.success) {
-      autoLaunch.value = res.enabled
-      ElMessage.success(res.enabled ? '已开启开机自启动' : '已关闭开机自启动')
-    } else {
+    if (!res || !res.success) {
       autoLaunch.value = !enabled
       ElMessage.error('设置失败: ' + (res?.error || '未知错误'))
+      return
     }
+    // 以主进程回读的真实状态为准，避免写入被系统拦截却显示成已开启
+    autoLaunch.value = res.enabled
+    if (res.enabled !== enabled) {
+      ElMessage.warning('设置未生效，请在 Windows「设置 → 应用 → 启动」中确认本应用未被禁用')
+      return
+    }
+    ElMessage.success(res.enabled ? '已开启开机自启动，登录后将静默启动到系统托盘' : '已关闭开机自启动')
   } catch (e) {
     autoLaunch.value = !enabled
     ElMessage.error('设置失败: ' + e.message)
